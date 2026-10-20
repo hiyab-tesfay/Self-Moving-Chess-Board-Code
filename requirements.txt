@@ -1,1 +1,2 @@
 chess==1.11.2
+opencv-contrib-python-headless>=4.10,<5
