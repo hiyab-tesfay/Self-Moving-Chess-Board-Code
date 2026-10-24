@@ -238,6 +238,8 @@ a { color: inherit; text-decoration: none; }
   transition: transform .13s ease-out;
   pointer-events: none;
 }
+/* 0.5x speed: the normal 130ms move takes 260ms for the bot. */
+.piece.bot-move { transition-duration: calc(.13s / .5); }
 .piece.dragging { transition: none; z-index: 10; transform-origin: center; filter: drop-shadow(0 4px 6px rgba(0,0,0,.45)); }
 .piece.noanim { transition: none; }
 .piece.wK { background-image: var(--piece-wK, url("assets/pieces/wK.svg")); }

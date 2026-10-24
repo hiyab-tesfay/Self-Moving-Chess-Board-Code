@@ -311,7 +311,7 @@
   }
 
   /** Repaint squares and pieces. `anim` maps destination square -> origin square to slide from. */
-  function renderBoard(anim) {
+  function renderBoard(anim, botMove = false) {
     const snap = currentSnapshot();
     const live = state.viewPly === null;
     const cells = el.squares.children;
@@ -342,6 +342,7 @@
       if (!p) continue;
       const d = document.createElement('div');
       d.className = `piece ${colorOf(p)}${typeOf(p).toUpperCase()} noanim`;
+      if (botMove) d.classList.add('bot-move');
       d.dataset.sq = sqi;
       const from = anim && anim[sqi] !== undefined ? anim[sqi] : sqi;
       const [x, y] = toXY(from);
@@ -460,9 +461,9 @@
     el.gameTitle.textContent = `${tcTitle(state.tc)} • ${opponentLabel()}`;
   }
 
-  function renderAll(anim) {
+  function renderAll(anim, botMove = false) {
     renderFrameLabels();
-    renderBoard(anim);
+    renderBoard(anim, botMove);
     renderPlayers();
     renderMoves();
     renderControls();
@@ -624,7 +625,7 @@
       if (m.flags & FLAGS.CASTLE_K) anim[m.to - 1] = m.to + 1;
       if (m.flags & FLAGS.CASTLE_Q) anim[m.to + 1] = m.to - 2;
     }
-    renderAll(anim);
+    renderAll(anim, opts.source === 'engine' || opts.source === 'bot');
 
     const over = g.gameOver();
     if (over) {
@@ -640,6 +641,9 @@
     return rec;
   }
 
+  // Run the engine and this presentation delay together so engine time is included.
+  const botThinkMilliseconds = () => 1000 + Math.random() * 2000;
+
   /** Send the human move to chess_game.py and play Stockfish's reply. */
   async function requestEngineMove(rec) {
     const id = state.gameId;
@@ -647,7 +651,10 @@
     renderPlayers();
     renderControls();
     try {
-      const res = await Backend.move(sqName(rec.move.from), sqName(rec.move.to), rec.move.promo || null);
+      const [res] = await Promise.all([
+        Backend.move(sqName(rec.move.from), sqName(rec.move.to), rec.move.promo || null),
+        new Promise((resolve) => setTimeout(resolve, botThinkMilliseconds())),
+      ]);
       if (id !== state.gameId || state.status !== 'playing') return;
       state.thinking = false;
       if (res.computer && res.computer.uci) {
@@ -679,17 +686,26 @@
   function scheduleBot() {
     const id = state.gameId;
     clearTimeout(state.botTimer);
+    state.thinking = true;
+    renderPlayers();
+    renderControls();
     state.botTimer = setTimeout(() => {
       if (id !== state.gameId || state.status !== 'playing') return;
       const g = state.game;
       const moves = g.legalMoves();
-      if (!moves.length) return;
+      if (!moves.length) {
+        state.thinking = false;
+        renderPlayers();
+        renderControls();
+        return;
+      }
       const caps = moves.filter((m) => m.flags & FLAGS.CAPTURE);
       const pool = caps.length && Math.random() < 0.65 ? caps : moves;
       let m = pool[Math.floor(Math.random() * pool.length)];
       if (m.promo) m = pool.find((x) => x.from === m.from && x.to === m.to && x.promo === 'q') || m;
+      state.thinking = false;
       commitMove(m, { animate: true, source: 'bot' });
-    }, 450 + Math.random() * 800);
+    }, botThinkMilliseconds());
   }
 
   function endGame(winner, reason) {
