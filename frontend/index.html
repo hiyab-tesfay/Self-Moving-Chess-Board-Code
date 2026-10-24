@@ -37,6 +37,13 @@
 
 <main class="layout">
   <section class="board-column">
+    <div class="piece-style-control">
+      <span id="piece-style-label">Chess pieces</span>
+      <div class="piece-style-options" role="group" aria-labelledby="piece-style-label">
+        <button type="button" data-piece-style="duen" aria-pressed="true">DUEN</button>
+        <button type="button" data-piece-style="regular" aria-pressed="false">Regular</button>
+      </div>
+    </div>
     <div class="player-bar" id="player-top">
       <div class="avatar"></div>
       <div class="player-meta">

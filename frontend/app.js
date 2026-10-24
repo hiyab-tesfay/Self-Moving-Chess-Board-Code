@@ -96,6 +96,7 @@
     pendingPromo: null,
     drag: null,
     sound: true,
+    pieceStyle: 'duen',
     hoverSq: null,
   };
 
@@ -229,7 +230,7 @@
 
   function save() {
     try {
-      localStorage.setItem('duen.chess.prefs', JSON.stringify({ tc: state.tc.id, color: state.colorPref, sound: state.sound, level: state.level }));
+      localStorage.setItem('duen.chess.prefs', JSON.stringify({ tc: state.tc.id, color: state.colorPref, sound: state.sound, level: state.level, pieceStyle: state.pieceStyle }));
     } catch (e) { /* ignore */ }
   }
   function restore() {
@@ -238,9 +239,41 @@
       if (p.tc) state.tc = TIME_CONTROLS.find((t) => t.id === p.tc) || state.tc;
       if (p.color) state.colorPref = p.color;
       if (p.level) state.level = p.level;
+      if (p.pieceStyle === 'regular') state.pieceStyle = 'regular';
       if (typeof p.sound === 'boolean') state.sound = p.sound;
     } catch (e) { /* ignore */ }
   }
+
+  function pieceAsset(piece) {
+    return `assets/${state.pieceStyle === 'regular' ? 'regular' : 'pieces'}/${piece}.svg`;
+  }
+
+  function applyPieceStyle() {
+    for (const color of ['w', 'b']) {
+      for (const type of ['K', 'Q', 'R', 'B', 'N', 'P']) {
+        document.documentElement.style.setProperty(`--piece-${color}${type}`, `url("${pieceAsset(color + type)}")`);
+      }
+    }
+    $$('.piece-style-options button').forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.pieceStyle === state.pieceStyle));
+    });
+    $$('#color-pick img').forEach((image) => {
+      image.src = pieceAsset(image.closest('button').dataset.color + 'K');
+    });
+    renderPlayers();
+    if (state.pendingPromo) {
+      const { from, to, cands, opts } = state.pendingPromo;
+      showPromotion(from, to, cands, opts);
+    }
+  }
+
+  $$('.piece-style-options button').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.pieceStyle = button.dataset.pieceStyle;
+      save();
+      applyPieceStyle();
+    });
+  });
 
   // ----------------------------------------------------------------- board rendering
 
@@ -353,7 +386,7 @@
       for (const t of captured[color]) (groups[t] = groups[t] || []).push(t);
       for (const t of ['p', 'n', 'b', 'r', 'q']) {
         if (!groups[t]) continue;
-        html += '<span class="grp">' + groups[t].map(() => `<img src="assets/pieces/${opp(color)}${t.toUpperCase()}.svg" alt="">`).join('') + '</span>';
+        html += '<span class="grp">' + groups[t].map(() => `<img src="${pieceAsset(opp(color) + t.toUpperCase())}" alt="">`).join('') + '</span>';
       }
       const adv = color === 'w' ? balance : -balance;
       if (adv > 0) html += `<span class="adv">+${adv}</span>`;
@@ -790,7 +823,7 @@
     el.promo.className = 'promo' + (y === 7 ? ' bottom' : '');
     el.promo.style.left = `${x * 12.5}%`;
     el.promo.innerHTML = ['q', 'n', 'r', 'b'].map((t) =>
-      `<button type="button" data-promo="${t}" style="background-image:url('assets/pieces/${color}${t.toUpperCase()}.svg')" title="${t}"></button>`).join('') +
+      `<button type="button" data-promo="${t}" style="background-image:url('${pieceAsset(color + t.toUpperCase())}')" title="${t}"></button>`).join('') +
       '<button type="button" class="x" data-promo="cancel">×</button>';
     renderBoard();
   }
@@ -1041,6 +1074,7 @@
   // ----------------------------------------------------------------- boot
 
   restore();
+  applyPieceStyle();
   buildSquares();
   pushSnapshot(null);
   renderNewGamePanel();
