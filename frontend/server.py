@@ -35,7 +35,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import chess  # noqa: E402
-from chess_game import DIFFICULTIES, ChessGame, PromotionRequired, StockfishPlayer  # noqa: E402
+from backend.chess_game import DIFFICULTIES, ChessGame, PromotionRequired, StockfishPlayer  # noqa: E402
 
 
 class ApiError(Exception):
