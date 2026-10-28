@@ -44,7 +44,9 @@ After installing the Python dependencies and Stockfish above, run:
 .venv/bin/python frontend/server.py
 ```
 
-Open http://127.0.0.1:8000. To serve on a Raspberry Pi's local network, run
+Open http://127.0.0.1:8000 for the animated landing page, then choose
+**Play chess** (or open http://127.0.0.1:8000/play.html directly).
+To serve on a Raspberry Pi's local network, run
 `.venv/bin/python frontend/server.py --host 0.0.0.0` and open
 http://chessboard.local:8000 from a device on the same network.
 The web interface includes both piece styles and connects to the Python backend
@@ -54,7 +56,9 @@ for Stockfish games. Keep this local development server on a trusted network.
 
 - `backend/`: shared Python chess rules and Stockfish integration.
 - `desktop/`: Tkinter desktop interface (`python -m desktop.simulator`).
-- `frontend/`: browser interface, assets, and its Python HTTP/API server.
+- `frontend/`: landing page, browser game, assets, and its Python HTTP/API server.
+  `index.html` opens the landing page; `play.html` opens the existing game.
+  `assets/vendor/` includes the locally served Three.js runtime and its license.
 - `frontend/test/`: JavaScript move-generation and chess rules checks.
 - `test/`: Python rules and Stockfish integration checks.
 - `CAD Files/`: existing mechanical-design files.
