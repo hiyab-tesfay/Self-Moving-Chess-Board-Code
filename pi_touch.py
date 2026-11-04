@@ -172,13 +172,14 @@ class TouchApp:
         self.calibration = None
         self.reference = None
         self.session: TouchSession | None = None
-        self.calibration_flow: CalibrationFlow | None = None
+        self.calibration_flow: CalibrationFlow | None = CalibrationFlow()
+        self.startup_calibration = True
         self.preview_photo: tk.PhotoImage | None = None
         self.preview_geometry: tuple[float, float, float] | None = None
         self.level = "beginner"
         self.busy = False
         self.selected_square: str | None = None
-        self.message = "Choose a difficulty to begin."
+        self.message = "Calibrate the board, or use a saved calibration."
         self.message_color = self.MUTED
         screen_width = 800 if args.windowed else root.winfo_screenwidth()
         screen_height = 480 if args.windowed else root.winfo_screenheight()
@@ -331,7 +332,10 @@ class TouchApp:
         if flow.stage == "empty":
             self.heading("1. Empty board", "Remove every piece. Keep the whole board in the camera view.")
             self.button("Take Empty Photo", self.capture_empty, accent=True)
-            self.button("Back to Menu", self.cancel_calibration)
+            if self.saved_calibration_available():
+                self.button("Use Saved Calibration", self.use_saved_calibration)
+            if not self.startup_calibration:
+                self.button("Back to Menu", self.cancel_calibration)
         elif flow.stage == "corners":
             next_corner = flow.CORNER_NAMES[len(flow.corners)]
             self.heading("2. Mark corners", f"Tap the outer {next_corner} corner on the photo. Keep the camera fixed.")
@@ -346,8 +350,19 @@ class TouchApp:
             self.button("Cancel Calibration", self.cancel_calibration)
         else:
             self.heading("Calibration saved", "The starting board was verified. You can now play.")
-            self.button("Start Game", self.start_after_calibration, accent=True)
-            self.button("Back to Menu", self.cancel_calibration)
+            self.button("Choose Difficulty", self.continue_after_calibration, accent=True)
+
+    def saved_calibration_available(self) -> bool:
+        return ((self.args.calibration / "calibration.json").is_file() and
+                (self.args.calibration / "empty_warp.png").is_file())
+
+    def use_saved_calibration(self) -> None:
+        if self.calibration_flow is None or self.busy or not self.saved_calibration_available():
+            return
+        self.busy = True
+        self.say("Checking saved calibration…")
+        self.render()
+        self.submit("saved_calibration", lambda: load_calibration(self.args.calibration))
 
     def start_calibration(self) -> None:
         if self.session is not None or self.busy:
@@ -362,10 +377,11 @@ class TouchApp:
     def cancel_calibration(self) -> None:
         self.generation += 1
         self.busy = False
-        self.calibration_flow = None
+        self.calibration_flow = CalibrationFlow() if self.startup_calibration else None
         self.preview_photo = None
         self.preview_geometry = None
-        self.say("Choose a difficulty or calibrate the board.")
+        self.say("Calibrate the board, or use a saved calibration." if self.startup_calibration else
+                 "Choose a difficulty or recalibrate the board.")
         self.render()
 
     def retake_empty(self) -> None:
@@ -429,11 +445,13 @@ class TouchApp:
 
         self.submit("cal_starting", take_photo)
 
-    def start_after_calibration(self) -> None:
+    def continue_after_calibration(self) -> None:
+        self.startup_calibration = False
         self.calibration_flow = None
         self.preview_photo = None
         self.preview_geometry = None
-        self.start_game()
+        self.say("Calibration is ready. Choose a difficulty to begin.", self.GREEN)
+        self.render()
 
     def submit(self, tag: str, work) -> None:
         generation = self.generation
@@ -501,7 +519,12 @@ class TouchApp:
         self.root.after(70, self.poll_results)
 
     def handle_result(self, tag: str, value) -> None:
-        if tag == "cal_empty":
+        if tag == "saved_calibration":
+            self.calibration, self.reference = value
+            self.startup_calibration = False
+            self.calibration_flow = None
+            self.say("Saved calibration loaded. Choose a difficulty to begin.", self.GREEN)
+        elif tag == "cal_empty":
             flow = self.calibration_flow
             assert flow is not None
             photo, uses_markers = value
@@ -522,7 +545,7 @@ class TouchApp:
             save_calibration(self.args.calibration, calibration, reference)
             self.calibration, self.reference = calibration, reference
             flow.stage = "done"
-            self.say("Calibration saved and starting board verified. Tap Start Game.", self.GREEN)
+            self.say("Calibration saved and starting board verified. Tap Choose Difficulty.", self.GREEN)
         elif tag == "start":
             self.calibration, self.reference, self.player = value
             self.session = TouchSession(self.level)
