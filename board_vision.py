@@ -217,18 +217,27 @@ class Calibration:
     corners: list[list[float]] | None
     thresholds: tuple[float, float]
     margins: tuple[float, float]
+    rotation: str = "none"
 
     def to_json(self) -> dict:
-        return {"corners": self.corners, "thresholds": self.thresholds, "margins": self.margins}
+        return {"corners": self.corners, "thresholds": self.thresholds,
+                "margins": self.margins, "rotation": self.rotation}
 
     @classmethod
     def from_json(cls, data: dict) -> "Calibration":
-        return cls(data["corners"], tuple(data["thresholds"]), tuple(data["margins"]))
+        rotation = data.get("rotation", "none")
+        if rotation not in ("none", "cw", "ccw", "180"):
+            raise VisionError(f"Invalid calibration rotation: {rotation}")
+        return cls(data["corners"], tuple(data["thresholds"]), tuple(data["margins"]), rotation)
 
 
-def calibrate(empty: np.ndarray, starting: np.ndarray, corners: list[list[float]] | None = None) -> tuple[Calibration, np.ndarray, dict[str, float]]:
-    reference = warp_board(empty, corners)
-    setup = warp_board(starting, corners)
+def calibrate(empty: np.ndarray, starting: np.ndarray, corners: list[list[float]] | None = None,
+              rotation: str = "none", *,
+              starting_corners: list[list[float]] | None = None) -> tuple[Calibration, np.ndarray, dict[str, float]]:
+    """Calibrate from separately aligned photos; save starting corners for later scans."""
+    reference = rotate_board(warp_board(empty, corners), rotation)
+    scan_corners = starting_corners if starting_corners is not None else corners
+    setup = rotate_board(warp_board(starting, scan_corners), rotation)
     scores = square_scores(reference, setup)
     occupied = frozenset(chess.square_name(square) for square in chess.Board().piece_map())
     thresholds = []
@@ -244,7 +253,7 @@ def calibrate(empty: np.ndarray, starting: np.ndarray, corners: list[list[float]
             )
         thresholds.append((empty_max + occupied_min) / 2)
         margins.append((occupied_min - empty_max) * 0.2)
-    return Calibration(corners, tuple(thresholds), tuple(margins)), reference, scores
+    return Calibration(scan_corners, tuple(thresholds), tuple(margins), rotation), reference, scores
 
 
 @dataclass(frozen=True)
@@ -254,8 +263,10 @@ class Observation:
     scores: dict[str, float]
 
 
-def observe(reference: np.ndarray, photo: np.ndarray, calibration: Calibration) -> tuple[Observation, np.ndarray]:
-    aligned = warp_board(photo, calibration.corners)
+def observe(reference: np.ndarray, photo: np.ndarray, calibration: Calibration,
+            corners: list[list[float]] | None = None) -> tuple[Observation, np.ndarray]:
+    aligned = rotate_board(warp_board(photo, corners if corners is not None else calibration.corners),
+                           calibration.rotation)
     scores = square_scores(reference, aligned)
     occupied = frozenset(square for square, score in scores.items() if score > calibration.thresholds[_group(square)])
     uncertain = tuple(sorted(square for square, score in scores.items()

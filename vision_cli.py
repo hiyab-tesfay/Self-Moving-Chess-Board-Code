@@ -52,6 +52,12 @@ def main(argv: list[str] | None = None) -> int:
     setup.add_argument("--out", required=True, type=Path)
     setup.add_argument("--corners", nargs=8, type=float, metavar=("TL_X", "TL_Y", "TR_X", "TR_Y", "BR_X", "BR_Y", "BL_X", "BL_Y"),
                        help="Board corners in image pixels; omit to use ArUco markers 0,1,2,3")
+    setup.add_argument("--empty-corners", nargs=8, type=float, metavar=("TL_X", "TL_Y", "TR_X", "TR_Y", "BR_X", "BR_Y", "BL_X", "BL_Y"),
+                       help="Empty-photo corners when the camera shifted; use with --starting-corners")
+    setup.add_argument("--starting-corners", nargs=8, type=float, metavar=("TL_X", "TL_Y", "TR_X", "TR_Y", "BR_X", "BR_Y", "BL_X", "BL_Y"),
+                       help="Starting-photo corners when the camera shifted; use with --empty-corners")
+    setup.add_argument("--rotate", choices=("none", "cw", "ccw", "180"), default="none",
+                       help="Rotate the straightened board so a8 is at top left")
 
     for name, help_text in (("inspect", "Show square changes without judging move legality"),
                             ("compare", "Find a legal move from before/after photos")):
@@ -75,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--image", required=True, type=Path)
         command.add_argument("--fen", help="Known position before this photo (default: starting position)")
         command.add_argument("--moves", nargs="*", default=[], help="Legal UCI moves after --fen, e.g. e2e4 e7e5")
+        command.add_argument("--corners", nargs=8, type=float, metavar=("TL_X", "TL_Y", "TR_X", "TR_Y", "BR_X", "BR_Y", "BL_X", "BL_Y"),
+                             help="Corners for this photo if they differ from saved calibration")
         command.add_argument("--debug", type=Path, help="Write an annotated, straightened image")
 
     args = parser.parse_args(argv)
@@ -93,7 +101,13 @@ def main(argv: list[str] | None = None) -> int:
             print("Align each sticker's outer corner nearest the board with the board's outer corner.")
             return 0
         if args.command == "calibrate":
-            calibration, reference, scores = calibrate(read_image(args.empty), read_image(args.starting), _corners(args.corners))
+            if bool(args.empty_corners) != bool(args.starting_corners) or (args.corners and args.empty_corners):
+                parser.error("Use --corners alone, or both --empty-corners and --starting-corners.")
+            empty_corners = _corners(args.empty_corners or args.corners)
+            starting_corners = _corners(args.starting_corners) if args.starting_corners else None
+            calibration, reference, scores = calibrate(read_image(args.empty), read_image(args.starting),
+                                                       empty_corners, args.rotate,
+                                                       starting_corners=starting_corners)
             save_calibration(args.out, calibration, reference)
             print(f"Saved calibration to {args.out}")
             print(f"Thresholds by square color: {calibration.thresholds[0]:.1f}, {calibration.thresholds[1]:.1f}")
@@ -159,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
 
         calibration, reference = load_calibration(args.calibration)
         board = _board(args)
-        observation, aligned = observe(reference, read_image(args.image), calibration)
+        observation, aligned = observe(reference, read_image(args.image), calibration, _corners(args.corners))
         _print_grid(observation.occupied, observation.uncertain)
         if args.debug:
             args.debug.parent.mkdir(parents=True, exist_ok=True)
