@@ -192,6 +192,7 @@ class TouchApp:
             root.geometry("800x480")
             root.minsize(800, 480)
         else:
+            root.geometry(f"{screen_width}x{screen_height}+0+0")
             root.attributes("-fullscreen", True)
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<Escape>", lambda _event: self.close())
@@ -218,7 +219,18 @@ class TouchApp:
         root.grid_columnconfigure(0, weight=1)
         root.grid_columnconfigure(1, minsize=self.panel_width + (10 if self.compact else 20))
         self.render()
+        if not args.windowed:
+            root.after(250, self.ensure_fullscreen)
         root.after(70, self.poll_results)
+
+    def ensure_fullscreen(self) -> None:
+        """Repeat the full-screen request after the desktop maps the window."""
+        if self.closed:
+            return
+        self.root.geometry(
+            f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0"
+        )
+        self.root.attributes("-fullscreen", True)
 
     def say(self, message: str, color: str | None = None) -> None:
         self.message = message
