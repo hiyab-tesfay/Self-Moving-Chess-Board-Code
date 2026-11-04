@@ -10,7 +10,7 @@ Use 64-bit Raspberry Pi OS, Python 3.10 or newer, and a Pi camera or USB webcam.
 
 ```sh
 sudo apt update
-sudo apt install python3-venv stockfish rpicam-apps
+sudo apt install python3-venv python3-tk stockfish rpicam-apps
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
@@ -46,5 +46,32 @@ Once `check` and `scan` work with the physical board:
 ```
 
 The program verifies the starting setup, scans each White move, announces Stockfish's Black move, and verifies the board after you make it. It asks for a new photo when the observation is uncertain or disagrees with the expected position. Enter `q` to quit. A new session starts from the standard position.
+
+## Touch screen play
+
+Connect the LCD touch screen and make sure Raspberry Pi OS shows its desktop on that display and touch input works. Complete `setup`, `check`, and `scan` above before starting a game. From a desktop terminal, launch the full-screen touch interface:
+
+```sh
+.venv/bin/python pi_touch.py
+```
+
+For a USB camera, use `--camera usb` (and `--device 1` if needed). For development in a normal window, add `--windowed`. If calibration used manually specified corners rather than visible ArUco markers or saved fixed corners, pass `--corners TL_X TL_Y TR_X TR_Y BR_X BR_Y BL_X BL_Y` as with `pi_game.py`.
+
+Select Beginner, Intermediate, or Advanced, then tap **Start Game**. Place the pieces in the starting position and tap **Scan Starting Board**. Move White on the physical board and tap **Scan Move**. A legal move appears in green; an unchanged, uncertain, or unmatched board asks you to correct it and scan again. Tap a white piece on the displayed board to see its legal destination squares. If several legal moves look identical to the camera, choose the actual move on screen; this includes choosing Queen, Rook, Bishop, or Knight for promotion. Follow Stockfish's displayed move on the physical board, then tap **Verify Computer Move**. **End Game** records a resignation, and the result screen offers **New Game**. Press Escape to exit the app when using a keyboard.
+
+The camera observes occupied squares, not piece identities. It cannot independently prove which piece was placed on a square or distinguish promotions and some captures from the image alone. Keep the physical pieces in sync with the displayed board and use the on-screen choice when prompted. The real LCD, touch coordinates, camera, board, and lighting still require a hardware test.
+
+### Open the touch screen automatically when the Pi starts
+
+On the Pi, use Raspberry Pi OS **Desktop** with the **labwc** window manager. In **Preferences → Control Centre → System**, set **Boot** to **To desktop** and turn on **Desktop Auto Login**. In the **Display** tab, turn off **Screen Blanking** if the menu should stay visible while idle. Raspberry Pi's [configuration guide](https://www.raspberrypi.com/documentation/computers/configuration.html) describes these settings. Test `pi_touch.py` manually first, then from this project directory run:
+
+```sh
+.venv/bin/python scripts/install_touch_autostart.py
+sudo reboot
+```
+
+After the desktop loads, the chess menu opens full screen on the connected display. For a USB camera, install with `.venv/bin/python scripts/install_touch_autostart.py --camera usb --device 0` (change the device number if necessary). The installer adds one entry to `~/.config/labwc/autostart`, preserving any other entries. It follows Raspberry Pi's [labwc autostart guidance](https://www.raspberrypi.com/tutorials/how-to-use-a-raspberry-pi-in-kiosk-mode/). If the app does not open, check `~/.local/state/chess-board-pi-only/touchscreen.log`.
+
+To stop automatic launch, run `.venv/bin/python scripts/install_touch_autostart.py --remove` on the Pi and reboot. This autostart setup opens the app after the desktop loads; it does not replace the Pi's early boot splash screen.
 
 The `vision_cli.py` commands provide offline calibration, image inspection, and debugging with saved photos. Run `.venv/bin/python vision_cli.py --help` for options.
