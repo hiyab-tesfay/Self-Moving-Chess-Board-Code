@@ -101,6 +101,7 @@ class CalibrationFlowTest(unittest.TestCase):
             save_calibration(Path(directory), calibration, reference)
             loaded, loaded_reference = load_calibration(Path(directory))
             self.assertEqual(loaded.corners, flow.corners)
+            self.assertEqual(loaded.scoring, "local_lighting_v1")
             self.assertEqual(loaded_reference.shape, (800, 800, 3))
 
     def test_marker_flow_skips_manual_corners(self):

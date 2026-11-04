@@ -81,11 +81,17 @@ def rotate_board(image: np.ndarray, rotation: str) -> np.ndarray:
     return cv2.rotate(image, modes[rotation]) if modes[rotation] is not None else image
 
 
-def square_scores(empty_board: np.ndarray, observed_board: np.ndarray) -> dict[str, float]:
+def _aligned_lab_images(empty_board: np.ndarray, observed_board: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if empty_board.shape != (SIZE, SIZE, 3) or observed_board.shape != empty_board.shape:
         raise VisionError("Reference and observed boards must both be aligned 800x800 color images.")
     reference = cv2.GaussianBlur(cv2.cvtColor(empty_board, cv2.COLOR_BGR2LAB), (5, 5), 0).astype(np.float32)
     observed = cv2.GaussianBlur(cv2.cvtColor(observed_board, cv2.COLOR_BGR2LAB), (5, 5), 0).astype(np.float32)
+    return reference, observed
+
+
+def legacy_square_scores(empty_board: np.ndarray, observed_board: np.ndarray) -> dict[str, float]:
+    """Original raw photo difference, retained for existing saved calibrations."""
+    reference, observed = _aligned_lab_images(empty_board, observed_board)
     difference = np.linalg.norm(observed - reference, axis=2)
     scores = {}
     for rank in range(8):
@@ -94,6 +100,33 @@ def square_scores(empty_board: np.ndarray, observed_board: np.ndarray) -> dict[s
             patch = difference[rank * SQUARE + 18:(rank + 1) * SQUARE - 18,
                                file * SQUARE + 18:(file + 1) * SQUARE - 18]
             scores[f"{'abcdefgh'[file]}{8 - rank}"] = float(np.mean(patch))
+    return scores
+
+
+def square_scores(empty_board: np.ndarray, observed_board: np.ndarray) -> dict[str, float]:
+    """Measure pieces after correcting each square for local lighting change.
+
+    The small corner patches normally show bare board even when a piece sits in
+    the middle. Their median color shift estimates the exposure/light change
+    between photos at this square. Only the unexplained center change counts.
+    """
+    reference, observed = _aligned_lab_images(empty_board, observed_board)
+    scores = {}
+    for row in range(8):
+        for col in range(8):
+            top, left = row * SQUARE, col * SQUARE
+            before = reference[top:top + SQUARE, left:left + SQUARE]
+            after = observed[top:top + SQUARE, left:left + SQUARE]
+            change = after - before
+            corners = np.concatenate([
+                change[:15, :15].reshape(-1, 3),
+                change[:15, -15:].reshape(-1, 3),
+                change[-15:, :15].reshape(-1, 3),
+                change[-15:, -15:].reshape(-1, 3),
+            ])
+            lighting_shift = np.median(corners, axis=0)
+            center = change[18:SQUARE - 18, 18:SQUARE - 18] - lighting_shift
+            scores[f"{'abcdefgh'[col]}{8 - row}"] = float(np.mean(np.linalg.norm(center, axis=2)))
     return scores
 
 
@@ -218,17 +251,22 @@ class Calibration:
     thresholds: tuple[float, float]
     margins: tuple[float, float]
     rotation: str = "none"
+    scoring: str = "local_lighting_v1"
 
     def to_json(self) -> dict:
         return {"corners": self.corners, "thresholds": self.thresholds,
-                "margins": self.margins, "rotation": self.rotation}
+                "margins": self.margins, "rotation": self.rotation, "scoring": self.scoring}
 
     @classmethod
     def from_json(cls, data: dict) -> "Calibration":
         rotation = data.get("rotation", "none")
         if rotation not in ("none", "cw", "ccw", "180"):
             raise VisionError(f"Invalid calibration rotation: {rotation}")
-        return cls(data["corners"], tuple(data["thresholds"]), tuple(data["margins"]), rotation)
+        scoring = data.get("scoring", "legacy")
+        if scoring not in ("legacy", "local_lighting_v1"):
+            raise VisionError(f"Invalid calibration scoring method: {scoring}")
+        return cls(data["corners"], tuple(data["thresholds"]), tuple(data["margins"]),
+                   rotation, scoring)
 
 
 def calibrate(empty: np.ndarray, starting: np.ndarray, corners: list[list[float]] | None = None,
@@ -267,7 +305,8 @@ def observe(reference: np.ndarray, photo: np.ndarray, calibration: Calibration,
             corners: list[list[float]] | None = None) -> tuple[Observation, np.ndarray]:
     aligned = rotate_board(warp_board(photo, corners if corners is not None else calibration.corners),
                            calibration.rotation)
-    scores = square_scores(reference, aligned)
+    scoring = legacy_square_scores if calibration.scoring == "legacy" else square_scores
+    scores = scoring(reference, aligned)
     occupied = frozenset(square for square, score in scores.items() if score > calibration.thresholds[_group(square)])
     uncertain = tuple(sorted(square for square, score in scores.items()
                              if abs(score - calibration.thresholds[_group(square)]) <= calibration.margins[_group(square)]))

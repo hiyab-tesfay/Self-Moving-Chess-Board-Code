@@ -535,7 +535,11 @@ class TouchApp:
             self.calibration, self.reference = value
             self.startup_calibration = False
             self.calibration_flow = None
-            self.say("Saved calibration loaded. Choose a difficulty to begin.", self.GREEN)
+            if self.calibration.scoring == "legacy":
+                self.say("Saved calibration uses the older lighting method. Recalibrate for light correction.",
+                         self.GOLD)
+            else:
+                self.say("Saved calibration loaded. Choose a difficulty to begin.", self.GREEN)
         elif tag == "cal_empty":
             flow = self.calibration_flow
             assert flow is not None
