@@ -83,32 +83,55 @@ class CalibrationFlowTest(unittest.TestCase):
             color = (25, 25, 25) if piece.color == chess.BLACK else (245, 245, 245)
             cv2.circle(starting, (col * 100 + 50, row * 100 + 50), 32, color, -1)
 
+        empty_photo = np.zeros((1000, 1200, 3), dtype=np.uint8)
+        empty_photo[100:900, 100:900] = empty
+        starting_photo = np.zeros((1000, 1200, 3), dtype=np.uint8)
+        starting_photo[150:950, 250:1050] = starting
+
         flow = CalibrationFlow()
-        flow.accept_empty(empty, uses_markers=False)
-        self.assertEqual(flow.stage, "corners")
-        for x, y in ((0, 0), (799, 0), (799, 799)):
+        flow.accept_empty(empty_photo, detected_corners=None)
+        self.assertEqual(flow.stage, "empty_corners")
+        for x, y in ((100, 100), (899, 100), (899, 899)):
             flow.add_corner(x, y)
         flow.undo_corner()
-        self.assertEqual(len(flow.corners), 2)
-        flow.add_corner(799, 799)
-        flow.add_corner(0, 799)
+        self.assertEqual(len(flow.empty_corners), 2)
+        flow.add_corner(899, 899)
+        flow.add_corner(100, 899)
         self.assertEqual(flow.stage, "starting")
+        flow.accept_starting(starting_photo, detected_corners=None)
+        self.assertEqual(flow.stage, "starting_corners")
+        for x, y in ((250, 150), (1049, 150), (1049, 949), (250, 949)):
+            flow.add_corner(x, y)
+        self.assertEqual(flow.stage, "ready")
 
         with self.assertRaises(VisionError):
-            calibrate_photos(empty, empty, flow.corners)
-        calibration, reference = calibrate_photos(empty, starting, flow.corners)
+            calibrate_photos(empty_photo, empty_photo,
+                             flow.empty_corners, flow.starting_corners)
+        with self.assertRaises(VisionError):
+            calibrate_photos(empty_photo, starting_photo,
+                             flow.empty_corners, flow.empty_corners)
+        calibration, reference = calibrate_photos(
+            empty_photo, starting_photo, flow.empty_corners, flow.starting_corners)
         with tempfile.TemporaryDirectory() as directory:
             save_calibration(Path(directory), calibration, reference)
             loaded, loaded_reference = load_calibration(Path(directory))
-            self.assertEqual(loaded.corners, flow.corners)
+            self.assertEqual(loaded.corners, flow.starting_corners)
             self.assertEqual(loaded.scoring, "local_lighting_v1")
             self.assertEqual(loaded_reference.shape, (800, 800, 3))
 
     def test_marker_flow_skips_manual_corners(self):
         flow = CalibrationFlow()
-        flow.accept_empty(np.zeros((10, 10, 3), dtype=np.uint8), uses_markers=True)
+        corners = [[0, 0], [9, 0], [9, 9], [0, 9]]
+        flow.accept_empty(np.zeros((10, 10, 3), dtype=np.uint8), detected_corners=corners)
         self.assertEqual(flow.stage, "starting")
-        self.assertEqual(flow.corners, [])
+        flow.accept_starting(np.zeros((10, 10, 3), dtype=np.uint8), detected_corners=corners)
+        self.assertEqual(flow.stage, "ready")
+        self.assertEqual(flow.empty_corners, corners)
+        self.assertEqual(flow.starting_corners, corners)
+        flow.retake_starting()
+        self.assertEqual(flow.stage, "starting")
+        flow.accept_starting(np.zeros((10, 10, 3), dtype=np.uint8), detected_corners=None)
+        self.assertEqual(flow.stage, "starting_corners")
 
 
 if __name__ == "__main__":

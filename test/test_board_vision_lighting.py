@@ -75,6 +75,17 @@ class LightingCorrectionTest(unittest.TestCase):
         observation, _ = observe(empty, brighter, old_calibration, CORNERS)
         self.assertEqual(len(observation.occupied), 64)
 
+    def test_move_photo_can_use_its_own_corners(self):
+        empty = board_photo()
+        board = chess.Board()
+        calibration, reference, _ = calibrate(empty, board_photo(board), CORNERS)
+        board.push_uci("e2e4")
+        shifted_photo = np.zeros((1000, 1200, 3), dtype=np.uint8)
+        shifted_photo[130:930, 270:1070] = board_photo(board)
+        corners = [[270, 130], [1069, 130], [1069, 929], [270, 929]]
+        observation, _ = observe(reference, shifted_photo, calibration, corners)
+        self.assertEqual(observation.occupied, occupied_squares(board))
+
 
 if __name__ == "__main__":
     unittest.main()
