@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import queue
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import chess
+import cv2
+import numpy as np
 
-from board_vision import load_calibration
+from board_vision import (VisionError, board_corners, calibrate, load_calibration,
+                          observe, read_image, save_calibration)
 from chess_game import ChessGame, DIFFICULTIES, StockfishPlayer
 from move_observation import match_legal_moves, occupied_squares
 from pi_camera import Camera
@@ -19,6 +23,54 @@ from pi_game import capture_observation, verifies_move
 
 class MoveRejected(ValueError):
     """The physical board cannot safely advance to the next position."""
+
+
+class CalibrationFlow:
+    """Touch calibration steps; photos are processed off the Tk main thread."""
+
+    CORNER_NAMES = ("top-left", "top-right", "bottom-right", "bottom-left")
+
+    def __init__(self) -> None:
+        self.stage = "empty"
+        self.empty_photo: np.ndarray | None = None
+        self.uses_markers = False
+        self.corners: list[list[float]] = []
+
+    def accept_empty(self, photo: np.ndarray, uses_markers: bool) -> None:
+        if self.stage != "empty":
+            raise ValueError("The empty board was already photographed.")
+        self.empty_photo = photo
+        self.uses_markers = uses_markers
+        self.corners = []
+        self.stage = "starting" if uses_markers else "corners"
+
+    def add_corner(self, x: float, y: float) -> None:
+        if self.stage != "corners" or len(self.corners) == 4:
+            raise ValueError("Board corners are not being selected.")
+        self.corners.append([x, y])
+        if len(self.corners) == 4:
+            self.stage = "starting"
+
+    def undo_corner(self) -> None:
+        if self.stage not in ("corners", "starting") or self.uses_markers or not self.corners:
+            return
+        self.corners.pop()
+        self.stage = "corners"
+
+    def reset_corners(self) -> None:
+        if not self.uses_markers and self.empty_photo is not None:
+            self.corners = []
+            self.stage = "corners"
+
+
+def calibrate_photos(empty: np.ndarray, starting: np.ndarray,
+                     corners: list[list[float]] | None):
+    """Build and verify calibration before writing it to disk."""
+    calibration, reference, _scores = calibrate(empty, starting, corners)
+    observation, _aligned = observe(reference, starting, calibration, corners)
+    if observation.uncertain or observation.occupied != occupied_squares(chess.Board()):
+        raise VisionError("Starting board could not be verified. Check the pieces, corners, and lighting.")
+    return calibration, reference
 
 
 class TouchSession:
@@ -120,6 +172,9 @@ class TouchApp:
         self.calibration = None
         self.reference = None
         self.session: TouchSession | None = None
+        self.calibration_flow: CalibrationFlow | None = None
+        self.preview_photo: tk.PhotoImage | None = None
+        self.preview_geometry: tuple[float, float, float] | None = None
         self.level = "beginner"
         self.busy = False
         self.selected_square: str | None = None
@@ -169,8 +224,10 @@ class TouchApp:
         self.message_color = color or self.MUTED
         self.status.configure(text=message, fg=self.message_color)
 
-    def button_widget(self, parent, label: str, command, *, accent: bool = False) -> tk.Button:
-        return tk.Button(parent, text=label, command=command, height=1 if self.compact else 2,
+    def button_widget(self, parent, label: str, command, *,
+                      accent: bool = False, short: bool = False) -> tk.Button:
+        return tk.Button(parent, text=label, command=command,
+                         height=1 if self.compact or short else 2,
                          font=("DejaVu Sans", 10 if self.compact else 12, "bold"),
                          bd=0, relief="flat",
                          bg=self.GREEN if accent else "#314554",
@@ -178,8 +235,9 @@ class TouchApp:
                          activebackground=self.GOLD, activeforeground=self.BG,
                          wraplength=self.panel_width - 30)
 
-    def button(self, label: str, command, *, accent: bool = False) -> None:
-        self.button_widget(self.panel, label, command, accent=accent).pack(
+    def button(self, label: str, command, *, accent: bool = False,
+               short: bool = False) -> None:
+        self.button_widget(self.panel, label, command, accent=accent, short=short).pack(
             fill="x", pady=2 if self.compact else 4,
         )
 
@@ -198,15 +256,20 @@ class TouchApp:
         self.draw_board()
         if self.busy:
             self.heading("Please wait", "The camera or chess engine is working.")
-            self.button("End Game", self.end_game)
+            self.button("Cancel Calibration" if self.calibration_flow else "End Game",
+                        self.cancel_calibration if self.calibration_flow else self.end_game)
+            return
+        if self.calibration_flow is not None:
+            self.render_calibration()
             return
         session = self.session
         if session is None:
             self.heading("New game", "Play White on the physical board. Tap a piece on the screen to see legal destinations.")
             for key, difficulty in DIFFICULTIES.items():
                 label = ("● " if key == self.level else "○ ") + difficulty.label
-                self.button(label, lambda selected=key: self.choose_level(selected))
+                self.button(label, lambda selected=key: self.choose_level(selected), short=True)
             self.button("Start Game", self.start_game, accent=True)
+            self.button("Calibrate Board", self.start_calibration, short=True)
         elif session.phase == "setup":
             self.heading("Set up the board", "Place all 32 pieces in the starting position, then scan.")
             self.button("Scan Starting Board", self.scan, accent=True)
@@ -262,6 +325,116 @@ class TouchApp:
         self.say(f"{DIFFICULTIES[level].label} selected.")
         self.render()
 
+    def render_calibration(self) -> None:
+        flow = self.calibration_flow
+        assert flow is not None
+        if flow.stage == "empty":
+            self.heading("1. Empty board", "Remove every piece. Keep the whole board in the camera view.")
+            self.button("Take Empty Photo", self.capture_empty, accent=True)
+            self.button("Back to Menu", self.cancel_calibration)
+        elif flow.stage == "corners":
+            next_corner = flow.CORNER_NAMES[len(flow.corners)]
+            self.heading("2. Mark corners", f"Tap the outer {next_corner} corner on the photo. Keep the camera fixed.")
+            self.button("Undo Corner", self.undo_corner)
+            self.button("Retake Empty Photo", self.retake_empty)
+            self.button("Cancel Calibration", self.cancel_calibration)
+        elif flow.stage == "starting":
+            self.heading("3. Starting pieces", "Place all 32 pieces normally. White pieces should be at the bottom of the photo.")
+            self.button("Take Setup Photo", self.capture_starting, accent=True)
+            if not flow.uses_markers and not self.args.corners:
+                self.button("Redo Corners", self.redo_corners)
+            self.button("Cancel Calibration", self.cancel_calibration)
+        else:
+            self.heading("Calibration saved", "The starting board was verified. You can now play.")
+            self.button("Start Game", self.start_after_calibration, accent=True)
+            self.button("Back to Menu", self.cancel_calibration)
+
+    def start_calibration(self) -> None:
+        if self.session is not None or self.busy:
+            return
+        self.generation += 1
+        self.calibration_flow = CalibrationFlow()
+        self.preview_photo = None
+        self.preview_geometry = None
+        self.say("Remove all pieces, then tap Take Empty Photo.")
+        self.render()
+
+    def cancel_calibration(self) -> None:
+        self.generation += 1
+        self.busy = False
+        self.calibration_flow = None
+        self.preview_photo = None
+        self.preview_geometry = None
+        self.say("Choose a difficulty or calibrate the board.")
+        self.render()
+
+    def retake_empty(self) -> None:
+        self.calibration_flow = CalibrationFlow()
+        self.preview_photo = None
+        self.preview_geometry = None
+        self.say("Remove all pieces and retake the empty-board photo.")
+        self.render()
+
+    def undo_corner(self) -> None:
+        flow = self.calibration_flow
+        assert flow is not None
+        flow.undo_corner()
+        self.say(f"Tap the outer {flow.CORNER_NAMES[len(flow.corners)]} corner.")
+        self.render()
+
+    def redo_corners(self) -> None:
+        flow = self.calibration_flow
+        assert flow is not None
+        flow.reset_corners()
+        self.say("Tap the outer top-left corner, then continue clockwise.")
+        self.render()
+
+    def capture_empty(self) -> None:
+        flow = self.calibration_flow
+        if flow is None or flow.stage != "empty" or self.busy:
+            return
+        self.busy = True
+        self.say("Taking the empty-board photo…")
+        self.render()
+
+        def take_photo():
+            path = self.args.calibration / "empty.jpg"
+            self.camera.capture(path)
+            photo = read_image(path)
+            if self.args.corners:
+                return photo, False
+            try:
+                board_corners(photo)
+                return photo, True
+            except VisionError:
+                return photo, False
+
+        self.submit("cal_empty", take_photo)
+
+    def capture_starting(self) -> None:
+        flow = self.calibration_flow
+        if flow is None or flow.stage != "starting" or flow.empty_photo is None or self.busy:
+            return
+        empty = flow.empty_photo
+        corners = None if flow.uses_markers else [point.copy() for point in flow.corners]
+        self.busy = True
+        self.say("Taking the starting-board photo and checking calibration…")
+        self.render()
+
+        def take_photo():
+            path = self.args.calibration / "starting.jpg"
+            self.camera.capture(path)
+            starting = read_image(path)
+            return calibrate_photos(empty, starting, corners)
+
+        self.submit("cal_starting", take_photo)
+
+    def start_after_calibration(self) -> None:
+        self.calibration_flow = None
+        self.preview_photo = None
+        self.preview_geometry = None
+        self.start_game()
+
     def submit(self, tag: str, work) -> None:
         generation = self.generation
 
@@ -312,12 +485,15 @@ class TouchApp:
                     continue
                 self.busy = False
                 if error is not None:
-                    self.say(f"Error: {error}", self.RED)
+                    if tag == "start" and isinstance(error, VisionError):
+                        self.say("Calibration missing or unreadable. Tap Calibrate Board.", self.RED)
+                    else:
+                        self.say(f"Error: {error}", self.RED)
                     self.render()
                     continue
                 try:
                     self.handle_result(tag, value)
-                except (ValueError, RuntimeError) as exc:
+                except (ValueError, RuntimeError, OSError, cv2.error) as exc:
                     self.say(str(exc), self.RED)
                 self.render()
         except queue.Empty:
@@ -325,7 +501,29 @@ class TouchApp:
         self.root.after(70, self.poll_results)
 
     def handle_result(self, tag: str, value) -> None:
-        if tag == "start":
+        if tag == "cal_empty":
+            flow = self.calibration_flow
+            assert flow is not None
+            photo, uses_markers = value
+            flow.accept_empty(photo, uses_markers)
+            if self.args.corners:
+                flow.corners = [point.copy() for point in self.args.corners]
+                flow.stage = "starting"
+            if self.args.corners:
+                self.say("Saved corner coordinates are ready. Place the starting pieces and take the next photo.")
+            elif uses_markers:
+                self.say("Markers found. Place the starting pieces and take the next photo.")
+            else:
+                self.say("Tap the outer top-left corner of the board photo, then continue clockwise.")
+        elif tag == "cal_starting":
+            flow = self.calibration_flow
+            assert flow is not None
+            calibration, reference = value
+            save_calibration(self.args.calibration, calibration, reference)
+            self.calibration, self.reference = calibration, reference
+            flow.stage = "done"
+            self.say("Calibration saved and starting board verified. Tap Start Game.", self.GREEN)
+        elif tag == "start":
             self.calibration, self.reference, self.player = value
             self.session = TouchSession(self.level)
             self.say("Place the pieces in their starting squares and scan the board.")
@@ -418,6 +616,9 @@ class TouchApp:
         self.render()
 
     def tap_board(self, event) -> None:
+        if self.calibration_flow is not None:
+            self.tap_calibration_corner(event)
+            return
         if self.session is None or self.session.phase != "human" or self.busy:
             return
         x, y, size, square_size = self.board_geometry()
@@ -434,6 +635,53 @@ class TouchApp:
                  f"{name}: choose one of your pieces.", self.GOLD if legal else self.MUTED)
         self.draw_board()
 
+    def tap_calibration_corner(self, event) -> None:
+        flow = self.calibration_flow
+        if flow is None or flow.stage != "corners" or flow.empty_photo is None or self.busy:
+            return
+        if self.preview_geometry is None:
+            return
+        left, top, scale = self.preview_geometry
+        height, width = flow.empty_photo.shape[:2]
+        x = (event.x - left) / scale
+        y = (event.y - top) / scale
+        if not (0 <= x < width and 0 <= y < height):
+            return
+        flow.add_corner(x, y)
+        if flow.stage == "starting":
+            self.say("Corners set. Keep the camera fixed, place all starting pieces, then take the setup photo.")
+        else:
+            self.say(f"Tap the outer {flow.CORNER_NAMES[len(flow.corners)]} corner.")
+        self.render()
+
+    def draw_calibration_photo(self) -> None:
+        flow = self.calibration_flow
+        assert flow is not None and flow.empty_photo is not None
+        canvas = self.board_canvas
+        canvas.delete("all")
+        photo = flow.empty_photo
+        height, width = photo.shape[:2]
+        available_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 400
+        available_height = canvas.winfo_height() if canvas.winfo_height() > 1 else 360
+        scale = min((available_width - 20) / width, (available_height - 20) / height)
+        display_width = max(1, round(width * scale))
+        display_height = max(1, round(height * scale))
+        resized = cv2.resize(photo, (display_width, display_height), interpolation=cv2.INTER_AREA)
+        ok, encoded = cv2.imencode(".png", resized)
+        if not ok:
+            raise VisionError("Could not display the empty-board photo.")
+        self.preview_photo = tk.PhotoImage(data=base64.b64encode(encoded.tobytes()).decode("ascii"))
+        left = (available_width - display_width) / 2
+        top = (available_height - display_height) / 2
+        canvas.create_image(left, top, image=self.preview_photo, anchor="nw")
+        self.preview_geometry = (left, top, scale)
+        for index, (x, y) in enumerate(flow.corners):
+            px, py = left + x * scale, top + y * scale
+            canvas.create_oval(px - 7, py - 7, px + 7, py + 7,
+                               fill=self.GOLD, outline=self.BG, width=2)
+            canvas.create_text(px + 12, py - 12, text=str(index + 1), fill=self.GOLD,
+                               font=("DejaVu Sans", 12, "bold"))
+
     def board_geometry(self) -> tuple[float, float, float, float]:
         actual_width = self.board_canvas.winfo_width()
         actual_height = self.board_canvas.winfo_height()
@@ -444,8 +692,14 @@ class TouchApp:
         return (width - size) / 2, (height - size) / 2, size, square_size
 
     def draw_board(self) -> None:
+        if (self.calibration_flow is not None and
+                self.calibration_flow.stage in ("corners", "starting") and
+                self.calibration_flow.empty_photo is not None):
+            self.draw_calibration_photo()
+            return
         canvas = self.board_canvas
         canvas.delete("all")
+        self.preview_geometry = None
         board = self.session.game.board if self.session else chess.Board()
         x, y, size, step = self.board_geometry()
         highlights: set[str] = set()

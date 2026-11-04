@@ -49,17 +49,19 @@ The program verifies the starting setup, scans each White move, announces Stockf
 
 ## Touch screen play
 
-Connect the LCD touch screen and make sure Raspberry Pi OS shows its desktop on that display and touch input works. Complete `setup`, `check`, and `scan` above before starting a game. From a desktop terminal, launch the full-screen touch interface:
+Connect the LCD touch screen and make sure Raspberry Pi OS shows its desktop on that display and touch input works. From a desktop terminal, launch the full-screen touch interface:
 
 ```sh
 .venv/bin/python pi_touch.py
 ```
 
-For a USB camera, use `--camera usb` (and `--device 1` if needed). For development in a normal window, add `--windowed`. If calibration used manually specified corners rather than visible ArUco markers or saved fixed corners, pass `--corners TL_X TL_Y TR_X TR_Y BR_X BR_Y BL_X BL_Y` as with `pi_game.py`.
+For a USB camera, use `--camera usb` (and `--device 1` if needed). For development in a normal window, add `--windowed`. The `--corners TL_X TL_Y TR_X TR_Y BR_X BR_Y BL_X BL_Y` option is available when corners are already known; touch calibration can also find or select corners without it.
+
+To calibrate entirely on the LCD, tap **Calibrate Board** on the main menu. Remove every piece and tap **Take Empty Photo**. If all four ArUco markers are visible, the app detects the board corners automatically. Otherwise, it displays the photo so you can tap the four outer corners in this order: top-left, top-right, bottom-right, bottom-left. Keep the camera fixed when selecting corners manually. Then place all 32 pieces in the standard starting position, with White at the bottom of the photo, and tap **Take Setup Photo**. The app checks the starting position before saving calibration. If alignment fails, retake the photo or redo the corners. After it reports **Calibration saved**, tap **Start Game**. You can recalibrate from the main menu whenever the camera or lighting changes.
 
 Select Beginner, Intermediate, or Advanced, then tap **Start Game**. Place the pieces in the starting position and tap **Scan Starting Board**. Move White on the physical board and tap **Scan Move**. A legal move appears in green; an unchanged, uncertain, or unmatched board asks you to correct it and scan again. Tap a white piece on the displayed board to see its legal destination squares. If several legal moves look identical to the camera, choose the actual move on screen; this includes choosing Queen, Rook, Bishop, or Knight for promotion. Follow Stockfish's displayed move on the physical board, then tap **Verify Computer Move**. **End Game** records a resignation, and the result screen offers **New Game**. Press Escape to exit the app when using a keyboard.
 
-The camera observes occupied squares, not piece identities. It cannot independently prove which piece was placed on a square or distinguish promotions and some captures from the image alone. Keep the physical pieces in sync with the displayed board and use the on-screen choice when prompted. The real LCD, touch coordinates, camera, board, and lighting still require a hardware test.
+The camera observes occupied squares, not piece identities. It cannot independently prove which piece was placed on a square or distinguish promotions and some captures from the image alone. Keep the physical pieces in sync with the displayed board and use the on-screen choice when prompted. The real LCD, touch coordinates, camera, board, and lighting still require a hardware test. The command-line `check` and `scan` commands remain useful when diagnosing a difficult camera view.
 
 ### Open the touch screen automatically when the Pi starts
 
