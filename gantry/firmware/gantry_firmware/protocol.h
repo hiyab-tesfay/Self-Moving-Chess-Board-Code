@@ -130,7 +130,7 @@ class Protocol {
     for (const char* c = s; *c; c++) {
       if (*c == letter) {
         char* end;
-        value = strtof(c + 1, &end);
+        value = (float)strtod(c + 1, &end);  // strtod, not strtof: AVR's C library has no strtof
         return end != c + 1;
       }
     }
