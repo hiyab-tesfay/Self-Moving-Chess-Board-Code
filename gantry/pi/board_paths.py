@@ -39,7 +39,18 @@ class Geometry:
     piece_sizes_mm: dict = field(default_factory=lambda: dict(DEFAULT_PIECE_SIZES_MM))
 
     def board_mm(self, x: float, y: float) -> tuple[float, float]:
-        return self.a1_mm[0] + x * self.square_mm, self.a1_mm[1] + y * self.square_mm
+        """A board point in mm. The lanes beside the board (x between -1 and 0, or 7 and 8) run between
+        the edge file and the docking lane, the same rule the firmware (place_mm) and the driver use."""
+        return self.x_mm(x), self.a1_mm[1] + y * self.square_mm
+
+    def x_mm(self, x: float) -> float:
+        a1 = self.a1_mm[0]
+        if x < 0 and -1 in self.park_columns_mm:
+            return self.park_columns_mm[-1] + (x + 1) * (a1 - self.park_columns_mm[-1])
+        if x > 7 and 8 in self.park_columns_mm:
+            h = a1 + 7 * self.square_mm
+            return h + (x - 7) * (self.park_columns_mm[8] - h)
+        return a1 + x * self.square_mm
 
     def node_mm(self, node) -> tuple[float, float]:
         if isinstance(node, Slot):

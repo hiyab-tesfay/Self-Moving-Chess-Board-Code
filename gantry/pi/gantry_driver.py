@@ -1,36 +1,52 @@
 #!/usr/bin/env python3
-"""The Pi's half of the gantry: turns a chess move into G-code for the board over USB serial.
+"""The Pi's half of the gantry: turns a chess move into commands for the board over USB serial.
 
 What lives where:
-  * The board (gantry/firmware) only knows millimetres: move here, magnet on, magnet off, home.
-    It never hears about chess.
-  * This file knows where the squares are (gantry_config.json) and turns a job, which lists
-    piece carries in square units, into those millimetre commands. It never times a step.
+  * The board (gantry/firmware) knows millimetres, the magnet, the servo arm and, since firmware
+    0.2, where the squares are: `CARRY e2 e4` picks the piece up on e2 and puts it down on e4,
+    with the arm, the magnet and the dwells sequenced on the board. It never hears about chess.
+  * This file knows which piece is where (the job) and finds every path with the real piece
+    widths (board_paths.py), because only the Pi has the camera and the position. It sends one
+    CARRY per piece carried, with the via-points the path needs, and waits for each to finish.
 
-Jobs are the JSON that the website's game server produces, one per chess move:
+Jobs are the JSON that the website's game server and carry_plan.py produce, one per chess move:
 
-    {"id": 7, "label": "e7e5", "expect": [...], "steps": [
+    {"id": 7, "label": "e7e5", "before": [...], "pieces": {...}, "expect": [...], "steps": [
         {"op": "carry", "piece": "p", "from": "e7", "to": "e5", "path": [[4, 6], [4, 4]]}]}
 
 Path points are in squares: a1 is (0, 0), h8 is (7, 7), x.5 are the lanes between squares,
 and captured pieces park in the lanes beside the board at x = -1 (White's) and 8 (Black's),
-with the row an index down the lane. Slots are named "w:0", "w:1", ... and "b:0", ... For
-a carry: go to the first point, magnet on, follow the rest of the points, magnet off.
+with the row an index down the lane. Slots are named "w:0", "w:1", ... and "b:0", ...
 
-When the job also lists "before" (the squares and slots occupied as it starts), every
-carry's path is found here by board_paths.py so that the carried piece touches nothing,
-and a blocking piece is moved aside and put back when there is no other way. Without
-"before", the paths in the job are used as they are.
+When the job lists "before" (the squares and slots occupied as it starts) and "pieces", every
+carry's path is found here by board_paths.py so that the carried piece touches nothing, and a
+blocking piece is moved aside and put back when there is no other way (extra CARRY lines, in
+order). Without "before", the paths in the job are used as they are.
+
+Two protocols:
+  * "duen" (default): firmware 0.2. On connect the driver sends $B= with the board geometry from
+    the config, then one `CARRY from to [via ...]` per carry; via-points are places in squares
+    ("5.5,0.5"), or slot names.
+  * "grbl" (config "protocol": "grbl", or --gcode): plain G-code, planned entirely here, for a
+    real GRBL board or firmware 0.1.
 
 Usage (the website runs the first form through CHESS_MOTION_COMMAND):
     gantry_driver.py < job.json             perform a job; exit 0 when the pieces have stopped
     gantry_driver.py --move e2e4            one plain carry
+    gantry_driver.py --game e2e4 e7e5 ...   play a whole game's carries from the start position
+    gantry_driver.py --reset --fen "..."    carry every piece home from a position (or after --game)
     gantry_driver.py --home                 home the gantry
+    gantry_driver.py --unlock               $X after a person has checked the board, then home
     gantry_driver.py --goto 100 50          move the empty magnet to X=100 Y=50 mm
     gantry_driver.py --status               ask the board where it is
     gantry_driver.py --calibrate            steer the magnet under a1 and h1; saves the squares to the config
-    gantry_driver.py --dry-run < job.json   print the G-code and the predicted steps, send nothing
-Add --port sim to drive the pretend board in gantry/firmware/host instead of real hardware.
+    gantry_driver.py --dry-run < job.json   print the commands and the prediction, send nothing
+Add --port sim to drive the pretend board in gantry/firmware/host instead of real hardware,
+--gcode to speak G-code to a GRBL board.
+
+Safety on this side: a job is refused while the board reports an alarm, a hold or Host:lost
+(someone has to look at the pieces and run --unlock); a job with more than 40 carries is a
+planning error; after any fault the magnet is released, the arm lowered and the motion stopped.
 """
 from __future__ import annotations
 
@@ -53,12 +69,16 @@ import board_paths  # noqa: E402
 
 DEFAULT_CONFIG = HERE / "gantry_config.json"
 VIRTUAL_GANTRY = HERE.parent / "firmware" / "host" / "virtual_gantry"
-STATUS = re.compile(r"<(?P<state>[A-Za-z]+)(?::(?P<reason>[^|>]*))?\|MPos:(?P<x>-?[\d.]+),(?P<y>-?[\d.]+)(?:\|Mag:(?P<mag>[01]))?(?:\|Homed:(?P<homed>[01]))?")
 FILES = "abcdefgh"
+PIECE_NAMES = {"p": "pawn", "n": "knight", "b": "bishop", "r": "rook", "q": "queen", "k": "king"}
+
+MAX_CARRIES_PER_JOB = 40     # more than this in one job is a planning error, not a chess move
+MAX_LINE_CHARS = 150         # the firmware's command buffer (protocol.h: 160, minus "CARRY ")
+MAX_VIA_POINTS = 30          # the firmware's sequence holds 48 steps; a carry is 10 of them plus its via-points
 
 
 class GantryError(Exception):
-    pass
+    """Something the person has to know about, in plain words."""
 
 
 # ----------------------------------------------------------------------------- squares to millimetres
@@ -100,6 +120,13 @@ class BoardMap:
             return x, self.park_rows[row]
         return x, self._interp(self.rows, py, "row")
 
+    def place_mm(self, place: str) -> tuple[float, float]:
+        """A firmware place: a square, a slot, or "x,y" in squares."""
+        if "," in place:
+            x, y = (float(v) for v in place.split(","))
+            return self.point_mm(x, y)
+        return self.square_mm(place)
+
     def geometry(self, config: dict):
         """The same numbers for board_paths."""
         sizes = {str(k).lower(): float(v) for k, v in (config.get("piece_sizes_mm") or board_paths.DEFAULT_PIECE_SIZES_MM).items()}
@@ -108,6 +135,15 @@ class BoardMap:
             [self.park_rows[i] for i in sorted(self.park_rows)],
             float(config.get("piece_mm", 27.0)), float(config.get("clearance_mm", 3.0)),
             float(config.get("lane_clearance_mm", 1.0)), sizes)
+
+    def setup_line(self) -> str:
+        """The $B= line that gives the firmware this board: square, a1, and the docking lanes when configured."""
+        parts = [self.square, self.a1[0], self.a1[1]]
+        if -1 in self.columns and 8 in self.columns:
+            rows = [self.park_rows[i] for i in sorted(self.park_rows)]
+            pitch = rows[1] - rows[0] if len(rows) > 1 else self.square
+            parts += [self.columns[-1], self.columns[8], rows[0], pitch]
+        return "$B=" + ",".join(f"{v:g}" for v in parts)
 
     def _interp(self, table: dict, value: float, what: str, outer: dict | None = None) -> float:
         """Whole numbers are configured centres; x.5 lies halfway between its neighbours, or half a square past the last one."""
@@ -128,6 +164,42 @@ class BoardMap:
     def check(self, x: float, y: float, what: str) -> None:
         if x < 0 or y < 0 or x > self.travel[0] or y > self.travel[1]:
             raise GantryError(f"{what} is at X={x:.1f} Y={y:.1f} mm, outside the gantry's travel of {self.travel[0]:.0f} x {self.travel[1]:.0f} mm")
+
+
+def place_name(point) -> str:
+    """A path point in square units as the firmware writes places: a square, a slot, or x,y in squares."""
+    x, y = float(point[0]), float(point[1])
+    if x <= -1 or x >= 8:
+        if x != int(x) or y != int(y):
+            raise GantryError(f"point {point} is not a docking slot")
+        if int(x) == -1:
+            return f"w:{int(y)}"
+        if int(x) == 8:
+            return f"b:{int(y)}"
+        raise GantryError(f"the board has no second docking lane (column {int(x)})")
+    if x == int(x) and y == int(y) and 0 <= x <= 7 and 0 <= y <= 7:
+        return f"{FILES[int(x)]}{int(y) + 1}"
+    return f"{x:.1f},{y:.1f}"
+
+
+def piece_words(symbol: str | None) -> str:
+    if not symbol or symbol == "?":
+        return "the piece"
+    return f"the {'white' if symbol.isupper() else 'black'} {PIECE_NAMES.get(symbol.lower(), 'piece')}"
+
+
+def describe_step(step: dict) -> str:
+    """One carry in plain words, for the log and the screen."""
+    who = piece_words(step.get("piece"))
+    if ":" in step["to"]:
+        text = f"Taking {who} off {step['from']} to slot {step['to']}"
+    elif ":" in step["from"]:
+        text = f"Bringing {who} from slot {step['from']} to {step['to']}"
+    else:
+        text = f"Moving {who} from {step['from']} to {step['to']}"
+    if step.get("reason") in ("make room", "put back"):
+        text += f" ({step['reason']})"
+    return text
 
 
 # ----------------------------------------------------------------------------- the plan for a job
@@ -153,29 +225,45 @@ def route(job: dict, board: BoardMap, config: dict) -> list[dict]:
         except board_paths.NoPath as exc:
             raise GantryError(str(exc)) from None
         for carry in carries:
-            piece = step.get("piece", "?") if carry.reason == "move" else "?"
+            piece = step.get("piece", "?") if carry.reason == "move" else world.pieces.get(carry.piece_from, "?")
             steps.append({"op": "carry", "piece": piece, "from": carry.piece_from, "to": carry.piece_to, "path": carry.path, "reason": carry.reason})
             world.apply(carry)
     return steps
 
 
+def carry_limit(config: dict) -> int:
+    return int(config.get("max_carries_per_job", MAX_CARRIES_PER_JOB))
+
+
+def check_carry_count(count: int, config: dict, label: str) -> None:
+    if count > carry_limit(config):
+        raise GantryError(f"job {label} would carry {count} pieces; more than {carry_limit(config)} in one job is a planning error, not a chess move")
+
+
+def checked_points(step: dict, board: BoardMap) -> list[tuple[float, float]]:
+    """The carry's path in mm, every point inside the travel."""
+    path = step.get("path") or []
+    if len(path) < 2:
+        raise GantryError(f"carry {step.get('from')}->{step.get('to')} has no path")
+    points = [board.point_mm(float(px), float(py)) for px, py in path]
+    for (x, y), p in zip(points, path):
+        board.check(x, y, f"point {p} of {step['from']}->{step['to']}")
+    return points
+
+
 def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
-    """G-code lines for a job, each with a note for the log. Fails before anything moves if a point is out of reach."""
+    """G-code lines for a job (GRBL boards, firmware 0.1), each with a note for the log. Fails before anything moves if a point is out of reach."""
     travel_feed = float(config["travel_speed_mm_s"]) * 60
     carry_feed = float(config["carry_speed_mm_s"]) * 60
     lines: list[tuple[str, str]] = []
+    carries = 0
     for step in route(job, board, config):
         if step.get("op") == "note":
             lines.append(("# " + step.get("message", ""), "note"))
             continue
         if step.get("op") != "carry":
             raise GantryError(f"unknown step {step.get('op')!r}")
-        path = step.get("path") or []
-        if len(path) < 2:
-            raise GantryError(f"carry {step.get('from')}->{step.get('to')} has no path")
-        points = [board.point_mm(float(px), float(py)) for px, py in path]
-        for (x, y), p in zip(points, path):
-            board.check(x, y, f"point {p} of {step['from']}->{step['to']}")
+        points = checked_points(step, board)
         label = f"{step.get('piece', '?')} {step['from']}->{step['to']}"
         if step.get("reason") in ("make room", "put back"):
             label += f" ({step['reason']})"
@@ -187,27 +275,120 @@ def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
             lines.append((f"G1 X{x:.3f} Y{y:.3f} F{carry_feed:.0f}", f"carry {label}"))
         lines.append(("M5", f"release {label}"))
         lines.append((f"G4 P{float(config['release_settle_s']):.3f}", "let go cleanly"))
+        carries += 1
+    check_carry_count(carries, config, job.get("label", "?"))
     return lines
 
 
-def predict(lines: list[tuple[str, str]], config: dict, steps_per_mm: float = 40.0, accel: float = 800.0, start=(0.0, 0.0)) -> dict:
-    """Steps and seconds the board will need, from the same trapezoid the firmware uses."""
+def plan_carry(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
+    """CARRY lines for firmware 0.2, one per piece carried, each with a note in plain words.
+
+    The path comes from route() (board_paths, real piece widths); its inner points become the
+    via-points, written as the firmware reads places: slot names, or x,y in squares. Every point
+    is checked against the travel first, so nothing is sent that the board would refuse half-way.
+    """
+    lines: list[tuple[str, str]] = []
+    carries = 0
+    for step in route(job, board, config):
+        if step.get("op") == "note":
+            lines.append(("# " + step.get("message", ""), "note"))
+            continue
+        if step.get("op") != "carry":
+            raise GantryError(f"unknown step {step.get('op')!r}")
+        checked_points(step, board)
+        vias = [place_name(p) for p in step["path"][1:-1]]
+        if len(vias) > MAX_VIA_POINTS:
+            raise GantryError(f"the way from {step['from']} to {step['to']} has {len(vias)} turns; the board takes at most {MAX_VIA_POINTS}")
+        line = " ".join(["CARRY", step["from"], step["to"], *vias])
+        if len(line) > MAX_LINE_CHARS:
+            raise GantryError(f"the way from {step['from']} to {step['to']} does not fit in one command ({len(line)} characters)")
+        lines.append((line, describe_step(step)))
+        carries += 1
+    check_carry_count(carries, config, job.get("label", "?"))
+    return lines
+
+
+def carry_motions(line: str, board: BoardMap, config: dict) -> list[tuple]:
+    """What the board will do for one CARRY line: ("move", x, y, mm/s) and ("dwell", seconds), in order."""
+    places = line.split()[1:]
+    if len(places) < 2:
+        raise GantryError(f"not a carry: {line!r}")
+    src, dst, vias = places[0], places[1], places[2:]
+    travel, carry = float(config["travel_speed_mm_s"]), float(config["carry_speed_mm_s"])
+    servo = float(config.get("servo_settle_s", 0.3)) if config.get("servo", True) else 0.0
+    motions: list[tuple] = [("move", *board.place_mm(src), travel)]
+    if servo:
+        motions.append(("dwell", servo))
+    motions.append(("dwell", float(config["grab_settle_s"])))
+    for place in [*vias, dst]:
+        motions.append(("move", *board.place_mm(place), carry))
+    motions.append(("dwell", float(config["release_settle_s"])))
+    if servo:
+        motions.append(("dwell", servo))
+    return motions
+
+
+def predict(lines: list[tuple[str, str]], config: dict, steps_per_mm: float = 40.0, accel: float = 800.0, start=(0.0, 0.0), board: BoardMap | None = None) -> dict:
+    """Steps and seconds the board will need, from the same trapezoid the firmware uses. Reads G-code and CARRY lines."""
     x, y = start
     total_s, motor_steps = 0.0, [0, 0]
+
+    def move(tx: float, ty: float, speed: float) -> None:
+        nonlocal x, y, total_s
+        d = math.hypot(tx - x, ty - y)
+        ramp = speed * speed / (2 * accel)
+        total_s += 2 * math.sqrt(d / accel) if 2 * ramp >= d else 2 * speed / accel + (d - 2 * ramp) / speed
+        motor_steps[0] += round(abs(tx - x) * steps_per_mm)
+        motor_steps[1] += round(abs(ty - y) * steps_per_mm)
+        x, y = tx, ty
+
     for text, _ in lines:
         if text.startswith("G1") or text.startswith("G0"):
             words = dict(re.findall(r"([XYF])(-?[\d.]+)", text))
-            tx, ty = float(words.get("X", x)), float(words.get("Y", y))
-            speed = float(words.get("F", config["travel_speed_mm_s"] * 60)) / 60
-            d = math.hypot(tx - x, ty - y)
-            ramp = speed * speed / (2 * accel)
-            total_s += 2 * math.sqrt(d / accel) if 2 * ramp >= d else 2 * speed / accel + (d - 2 * ramp) / speed
-            motor_steps[0] += round(abs(tx - x) * steps_per_mm)
-            motor_steps[1] += round(abs(ty - y) * steps_per_mm)
-            x, y = tx, ty
+            move(float(words.get("X", x)), float(words.get("Y", y)), float(words.get("F", config["travel_speed_mm_s"] * 60)) / 60)
         elif text.startswith("G4"):
             total_s += float(text.split("P")[1])
+        elif text.startswith("CARRY"):
+            for motion in carry_motions(text, board or BoardMap(config), config):
+                if motion[0] == "move":
+                    move(motion[1], motion[2], motion[3])
+                else:
+                    total_s += motion[1]
     return {"seconds": round(total_s, 2), "steps": motor_steps, "end_mm": (round(x, 3), round(y, 3))}
+
+
+def split_job(job: dict, board: BoardMap, config: dict, max_carries: int | None = None) -> list[dict]:
+    """A job with too many carries (a reset after a long game) as several jobs within the limit.
+
+    The whole job is routed once, so make-room carries are counted; each part is then a plain
+    job of already-routed steps (no "before", so the driver uses its paths as they are), with
+    "expect" worked out from where the pieces will be after it.
+    """
+    limit = carry_limit(config) if max_carries is None else max_carries
+    steps = route(job, board, config)
+    if sum(1 for s in steps if s.get("op") == "carry") <= limit:
+        return [job]
+    chunks: list[list[dict]] = [[]]
+    count = 0
+    for step in steps:
+        if step.get("op") == "carry":
+            if count == limit:
+                chunks.append([])
+                count = 0
+            count += 1
+        chunks[-1].append(step)
+    pieces = dict(job.get("pieces") or {})
+    occupied = set(job.get("before") or [])
+    jobs = []
+    for i, chunk in enumerate(chunks):
+        for step in chunk:
+            if step.get("op") == "carry":
+                occupied.discard(step["from"])
+                occupied.add(step["to"])
+                pieces[step["to"]] = pieces.pop(step["from"], step.get("piece", "?"))
+        jobs.append({"id": job.get("id", 0), "label": f"{job.get('label', '?')} ({i + 1}/{len(chunks)})", "steps": chunk,
+                     "expect": sorted(n for n in occupied if ":" not in n)})
+    return jobs
 
 
 # ----------------------------------------------------------------------------- talking to the board
@@ -228,8 +409,12 @@ class Link:
             exe = os.environ.get("GANTRY_VIRTUAL", str(VIRTUAL_GANTRY))
             if not Path(exe).exists():
                 raise GantryError(f"build the pretend board first: make -C {VIRTUAL_GANTRY.parent} virtual_gantry")
-            speed = os.environ.get("GANTRY_SIM_SPEED", "50")
-            self.process = subprocess.Popen([exe, "--speed", speed], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+            args = [exe, "--speed", os.environ.get("GANTRY_SIM_SPEED", "50")]
+            if os.environ.get("GANTRY_SIM_HOST_TIMEOUT_MS"):
+                args += ["--host-timeout", os.environ["GANTRY_SIM_HOST_TIMEOUT_MS"]]
+            if os.environ.get("GANTRY_SIM_NO_SERVO"):
+                args.append("--no-servo")
+            self.process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
             source = self.process.stdout
         else:
             import serial  # pyserial, only needed with real hardware
@@ -290,6 +475,38 @@ class Link:
             self.serial.close()
 
 
+def parse_status(line: str) -> dict | None:
+    """<State[:reason]|MPos:x,y[,z]|Mag:0|Homed:1[|Servo:up][|Prog:k/n][|Host:lost]> as a dict, or None."""
+    if not (line.startswith("<") and line.endswith(">")):
+        return None
+    fields = line[1:-1].split("|")
+    state, _, reason = fields[0].partition(":")
+    info = {"state": state, "reason": reason, "x": 0.0, "y": 0.0, "magnet": False, "homed": False,
+            "servo": None, "prog": None, "host_lost": False, "raw": line}
+    for field in fields[1:]:
+        key, _, value = field.partition(":")
+        try:
+            if key == "MPos":
+                parts = value.split(",")
+                info["x"], info["y"] = float(parts[0]), float(parts[1])
+            elif key == "Mag":
+                info["magnet"] = value == "1"
+            elif key == "Homed":
+                info["homed"] = value == "1"
+            elif key == "Servo":
+                info["servo"] = value
+            elif key == "Prog":
+                info["prog"] = value
+            elif key == "Host":
+                info["host_lost"] = value == "lost"
+        except (ValueError, IndexError):
+            return None
+    return info
+
+
+UNLOCK_HINT = "Check the pieces, then run gantry_driver.py --unlock (it sends $X and homes)."
+
+
 class Gantry:
     def __init__(self, link: Link, log=logging.getLogger("gantry")):
         self.link, self.log = link, log
@@ -320,7 +537,8 @@ class Gantry:
             if line == "ok":
                 return
             if line.startswith("error:"):
-                raise GantryError(f"the board refused {text!r}: {line}")
+                _, _, words = line.partition(" ")
+                raise GantryError(f"the board refused {text!r}: {words or line}")
             self.note(line)
         raise GantryError(f"no answer from the board to {text!r} within {timeout:.0f}s")
 
@@ -331,40 +549,87 @@ class Gantry:
             line = self.link.read(max(0.0, deadline - time.monotonic()))
             if line is None:
                 break
-            found = STATUS.match(line)
+            found = parse_status(line)
             if found:
-                return {"state": found["state"], "reason": found["reason"] or "", "x": float(found["x"]), "y": float(found["y"]),
-                        "magnet": found["mag"] == "1", "homed": found["homed"] == "1", "raw": line}
+                return found
             self.note(line)
         raise GantryError("the board did not report its status")
 
+    def make_safe(self, stop_first: bool) -> None:
+        """Best effort after a fault: magnet off, arm down, motion stopped. Never raises."""
+        order = ["!", "M5", "M8"] if stop_first else ["M5", "M8", "!"]
+        for text in order:
+            try:
+                self.log.warning("SAFE  %s", text)
+                self.link.write(text)
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline:
+                    line = self.link.read(max(0.0, deadline - time.monotonic()))
+                    if line is None or line == "ok" or line.startswith("error:"):
+                        break
+                    self.note(line)
+            except Exception:   # the link may be gone; nothing more to do about it here
+                return
+
     def wait_idle(self, timeout: float, what: str) -> dict:
-        """Poll until the board is idle. Alarm or hold means the move did not finish."""
+        """Poll until the board is idle. Alarm or hold means the move did not finish; a timeout stops everything."""
         deadline = time.monotonic() + timeout
         while True:
             state = self.status()
             if state["state"] == "Idle":
                 return state
-            if state["state"] in ("Alarm", "Hold"):
-                raise GantryError(f"the board stopped during {what}: {state['raw']}")
+            if state["state"] == "Alarm":
+                raise GantryError(f"the board stopped during {what}: {state['reason'] or 'alarm'}. {UNLOCK_HINT}")
+            if state["state"] == "Hold":
+                raise GantryError(f"the board was stopped during {what}. {UNLOCK_HINT}")
             if time.monotonic() > deadline:
-                raise GantryError(f"{what} did not finish within {timeout:.0f}s: {state['raw']}")
+                self.make_safe(stop_first=True)
+                raise GantryError(f"{what} did not finish within {timeout:.0f}s; the board has been stopped and the magnet released. {UNLOCK_HINT}")
             time.sleep(0.05)
+
+    def check_safe(self) -> dict:
+        """Refuse to start while the board says a person should look at it first."""
+        state = self.status()
+        if state["host_lost"]:
+            raise GantryError(f"The board lost contact with the Pi during its last move and made itself safe. {UNLOCK_HINT}")
+        if state["state"] == "Alarm" and state["reason"] not in ("", "not homed"):
+            raise GantryError(f"The board stopped with an alarm: {state['reason']}. {UNLOCK_HINT}")
+        if state["state"] == "Hold":
+            raise GantryError(f"The board is stopped (hold). {UNLOCK_HINT}")
+        return state
 
     def home(self) -> None:
         self.command("$H")
         self.wait_idle(120, "homing")
+
+    def unlock(self) -> None:
+        """After a person has checked the board: clear the alarm or hold and find the position again."""
+        self.command("$X")
+        self.home()
 
     def ensure_homed(self) -> None:
         state = self.status()
         if state["state"] == "Alarm" or not state["homed"]:
             self.home()
 
-    def perform(self, lines: list[tuple[str, str]], config: dict) -> None:
-        """Run planned G-code, waiting for each move and dwell to finish before the next."""
+    def set_board(self, config: dict) -> None:
+        """Give the firmware this board's geometry, so its idea of e4 is the Pi's."""
+        self.command(BoardMap(config).setup_line())
+
+    def perform(self, lines: list[tuple[str, str]], config: dict, progress=None) -> None:
+        """Run planned commands, waiting for each to finish before the next. progress(text) is told about every carry."""
+        board = BoardMap(config)
         for text, note in lines:
             if text.startswith("#"):
                 self.log.info("NOTE  %s", text[2:])
+                continue
+            if text.startswith("CARRY"):
+                guess = predict([(text, note)], config, board=board)
+                self.log.info("CARRY %s (about %.1f s)", note, guess["seconds"])
+                if progress:
+                    progress(note)
+                self.command(text)
+                self.wait_idle(10 + 2 * guess["seconds"], note)
                 continue
             self.command(text)
             if text.startswith(("G0", "G1")):
@@ -373,6 +638,8 @@ class Gantry:
                 self.wait_idle(10 + (config["travel_mm"][0] + config["travel_mm"][1]) / max(speed, 1) * 3, note)
             elif text.startswith("G4"):
                 self.wait_idle(float(text.split("P")[1]) + 5, note)
+            elif text == "M3" and progress:
+                progress(note)
 
 
 # ----------------------------------------------------------------------------- entry points
@@ -384,8 +651,15 @@ def load_config(path: Path) -> dict:
     config.setdefault("carry_speed_mm_s", 60.0)
     config.setdefault("grab_settle_s", 0.3)
     config.setdefault("release_settle_s", 0.2)
+    config.setdefault("servo", True)
+    config.setdefault("servo_settle_s", 0.3)
     config.setdefault("home_on_start", True)
+    config.setdefault("protocol", "duen")
     return config
+
+
+def uses_gcode(config: dict) -> bool:
+    return str(config.get("protocol", "duen")).lower() == "grbl"
 
 
 def simple_move_job(uci: str, piece: str = "?", occupied=None) -> dict:
@@ -401,15 +675,83 @@ def simple_move_job(uci: str, piece: str = "?", occupied=None) -> dict:
             "steps": [{"op": "carry", "piece": piece, "from": src, "to": dst, "path": [[fx, fy], [tx, ty]]}]}
 
 
-def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry")) -> dict:
+def plan_job(job: dict, config: dict) -> list[tuple[str, str]]:
+    """The commands for a job in the configured protocol. Raises before anything moves if a point is unreachable."""
     board = BoardMap(config)
-    lines = plan(job, board, config)   # raises before anything moves if a point is unreachable
+    return plan(job, board, config) if uses_gcode(config) else plan_carry(job, board, config)
+
+
+def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry"), progress=None) -> dict:
+    """Perform one job on an open link. progress(text), when given, hears about each carry as it starts.
+
+    Order: plan (fails early), refuse if the board wants a person first, give it the board
+    geometry ($B, firmware 0.2), home if the config says so, then run. Any fault leaves the
+    magnet off and the arm down.
+    """
+    lines = plan_job(job, config)
     gantry = Gantry(link, log)
+    gantry.check_safe()
+    if not uses_gcode(config):
+        gantry.set_board(config)
     if config.get("home_on_start", True):
         gantry.ensure_homed()
     log.info("JOB %s: %d commands", job.get("label", "?"), len(lines))
-    gantry.perform(lines, config)
+    try:
+        gantry.perform(lines, config, progress)
+    except BaseException:
+        gantry.make_safe(stop_first=False)
+        raise
     return gantry.status()
+
+
+def run_jobs(jobs: list[dict], config: dict, link: Link, log=logging.getLogger("gantry"), progress=None) -> dict:
+    state = None
+    for job in jobs:
+        state = run_job(job, config, link, log, progress)
+    return state if state is not None else Gantry(link, log).status()
+
+
+def game_jobs(ucis: list[str]):
+    """The jobs that play a whole game from the start position, and the layout after it (needs python-chess)."""
+    import chess  # noqa: F401  (python-chess)
+    import carry_plan
+    board, layout = chess.Board(), carry_plan.Layout()
+    jobs = []
+    for i, uci in enumerate(ucis):
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            raise GantryError(f"{uci!r} is not a move") from None
+        if move not in board.legal_moves:
+            raise GantryError(f"{uci} is not legal after {' '.join(ucis[:i]) or 'the start'}")
+        jobs.append(carry_plan.job_for_move(layout, board, move, i + 1))
+        board.push(move)
+    return jobs, layout
+
+
+def layout_from_text(text: str):
+    """A layout as "e4=P,d5=p,b:0=p" or a JSON object {"e4": "P", ...}."""
+    import carry_plan
+    text = text.strip()
+    if text.startswith("{"):
+        pieces = json.loads(text)
+    else:
+        pieces = {}
+        for item in text.split(","):
+            if not item.strip():
+                continue
+            name, _, symbol = item.strip().partition("=")
+            if not symbol:
+                raise GantryError(f"{item!r}: write square=piece, like e4=P or b:0=p")
+            pieces[name.strip()] = symbol.strip()
+    layout = carry_plan.Layout.__new__(carry_plan.Layout)
+    layout.pieces = {str(k): str(v) for k, v in pieces.items()}
+    return layout
+
+
+def reset_jobs(layout, config: dict) -> list[dict]:
+    import carry_plan
+    return split_job(carry_plan.job_for_reset(layout), BoardMap(config), config)
 
 
 def calibrate(gantry: Gantry, config: dict, config_path: Path, read=input, write=print) -> dict:
@@ -465,17 +807,39 @@ def calibrate(gantry: Gantry, config: dict, config_path: Path, read=input, write
     return config
 
 
+def print_dry_run(jobs: list[dict], config: dict) -> None:
+    board = BoardMap(config)
+    total = 0.0
+    for job in jobs:
+        lines = plan_job(job, config)
+        if len(jobs) > 1:
+            print(f"; job {job.get('label', '?')}")
+        for text, note in lines:
+            print(f"{text:<40} ; {note}")
+        guess = predict(lines, config, board=board)
+        total += guess["seconds"]
+        print(f"; predicted: {guess['seconds']} s, motor steps X={guess['steps'][0]} Y={guess['steps'][1]}, ends at X={guess['end_mm'][0]} Y={guess['end_mm'][1]} mm")
+    if len(jobs) > 1:
+        print(f"; {len(jobs)} jobs, about {total:.0f} s in all")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--port", help="serial port, or 'sim' for the pretend board (default: from the config)")
     parser.add_argument("--move", metavar="UCI", help="carry one piece, e.g. e2e4, finding a way round the other pieces")
     parser.add_argument("--occupied", metavar="SQUARES", help="for --move: the occupied squares, comma separated (default: the starting position); 'none' for an empty board")
+    parser.add_argument("--game", nargs="+", metavar="UCI", help="play every move of a game from the start position, both sides, e.g. --game e2e4 e7e5 g1f3")
+    parser.add_argument("--reset", action="store_true", help="carry every piece back to its home square: after --game, or from --fen / --layout")
+    parser.add_argument("--fen", help="for --reset: the position on the board")
+    parser.add_argument("--layout", help="for --reset: where every piece is, e4=P,d5=p,b:0=p or a JSON object")
     parser.add_argument("--home", action="store_true")
+    parser.add_argument("--unlock", action="store_true", help="after a person has checked the board: $X, then home")
     parser.add_argument("--goto", nargs=2, type=float, metavar=("X", "Y"), help="move the empty magnet to X Y mm")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--calibrate", action="store_true", help="steer the magnet under a1 and h1, then save the square positions to the config")
-    parser.add_argument("--dry-run", action="store_true", help="print the G-code and the prediction; send nothing")
+    parser.add_argument("--gcode", action="store_true", help="speak G-code (GRBL, firmware 0.1) instead of CARRY commands")
+    parser.add_argument("--dry-run", action="store_true", help="print the commands and the prediction; send nothing")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING if args.quiet else logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr)
@@ -483,35 +847,51 @@ def main(argv=None) -> int:
 
     try:
         config = load_config(args.config)
+        if args.gcode:
+            config["protocol"] = "grbl"
         port = args.port or config.get("port", "/dev/ttyUSB0")
+        jobs: list[dict] | None = None
         if args.move:
             occupied = None
             if args.occupied:
                 occupied = [] if args.occupied.strip().lower() == "none" else [s.strip() for s in args.occupied.split(",") if s.strip()]
-            job = simple_move_job(args.move, occupied=occupied)
-        elif args.home or args.goto or args.status or args.calibrate:
-            job = None
+            jobs = [simple_move_job(args.move, occupied=occupied)]
+        elif args.game or args.reset:
+            jobs = []
+            layout = None
+            if args.game:
+                game, layout = game_jobs(args.game)
+                jobs += game
+            if args.reset:
+                if args.fen:
+                    import chess
+                    import carry_plan
+                    layout = carry_plan.Layout(chess.Board(args.fen))
+                elif args.layout:
+                    layout = layout_from_text(args.layout)
+                elif layout is None:
+                    parser.error("--reset needs the position: --fen, --layout, or the moves of --game")
+                jobs += reset_jobs(layout, config)
+        elif args.home or args.unlock or args.goto or args.status or args.calibrate:
+            jobs = None
         else:
             raw = sys.stdin.read()
             if not raw.strip():
-                parser.error("give a job on standard input, or --move/--home/--goto/--status")
-            job = json.loads(raw)
+                parser.error("give a job on standard input, or --move/--game/--reset/--home/--goto/--status")
+            jobs = [json.loads(raw)]
 
         if args.dry_run:
-            board = BoardMap(config)
-            lines = plan(job, board, config) if job else []
-            for text, note in lines:
-                print(f"{text:<40} ; {note}")
-            guess = predict(lines, config)
-            print(f"; predicted: {guess['seconds']} s, motor steps X={guess['steps'][0]} Y={guess['steps'][1]}, ends at X={guess['end_mm'][0]} Y={guess['end_mm'][1]} mm")
+            print_dry_run(jobs or [], config)
             return 0
 
         link = Link(port, int(config.get("baud", 115200)), log)
         try:
-            if job is not None:
-                state = run_job(job, config, link, log)
+            if jobs is not None:
+                state = run_jobs(jobs, config, link, log)
             else:
                 gantry = Gantry(link, log)
+                if args.unlock:
+                    gantry.unlock()
                 if args.calibrate:
                     calibrate(gantry, config, args.config)
                 if args.home:
@@ -522,7 +902,8 @@ def main(argv=None) -> int:
                     gantry.command(f"G0 X{args.goto[0]:.3f} Y{args.goto[1]:.3f}")
                     gantry.wait_idle(60, "--goto")
                 state = gantry.status()
-            print(json.dumps({"ok": True, "state": state["state"], "x_mm": state["x"], "y_mm": state["y"], "magnet": state["magnet"], "homed": state["homed"]}))
+            print(json.dumps({"ok": True, "state": state["state"], "x_mm": state["x"], "y_mm": state["y"], "magnet": state["magnet"],
+                              "homed": state["homed"], "servo": state.get("servo"), "host_lost": state.get("host_lost", False)}))
             return 0
         finally:
             link.close()

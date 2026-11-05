@@ -1,8 +1,9 @@
-// DUEN chess board gantry firmware: two NEMA 17s on DRV8825s and a magnet, driven over USB
-// serial by the Raspberry Pi (gantry/pi/gantry_driver.py). This file is only the glue to the
-// board's pins; the movement itself is in motion.h and the serial language in protocol.h.
+// DUEN chess board gantry firmware: two NEMA 17s on DRV8825s, an electromagnet and the MG90 arm
+// that lifts it to the board, driven over USB serial by the Raspberry Pi (gantry/pi/gantry_driver.py).
+// This file is only the glue to the board's pins; the movement itself is in motion.h and the serial
+// language in protocol.h.
 //
-// Board: ESP32 Dev Module (same pins as Prototype_Program.ino) or, with GANTRY_CNC_SHIELD
+// Board: ESP32 Dev Module (same motor pins as Prototype_Program.ino) or, with GANTRY_CNC_SHIELD
 // defined in config.h, an Arduino Uno/Nano on a CNC Shield v3. Open gantry_firmware.ino in
 // the Arduino IDE; the other .h files in this folder come along.
 #include <Arduino.h>
@@ -11,15 +12,41 @@
 #include "motion.h"
 #include "protocol.h"
 
+// ----------------------------------------------------------------------------- the servo pulse
+// 50 Hz, 500-2500 us. ESP32: an LEDC channel, no library. AVR: the Servo library that comes with
+// the core (it uses Timer1 and a 50 Hz software schedule).
 #if PIN_SERVO >= 0
 #if defined(ESP32)
-#include <ESP32Servo.h>   // Library Manager: "ESP32Servo"
+static const int SERVO_LEDC_CHANNEL = 0;      // the step pins are driven by hand, so every LEDC channel is free
+static const int SERVO_LEDC_BITS = 16;
+static void servo_begin() {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(PIN_SERVO, 50, SERVO_LEDC_BITS);
+#else
+  ledcSetup(SERVO_LEDC_CHANNEL, 50, SERVO_LEDC_BITS);
+  ledcAttachPin(PIN_SERVO, SERVO_LEDC_CHANNEL);
+#endif
+}
+static void servo_write(int angle) {
+  if (angle < 0) angle = 0;
+  if (angle > 180) angle = 180;
+  uint32_t pulse_us = SERVO_MIN_PULSE_US + (uint32_t)angle * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US) / 180UL;
+  uint32_t duty = (uint32_t)(((uint64_t)pulse_us << SERVO_LEDC_BITS) / 20000ULL);   // 20 ms period
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(PIN_SERVO, duty);
+#else
+  ledcWrite(SERVO_LEDC_CHANNEL, duty);
+#endif
+}
 #else
 #include <Servo.h>
-#endif
 static Servo lift;
+static void servo_begin() { lift.attach(PIN_SERVO, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US); }
+static void servo_write(int angle) { lift.write(angle); }
+#endif
 #endif
 
+// ----------------------------------------------------------------------------- the pins
 struct BoardHal : gantry::Hal {
   void set_dir(int motor, bool positive) override {
     digitalWrite(motor == 0 ? PIN_X_DIR : PIN_Y_DIR, positive ? HIGH : LOW);
@@ -48,11 +75,15 @@ struct BoardPeripherals : gantry::Peripherals {
   void magnet(bool want) override {
     on = want;
     digitalWrite(PIN_MAGNET, (want == MAGNET_ACTIVE_HIGH) ? HIGH : LOW);
-#if PIN_SERVO >= 0
-    lift.write(want ? SERVO_DOWN_DEG : SERVO_UP_DEG);
-#endif
   }
   bool magnet_on() override { return on; }
+  void servo(int angle) override {
+#if PIN_SERVO >= 0
+    servo_write(angle);
+#else
+    (void)angle;
+#endif
+  }
 };
 
 struct SerialWriter : gantry::Writer {
@@ -71,6 +102,11 @@ static const gantry::Settings SETTINGS = {
     COREXY,
     PIN_X_MIN >= 0 && PIN_Y_MIN >= 0,
     HOME_X_FIRST,
+    MAX_STEP_HZ,
+    IDLE_DISABLE_MS,
+    ENABLE_SETTLE_MS,
+    MOVE_BUDGET_FACTOR,
+    MOVE_BUDGET_MARGIN_MS,
 };
 
 static const gantry::BoardGeometry BOARD = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS};
@@ -81,8 +117,9 @@ static SerialWriter writer;
 static gantry::Motion motion(hal, SETTINGS);
 static gantry::Protocol protocol(motion, peripherals, writer, SETTINGS, BOARD, FIRMWARE_VERSION);
 
-static char line[96];
+static char line[SERIAL_LINE_MAX];
 static size_t line_len = 0;
+static bool line_overflow = false;
 
 // DRV8825 M0 M1 M2 for each microstep setting, when those inputs are wired to GPIOs.
 static void set_microstep_pins() {
@@ -104,29 +141,49 @@ static void set_microstep_pins() {
   }
 }
 
+// Run the step timer and the sequence until the board is still (only used at boot for the self-test).
+static void run_until_still() {
+  while (motion.moving() || protocol.busy()) {
+    motion.run();
+    protocol.tick(micros());
+  }
+}
+
 void setup() {
+  // 1. Every output safe before anything else: drivers disabled (EN high), magnet off, arm down.
   const int outputs[] = {PIN_X_DIR, PIN_X_STEP, PIN_X_EN, PIN_Y_DIR, PIN_Y_STEP, PIN_Y_EN, PIN_MAGNET};
   for (int pin : outputs) pinMode(pin, OUTPUT);
-  set_microstep_pins();
-  if (PIN_X_MIN >= 0) pinMode(PIN_X_MIN, INPUT_PULLUP);
-  if (PIN_Y_MIN >= 0) pinMode(PIN_Y_MIN, INPUT_PULLUP);
   digitalWrite(PIN_X_STEP, LOW);
   digitalWrite(PIN_Y_STEP, LOW);
   hal.enable_motors(false);
   peripherals.magnet(false);
 #if PIN_SERVO >= 0
-  lift.attach(PIN_SERVO);
-  lift.write(SERVO_UP_DEG);
+  servo_begin();
+  servo_write(SERVO_RETRACT_DEG);
 #endif
+  set_microstep_pins();
+  if (PIN_X_MIN >= 0) pinMode(PIN_X_MIN, INPUT_PULLUP);
+  if (PIN_Y_MIN >= 0) pinMode(PIN_Y_MIN, INPUT_PULLUP);
+
+  // 2. The numbers the protocol enforces.
   protocol.set_carry(CARRY_SPEED_MM_S, GRAB_MS, RELEASE_MS);
+  protocol.set_servo(PIN_SERVO >= 0, SERVO_EXTEND_DEG, SERVO_RETRACT_DEG, SERVO_SETTLE_MS);
+  protocol.set_guards(MAGNET_MAX_ON_MS, MAGNET_MIN_OFF_MS, HOST_TIMEOUT_MS);
+
+  // 3. Settle, then listen. Anything the Pi sent while the ESP32 was resetting is dropped.
+  delay(BOOT_SETTLE_MS);
   Serial.begin(SERIAL_BAUD);
   delay(50);
+  while (Serial.available()) Serial.read();
   Serial.println();
   Serial.print("[");
   Serial.print(FIRMWARE_VERSION);
   Serial.println(" ready: $X to unlock, $H to home, $T to self-test, CARRY e2 e4 to move a piece]");
 #if SELFTEST_AT_BOOT
   delay(5000);
+  char home[] = "$H";
+  protocol.handle_line(home, micros());
+  run_until_still();
   char test[] = "$T";
   protocol.handle_line(test, micros());
 #endif
@@ -135,19 +192,25 @@ void setup() {
 void loop() {
   motion.run();
   protocol.tick(micros());
-  if (protocol.take_disable_request()) hal.enable_motors(false);
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
       line[line_len] = 0;
-      if (line_len) protocol.handle_line(line, micros());
+      if (line_overflow) {
+        Serial.println("error:1 line too long");   // never act on a truncated command
+      } else if (line_len) {
+        protocol.handle_line(line, micros());
+      }
       line_len = 0;
+      line_overflow = false;
     } else if (c == '?' || c == '!') {
       // Real-time characters, answered even in the middle of a line, like GRBL.
       char one[2] = {c, 0};
       protocol.handle_line(one, micros());
     } else if (line_len < sizeof line - 1) {
       line[line_len++] = c;
+    } else {
+      line_overflow = true;
     }
     motion.run();  // never let serial parsing starve the step timer
   }

@@ -16,7 +16,9 @@
 #define PIN_Y_STEP 25
 #define PIN_Y_EN 26
 #define PIN_MAGNET 27   // gate of the MOSFET (or relay input) that switches the 12 V electromagnet
-#define PIN_SERVO -1    // MG90 that lowers/raises the magnet: set to its GPIO (e.g. 32) and install "ESP32Servo"; -1 = none
+#define PIN_SERVO 13    // signal wire of the MG90 that pushes the magnet up to the board and pulls it back. Prototype_Program.ino
+                        // on main has no servo pin (motors only), so this is a free choice: GPIO 13 is unused by the motors,
+                        // can drive LEDC PWM and is not a strapping pin. -1 = no servo: the magnet stays at the board top.
 #define PIN_X_MIN 34    // homing switches at the X=0 and Y=0 ends; -1 when there are none (bump homing)
 #define PIN_Y_MIN 35    // GPIO 34/35 are input-only on the ESP32, so they need external pull-ups
 // DRV8825 microstep inputs M0 M1 M2. Left unconnected they read LOW = full steps, and the
@@ -33,7 +35,7 @@
 #define PIN_Y_STEP 3
 #define PIN_Y_EN 8
 #define PIN_MAGNET 12   // "Spindle enable"
-#define PIN_SERVO -1    // "Spindle direction" is pin 13 if a servo is added
+#define PIN_SERVO 13    // "Spindle direction" header carries the servo signal; -1 = no servo
 #define PIN_X_MIN 9
 #define PIN_Y_MIN 10
 #define PIN_M0 -1       // on the shield the microstep mode is set with the jumpers under each driver
@@ -77,10 +79,18 @@
 
 #define HOME_X_FIRST true
 
-// ----------------------------------------------------------------------------- magnet
+// ----------------------------------------------------------------------------- magnet and servo
 #define MAGNET_ACTIVE_HIGH true
-#define SERVO_DOWN_DEG 10         // magnet touching the underside of the board
-#define SERVO_UP_DEG 70           // magnet dropped away from the board
+// The MG90 arm that carries the electromagnet: extended = magnet touching the underside of the
+// board top, retracted = dropped clear of it so the carriage can travel without dragging pieces.
+// 90 / 0 are placeholders: set them on the real arm with M7 (extend) and M8 (retract) while
+// watching it, so that extended just touches the board and retracted clears the thickest piece's
+// pull. The servo takes 5 V from the supply's 5 V rail (or a BEC), never from the ESP32's 3.3 V pin.
+#define SERVO_EXTEND_DEG 90
+#define SERVO_RETRACT_DEG 0
+#define SERVO_SETTLE_MS 300       // time for the arm to arrive before the magnet switches or the carriage moves
+#define SERVO_MIN_PULSE_US 500    // MG90: 500 us = 0 deg, 2500 us = 180 deg at 50 Hz
+#define SERVO_MAX_PULSE_US 2500
 
 // ----------------------------------------------------------------------------- the board, as the firmware knows it
 // So that the Pi can say "CARRY g1 f3" and the board works out the millimetres itself. These are
@@ -100,13 +110,83 @@
 #define CARRY_SPEED_MM_S 60.0f    // with a piece under the magnet (G0/GOTO use MAX_SPEED_MM_S)
 #define GRAB_MS 300               // after the magnet switches on, before moving
 #define RELEASE_MS 200            // after it switches off, before moving away
-#define PROGRAM_STEPS 32          // longest sequence one command may queue
+// Longest sequence one command may queue: $T with the servo is 38 steps, a CARRY is 10 plus its
+// via-points. An Uno has 2 KB of RAM in all, so it gets a shorter queue and a shorter line.
+#ifdef __AVR__
+#define PROGRAM_STEPS 40
+#else
+#define PROGRAM_STEPS 48
+#endif
+
+// ----------------------------------------------------------------------------- safety policies
+// Each of these protects a part that can be destroyed by software alone. The firmware enforces
+// them whatever the Pi sends; README.md ("Safety policies") lists them in plain words.
+//
+// The electromagnet coil. A 12 V electromagnet held on heats up; a carry is a few seconds, so
+// anything longer is a fault (a crashed Pi, a stuck program). After MAGNET_MAX_ON_MS the firmware
+// switches it off, stops and raises the alarm "magnet on too long"; M3 within MAGNET_MIN_OFF_MS of
+// the last release is refused (a sequence waits instead), so the coil never sits at duty 1.
+// A CARRY whose planned magnet-on time would exceed MAGNET_MAX_ON_MS is refused before it starts,
+// so the policy never drops a piece in a lane. The magnet is off at boot, on any alarm, on hold
+// (!), on $X, and after a program ends with the host lost. M3 is also refused while not homed,
+// while moving, and (with a servo) while the arm is retracted: a magnet that is not at the board
+// pulls nothing and only heats.
+#define MAGNET_MAX_ON_MS 15000
+#define MAGNET_MIN_OFF_MS 500
+
+// The servo arm and the pieces. With the arm extended the magnet is at the board top, so a travel
+// at full speed would drag whatever piece it passes under and could rip the arm: G0, GOTO, CARRY's
+// own travel and any G1 faster than CARRY_SPEED_MM_S are refused while the arm is up (M8 first).
+// The arm is retracted at boot, on any alarm, on hold, on $X, on host lost and after every M5.
+
+// The stepper motors and the DRV8825 drivers. A stepper that is enabled but not moving draws its
+// full holding current and the driver dissipates it as heat; the 13 N.cm NEMA 17s and the small
+// DRV8825 heat sinks are not meant to sit like that for hours. The drivers are disabled at boot
+// and after IDLE_DISABLE_MS without motion; before the first step after enabling, the firmware
+// waits ENABLE_SETTLE_MS for the driver's charge pump (the datasheet asks for about 1 ms).
+#define IDLE_DISABLE_MS 30000
+#define ENABLE_SETTLE_MS 5
+
+// The step pulse rate. The DRV8825 needs at least 1.9 us high and 1.9 us low per step, and the
+// ESP32 loop issues one step per pass; MAX_STEP_HZ caps the dominant motor's step rate, which
+// caps every feed rate (at 40 steps/mm, 20 kHz is 500 mm/s, far above MAX_SPEED_MM_S: the cap
+// matters if someone sets 1/32 microstepping or a tiny pulley). Acceleration is capped at
+// MAX_ACCEL_MM_S2 by construction: no command can raise it.
+#define MAX_STEP_HZ 20000.0f
+
+// A move that takes far longer than planned means the loop is starved or a program is stuck; the
+// motors would sit at full current in the meantime. Every move gets a time budget of
+// MOVE_BUDGET_FACTOR times its planned duration plus MOVE_BUDGET_MARGIN_MS; past it the firmware
+// stops, drops the magnet, disables the drivers and raises the alarm "move took too long".
+// (Open-loop steppers cannot feel a jammed carriage; a stall shows up as a wrong position at the
+// next camera check, and homing without switches relies on stalling on purpose, which is why
+// HOMING_SPEED_MM_S stays low and HOMING_BUMP_MM short: a switchless bump is the most current
+// the motors ever draw, so it must be slow and brief.)
+#define MOVE_BUDGET_FACTOR 2.0f
+#define MOVE_BUDGET_MARGIN_MS 1000
+
+// The Pi going quiet while a program runs (a crash, a pulled cable). After HOST_TIMEOUT_MS with
+// no line from the host the firmware finishes the running CARRY, so no piece is dropped in a
+// lane, then releases the magnet, disables the drivers and reports |Host:lost in its status until
+// $X or $H, so a person checks the board before the next job.
+#define HOST_TIMEOUT_MS 20000
+
+// Power-up. Every output is put in its safe state (drivers disabled, magnet off, servo up) before
+// anything else, and commands are accepted only after BOOT_SETTLE_MS, so a Pi that is still
+// talking when the ESP32 resets cannot start a move on a half-initialised board.
+#define BOOT_SETTLE_MS 500
 
 // The Arduino's own test: type $T in the serial monitor, or set SELFTEST_AT_BOOT true to run it
-// five seconds after power-up with nothing attached to the USB port. It homes, visits the four
-// corner squares, switches the magnet on and off on e4, and carries e4 -> f6 -> e4 through the
-// lanes the way a knight moves. Needs the motors wired and the travel clear.
+// five seconds after power-up with nothing attached to the USB port (the sketch homes first).
+// $T needs the board homed: it visits the four corner squares, switches the magnet on and off on
+// e4, carries e4 -> f6 -> e4 through the lanes the way a knight moves, and returns to a1. Needs
+// the motors wired and the travel clear.
 #define SELFTEST_AT_BOOT false
 
 #define SERIAL_BAUD 115200
+#ifdef __AVR__
+#define SERIAL_LINE_MAX 128       // longest command line; a CARRY with its via-points can pass 100 characters
+#else
+#define SERIAL_LINE_MAX 192
+#endif
 #define FIRMWARE_VERSION "duen-gantry 0.2"
