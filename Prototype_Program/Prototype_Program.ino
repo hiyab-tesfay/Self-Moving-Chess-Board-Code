@@ -1,89 +1,67 @@
-// ESP32 Dev Module (classic ESP32-WROOM-32)
-// Two NEMA 17 Stepper Motors with DRV8825 Drivers
-
 #include <Arduino.h>
 
 #if !defined(CONFIG_IDF_TARGET_ESP32)
-#error "This GPIO mapping requires a classic ESP32. Select ESP32 Dev Module or adapt the pins for your board."
+#error "Select ESP32 Dev Module for the classic ESP32-WROOM-32."
 #endif
 
-// Motor 1
-#define DIR1  18
-#define STEP1 19
-#define EN1   21
+// Motor 1 moves X. Motor 2 moves Y.
+constexpr int DIR_X  = 18;
+constexpr int STEP_X = 19;
+constexpr int EN_X   = 21;
 
-// Motor 2
-#define DIR2  22
-#define STEP2 25
-#define EN2   26
+constexpr int DIR_Y  = 22;
+constexpr int STEP_Y = 25;
+constexpr int EN_Y   = 26;
 
-// Motor settings
-const int stepsPerMove = 400;
-const int stepDelay = 1500;
+// Change either value to LOW if that axis moves backward.
+constexpr int X_RIGHT = HIGH;
+constexpr int Y_UP    = HIGH;
+
+constexpr int STEPS_PER_SQUARE = 400;
+constexpr int STEPS_PER_SIDE = 7 * STEPS_PER_SQUARE;
+
+constexpr unsigned int STEP_HALF_PERIOD_US = 1500;
+constexpr unsigned long START_DELAY_MS = 3000;
+constexpr unsigned long CORNER_PAUSE_MS = 750;
+
+void moveSide(int dirPin, int stepPin, int direction) {
+  digitalWrite(dirPin, direction);
+  delayMicroseconds(5);
+
+  for (int step = 0; step < STEPS_PER_SIDE; ++step) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(STEP_HALF_PERIOD_US);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(STEP_HALF_PERIOD_US);
+  }
+
+  delay(CORNER_PAUSE_MS);
+}
 
 void setup() {
-  // Motor 1 pins
-  pinMode(DIR1, OUTPUT);
-  pinMode(STEP1, OUTPUT);
-  pinMode(EN1, OUTPUT);
+  pinMode(EN_X, OUTPUT);
+  pinMode(EN_Y, OUTPUT);
+  digitalWrite(EN_X, HIGH);
+  digitalWrite(EN_Y, HIGH);
 
-  // Motor 2 pins
-  pinMode(DIR2, OUTPUT);
-  pinMode(STEP2, OUTPUT);
-  pinMode(EN2, OUTPUT);
+  pinMode(DIR_X, OUTPUT);
+  pinMode(STEP_X, OUTPUT);
+  pinMode(DIR_Y, OUTPUT);
+  pinMode(STEP_Y, OUTPUT);
+  digitalWrite(STEP_X, LOW);
+  digitalWrite(STEP_Y, LOW);
 
-  // Initialize STEP pins
-  digitalWrite(STEP1, LOW);
-  digitalWrite(STEP2, LOW);
+  delay(START_DELAY_MS);
 
-  // Enable both DRV8825 drivers
-  digitalWrite(EN1, LOW);
-  digitalWrite(EN2, LOW);
-
+  // DRV8825 drivers are enabled when EN is LOW.
+  digitalWrite(EN_X, LOW);
+  digitalWrite(EN_Y, LOW);
   delay(100);
 }
 
 void loop() {
-
-  // Both motors forward
-  digitalWrite(DIR1, HIGH);
-  digitalWrite(DIR2, HIGH);
-
-  delay(10);
-
-  for (int i = 0; i < stepsPerMove; i++) {
-
-    digitalWrite(STEP1, HIGH);
-    digitalWrite(STEP2, HIGH);
-
-    delayMicroseconds(stepDelay);
-
-    digitalWrite(STEP1, LOW);
-    digitalWrite(STEP2, LOW);
-
-    delayMicroseconds(stepDelay);
-  }
-
-  delay(500);
-
-  // Both motors backward
-  digitalWrite(DIR1, LOW);
-  digitalWrite(DIR2, LOW);
-
-  delay(10);
-
-  for (int i = 0; i < stepsPerMove; i++) {
-
-    digitalWrite(STEP1, HIGH);
-    digitalWrite(STEP2, HIGH);
-
-    delayMicroseconds(stepDelay);
-
-    digitalWrite(STEP1, LOW);
-    digitalWrite(STEP2, LOW);
-
-    delayMicroseconds(stepDelay);
-  }
-
-  delay(500);
+  moveSide(DIR_X, STEP_X, !X_RIGHT);  // Left:  h1 -> a1
+  moveSide(DIR_Y, STEP_Y, Y_UP);      // Up:    a1 -> a8
+  moveSide(DIR_X, STEP_X, X_RIGHT);   // Right: a8 -> h8
+  moveSide(DIR_Y, STEP_Y, !Y_UP);     // Down:  h8 -> h1
 }
