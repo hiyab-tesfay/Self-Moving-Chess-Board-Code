@@ -16,9 +16,15 @@
 #define PIN_Y_STEP 25
 #define PIN_Y_EN 26
 #define PIN_MAGNET 27   // gate of the MOSFET (or relay input) that switches the 12 V electromagnet
-#define PIN_SERVO 32    // MG90 that lowers/raises the magnet; -1 when there is none
+#define PIN_SERVO -1    // MG90 that lowers/raises the magnet: set to its GPIO (e.g. 32) and install "ESP32Servo"; -1 = none
 #define PIN_X_MIN 34    // homing switches at the X=0 and Y=0 ends; -1 when there are none (bump homing)
 #define PIN_Y_MIN 35    // GPIO 34/35 are input-only on the ESP32, so they need external pull-ups
+// DRV8825 microstep inputs M0 M1 M2. Left unconnected they read LOW = full steps, and the
+// motion would be 8x too long for MICROSTEPS 8. Either tie them to 3.3 V by hand for 1/8
+// (M0 and M1 high, M2 low) or wire them to GPIOs here and the sketch sets them.
+#define PIN_M0 -1
+#define PIN_M1 -1
+#define PIN_M2 -1
 #else
 #define PIN_X_DIR 5
 #define PIN_X_STEP 2
@@ -27,9 +33,12 @@
 #define PIN_Y_STEP 3
 #define PIN_Y_EN 8
 #define PIN_MAGNET 12   // "Spindle enable"
-#define PIN_SERVO 11    // "Spindle direction"
+#define PIN_SERVO -1    // "Spindle direction" is pin 13 if a servo is added
 #define PIN_X_MIN 9
 #define PIN_Y_MIN 10
+#define PIN_M0 -1       // on the shield the microstep mode is set with the jumpers under each driver
+#define PIN_M1 -1
+#define PIN_M2 -1
 #endif
 
 #define ENDSTOP_PRESSED_LEVEL 0   // switches wired to ground with a pull-up read 0 when pressed

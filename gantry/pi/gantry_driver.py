@@ -13,9 +13,14 @@ Jobs are the JSON that the website's game server produces, one per chess move:
         {"op": "carry", "piece": "p", "from": "e7", "to": "e5", "path": [[4, 6], [4, 4]]}]}
 
 Path points are in squares: a1 is (0, 0), h8 is (7, 7), x.5 are the lanes between squares,
-and captured pieces park at x = -1, -2 (White's) and 8, 9 (Black's), rows 0 to 7. Slots are
-named "w:0" to "w:15" and "b:0" to "b:15". For a carry: go to the first point, magnet on,
-follow the rest of the points, magnet off.
+and captured pieces park in the lanes beside the board at x = -1 (White's) and 8 (Black's),
+with the row an index down the lane. Slots are named "w:0", "w:1", ... and "b:0", ... For
+a carry: go to the first point, magnet on, follow the rest of the points, magnet off.
+
+When the job also lists "before" (the squares and slots occupied as it starts), every
+carry's path is found here by board_paths.py so that the carried piece touches nothing,
+and a blocking piece is moved aside and put back when there is no other way. Without
+"before", the paths in the job are used as they are.
 
 Usage (the website runs the first form through CHESS_MOTION_COMMAND):
     gantry_driver.py < job.json             perform a job; exit 0 when the pieces have stopped
@@ -43,6 +48,9 @@ import threading
 import time
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import board_paths  # noqa: E402
+
 DEFAULT_CONFIG = HERE / "gantry_config.json"
 VIRTUAL_GANTRY = HERE.parent / "firmware" / "host" / "virtual_gantry"
 STATUS = re.compile(r"<(?P<state>[A-Za-z]+)(?::(?P<reason>[^|>]*))?\|MPos:(?P<x>-?[\d.]+),(?P<y>-?[\d.]+)(?:\|Mag:(?P<mag>[01]))?(?:\|Homed:(?P<homed>[01]))?")
@@ -83,8 +91,21 @@ class BoardMap:
         return self.point_mm(FILES.index(name[0]), int(name[1]) - 1)
 
     def point_mm(self, px: float, py: float) -> tuple[float, float]:
-        """A path point in square units, lanes (x.5) included."""
-        return self._interp(self.columns, px, "column"), self._interp(self.rows, py, "row", self.park_rows)
+        """A path point in square units, lanes (x.5) included. In a parking column, py is a slot index down the lane."""
+        x = self._interp(self.columns, px, "column")
+        if px <= -1 or px >= 8:
+            row = int(py)
+            if row != py or row < 0 or row >= len(self.park_rows):
+                raise GantryError(f"parking row {py:g} is not configured")
+            return x, self.park_rows[row]
+        return x, self._interp(self.rows, py, "row")
+
+    def geometry(self, config: dict):
+        """The same numbers for board_paths."""
+        return board_paths.Geometry(
+            self.square, self.a1, {c: x for c, x in self.columns.items() if c < 0 or c > 7},
+            [self.park_rows[i] for i in sorted(self.park_rows)],
+            float(config.get("piece_mm", 27.0)), float(config.get("clearance_mm", 3.0)))
 
     def _interp(self, table: dict, value: float, what: str, outer: dict | None = None) -> float:
         """Whole numbers are configured centres; x.5 lies halfway between its neighbours, or half a square past the last one."""
@@ -109,12 +130,37 @@ class BoardMap:
 
 # ----------------------------------------------------------------------------- the plan for a job
 
+def route(job: dict, board: BoardMap, config: dict) -> list[dict]:
+    """The job's steps with every carry's path found afresh, and room made where a piece cannot pass.
+
+    Needs the job's "before": the squares and slots occupied when the job starts. Without it
+    the paths in the job are used as they are.
+    """
+    if "before" not in job:
+        return list(job.get("steps", []))
+    world = board_paths.Board(board.geometry(config), job["before"])
+    steps: list[dict] = []
+    for step in job.get("steps", []):
+        if step.get("op") != "carry":
+            steps.append(step)
+            continue
+        try:
+            carries = world.plan(step["from"], step["to"])
+        except board_paths.NoPath as exc:
+            raise GantryError(str(exc)) from None
+        for carry in carries:
+            piece = step.get("piece", "?") if carry.reason == "move" else "?"
+            steps.append({"op": "carry", "piece": piece, "from": carry.piece_from, "to": carry.piece_to, "path": carry.path, "reason": carry.reason})
+            world.apply(carry)
+    return steps
+
+
 def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
     """G-code lines for a job, each with a note for the log. Fails before anything moves if a point is out of reach."""
     travel_feed = float(config["travel_speed_mm_s"]) * 60
     carry_feed = float(config["carry_speed_mm_s"]) * 60
     lines: list[tuple[str, str]] = []
-    for step in job.get("steps", []):
+    for step in route(job, board, config):
         if step.get("op") == "note":
             lines.append(("# " + step.get("message", ""), "note"))
             continue
@@ -127,6 +173,8 @@ def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
         for (x, y), p in zip(points, path):
             board.check(x, y, f"point {p} of {step['from']}->{step['to']}")
         label = f"{step.get('piece', '?')} {step['from']}->{step['to']}"
+        if step.get("reason") in ("make room", "put back"):
+            label += f" ({step['reason']})"
         x0, y0 = points[0]
         lines.append((f"G1 X{x0:.3f} Y{y0:.3f} F{travel_feed:.0f}", f"go to {step['from']} for {label}"))
         lines.append(("M3", f"grab {label}"))
@@ -336,12 +384,14 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def simple_move_job(uci: str, piece: str = "?") -> dict:
-    """A one-carry job for --move, straight line, no captures (the game server plans those)."""
+def simple_move_job(uci: str, piece: str = "?", occupied=None) -> dict:
+    """A one-carry job for --move. With `occupied` (default: the starting position) the path is found by board_paths."""
     src, dst = uci[:2], uci[2:4]
     fx, fy = FILES.index(src[0]), int(src[1]) - 1
     tx, ty = FILES.index(dst[0]), int(dst[1]) - 1
-    return {"id": 0, "label": uci, "expect": [], "steps": [{"op": "carry", "piece": piece, "from": src, "to": dst, "path": [[fx, fy], [tx, ty]]}]}
+    before = sorted(board_paths.occupied_at_start() | {src} if occupied is None else set(occupied) | {src})
+    return {"id": 0, "label": uci, "expect": [], "before": before,
+            "steps": [{"op": "carry", "piece": piece, "from": src, "to": dst, "path": [[fx, fy], [tx, ty]]}]}
 
 
 def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry")) -> dict:
@@ -412,7 +462,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--port", help="serial port, or 'sim' for the pretend board (default: from the config)")
-    parser.add_argument("--move", metavar="UCI", help="carry one piece, e.g. e2e4")
+    parser.add_argument("--move", metavar="UCI", help="carry one piece, e.g. e2e4, finding a way round the other pieces")
+    parser.add_argument("--occupied", metavar="SQUARES", help="for --move: the occupied squares, comma separated (default: the starting position); 'none' for an empty board")
     parser.add_argument("--home", action="store_true")
     parser.add_argument("--goto", nargs=2, type=float, metavar=("X", "Y"), help="move the empty magnet to X Y mm")
     parser.add_argument("--status", action="store_true")
@@ -427,7 +478,10 @@ def main(argv=None) -> int:
         config = load_config(args.config)
         port = args.port or config.get("port", "/dev/ttyUSB0")
         if args.move:
-            job = simple_move_job(args.move)
+            occupied = None
+            if args.occupied:
+                occupied = [] if args.occupied.strip().lower() == "none" else [s.strip() for s in args.occupied.split(",") if s.strip()]
+            job = simple_move_job(args.move, occupied=occupied)
         elif args.home or args.goto or args.status or args.calibrate:
             job = None
         else:

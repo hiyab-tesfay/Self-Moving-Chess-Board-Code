@@ -71,12 +71,47 @@ Without homing switches the firmware homes by driving each axis slowly past its 
 motor stalls against the frame, then calls that spot 0. A stalled stepper is harmless at
 25 mm/s; make sure nothing fragile is at the home corner.
 
-## Flashing
+## What goes where
+
+- **The ESP32** ("the Arduino") gets `firmware/gantry_firmware/`. That is the only thing
+  that needs flashing.
+- **The Pi** gets `pi/` and runs `gantry_driver.py`, which talks to the ESP32 over the USB
+  cable. Nothing is flashed on the Pi. For a first test the same script runs on a laptop
+  with the ESP32 plugged into it (`pip install pyserial`, then `--port /dev/cu.usbserial-…`
+  on a Mac, `/dev/ttyUSB0` on the Pi).
+
+## Flashing, and the first power-up
 
 Open `firmware/gantry_firmware/gantry_firmware.ino` in the Arduino IDE (the `.h` files in the
-folder come with it). ESP32: board "ESP32 Dev Module", library "ESP32Servo" if a servo is used.
-Serial monitor at 115200: it says `[duen-gantry 0.1 ready: $X to unlock, $H to home]`.
-Then try `$H`, `?`, `G0 X50 Y50`, `M3`, `M5`.
+folder come along). Board: **ESP32 Dev Module**. No library is needed unless `PIN_SERVO` is
+set, in which case install "ESP32Servo". Upload, then open the serial monitor at **115200**
+with "Newline" line endings: it says `[duen-gantry 0.1 ready: $X to unlock, $H to home]`.
+
+Before the first `$H`, check these with the carriage somewhere in the middle of its travel:
+
+1. **DRV8825 microstep pins.** Unconnected M0/M1/M2 mean full steps, and every move would
+   be 8× too long. Tie **M0 and M1 to 3.3 V** (M2 low) for 1/8, or wire them to GPIOs and
+   put those in `PIN_M0`…`PIN_M2` so the sketch sets them, or set `MICROSTEPS 1` to match
+   full steps. Then `G0 X10` after `$X` must move the carriage **10 mm**: measure it.
+2. **Current limit.** `Vref = I / 2` on the DRV8825's trimpot, so 0.45 V for a 1 A motor
+   (0.35 V for 0.7 A). Set it with the motor unplugged.
+3. **Direction.** `$X`, then `G0 X10`: the carriage must move toward the far end of X, away
+   from the corner you want as the origin (the bottom-left corner of sketch 5). If it goes
+   the other way, flip `INVERT_X_DIR` in `config.h` and re-upload. Same for `G0 Y10` and
+   `INVERT_Y_DIR`.
+4. **Homing.** `$H`: each axis drives slowly to its origin end, stalls there for a moment
+   (that is normal without switches; it is the DRV8825 skipping, not damage), backs off
+   2 mm, and `?` then shows `MPos:0.000,0.000|Homed:1`.
+5. **Travel.** `G0 X400`, then `G0 X450`, then smaller steps until the carriage is 3–5 mm
+   from the far end; that X is `MAX_X_MM`. Same for Y. Put them in `config.h` and in
+   `travel_mm` in `gantry_config.json` if they differ from 470 × 420.
+6. **Magnet.** `M3` must pull a piece on the board top; `M5` must let it go. If `M3` does
+   nothing, check `PIN_MAGNET` and the MOSFET; if it is on when it should be off, flip
+   `MAGNET_ACTIVE_HIGH`.
+7. **Stop at any time:** `!` halts the motion immediately; `$X` then `$H` to carry on.
+
+Then from the laptop or the Pi: `python3 gantry_driver.py --port … --calibrate` to find a1
+and the square size, and `--move e2e4` with a piece on e2 for the first real carry.
 
 ## The Pi side
 
@@ -135,11 +170,33 @@ and restart `duen-relay`. Exit status 0 means the pieces have stopped; anything 
 game until someone checks the board. Playing in person on the touchscreen (`pi_game.py`,
 `pi_touch.py`) is unchanged and does not use this.
 
+## Path finding, and making room
+
+`pi/board_paths.py` checks every carry in millimetres: pieces are circles `piece_mm` across
+(27 mm, the widest base in the piece models) and the carried piece must stay `clearance_mm`
+(3 mm) clear of every other piece along the whole way. The search runs over tile centres,
+the midpoints between tiles and the crossings between four tiles, plus the parking lanes,
+and A* picks the shortest route. With 50 mm squares and 27 mm bases, a lane between two
+occupied tiles is 23 mm wide, so a piece cannot pass there; the finder goes round instead,
+and an empty parking lane counts as a corridor. When every way is shut, it moves one
+blocking piece to a free tile, makes the move, and puts the blocker back: the job then has
+three carries, which the firmware and the camera check already handle. The first knight
+move of a game is such a case: a pawn steps aside for it.
+
+```sh
+python3 gantry_driver.py --dry-run --move g1f3            # from the starting position
+python3 gantry_driver.py --dry-run --move a1a8 --occupied a1,a4,b2
+```
+
+Jobs from the website carry the paths the game server planned; when a job also lists
+`"before"` (the squares and slots occupied as it starts), the Pi finds every path afresh
+with these checks. Both `piece_mm` and `clearance_mm` can be set in `gantry_config.json`.
+
 ## Testing without hardware
 
 ```sh
 make -C gantry/firmware/host test          # motion and protocol checks: 56 of them
-cd gantry/pi && python3 -m unittest test_gantry_driver
+cd gantry/pi && python3 -m unittest test_board_paths test_gantry_driver
 ```
 
 The second suite builds `firmware/host/virtual_gantry`, a pretend board that runs the real

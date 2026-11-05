@@ -134,11 +134,16 @@ class PretendBoardTests(unittest.TestCase):
         self.assertIn("to X=410.000 Y=35.000", moves[-1], "the last jog ends under h1")
 
     def test_dry_run_prints_the_gcode_and_the_prediction(self):
-        result = subprocess.run([sys.executable, str(Path(gd.__file__)), "--dry-run", "--config", str(self.config_path), "--move", "a1a8"],
+        result = subprocess.run([sys.executable, str(Path(gd.__file__)), "--dry-run", "--config", str(self.config_path), "--move", "a2a4"],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr[-300:])
-        self.assertIn("G1 X75.000 Y390.000 F3600", result.stdout)
+        self.assertIn("G1 X75.000 Y190.000 F3600", result.stdout, "a straight clear run from a2 to a4")
         self.assertIn("motor steps X=", result.stdout)
+        knight = subprocess.run([sys.executable, str(Path(gd.__file__)), "--dry-run", "--config", str(self.config_path), "--move", "g1f3"],
+                                capture_output=True, text=True)
+        self.assertEqual(knight.returncode, 0, knight.stderr[-300:])
+        self.assertIn("(make room)", knight.stdout, "at the start a pawn has to step aside for the knight")
+        self.assertIn("(put back)", knight.stdout)
 
     @classmethod
     def tearDownClass(cls):

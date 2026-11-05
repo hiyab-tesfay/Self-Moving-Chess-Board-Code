@@ -82,8 +82,30 @@ static gantry::Protocol protocol(motion, peripherals, writer, SETTINGS, FIRMWARE
 static char line[96];
 static size_t line_len = 0;
 
+// DRV8825 M0 M1 M2 for each microstep setting, when those inputs are wired to GPIOs.
+static void set_microstep_pins() {
+  int m0 = 0, m1 = 0, m2 = 0;
+  switch (MICROSTEPS) {
+    case 2: m0 = 1; break;
+    case 4: m1 = 1; break;
+    case 8: m0 = 1; m1 = 1; break;
+    case 16: m2 = 1; break;
+    case 32: m0 = 1; m1 = 1; m2 = 1; break;
+    default: break;  // 1 = full steps
+  }
+  const int pins[3] = {PIN_M0, PIN_M1, PIN_M2};
+  const int levels[3] = {m0, m1, m2};
+  for (int i = 0; i < 3; i++) {
+    if (pins[i] < 0) continue;
+    pinMode(pins[i], OUTPUT);
+    digitalWrite(pins[i], levels[i] ? HIGH : LOW);
+  }
+}
+
 void setup() {
-  for (int pin : {PIN_X_DIR, PIN_X_STEP, PIN_X_EN, PIN_Y_DIR, PIN_Y_STEP, PIN_Y_EN, PIN_MAGNET}) pinMode(pin, OUTPUT);
+  const int outputs[] = {PIN_X_DIR, PIN_X_STEP, PIN_X_EN, PIN_Y_DIR, PIN_Y_STEP, PIN_Y_EN, PIN_MAGNET};
+  for (int pin : outputs) pinMode(pin, OUTPUT);
+  set_microstep_pins();
   if (PIN_X_MIN >= 0) pinMode(PIN_X_MIN, INPUT_PULLUP);
   if (PIN_Y_MIN >= 0) pinMode(PIN_Y_MIN, INPUT_PULLUP);
   digitalWrite(PIN_X_STEP, LOW);
