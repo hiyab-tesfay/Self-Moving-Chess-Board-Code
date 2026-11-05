@@ -407,6 +407,7 @@ class Link:
         self.traces: list[str] = []
         self.process, self.serial = None, None
         self.lines: queue.Queue = queue.Queue()
+        self.pretend = port == "sim"   # the pretend board may always be homed: nothing can hit anything
         if port == "sim":
             exe = os.environ.get("GANTRY_VIRTUAL", str(VIRTUAL_GANTRY))
             if not Path(exe).exists():
@@ -604,14 +605,19 @@ class Gantry:
         self.command("$H")
         self.wait_idle(120, "homing")
 
-    def unlock(self) -> None:
+    def unlock(self, may_bump: bool = True) -> None:
         """After a person has checked the board: clear the alarm or hold and find the position again."""
         self.command("$X")
-        self.home()
+        self.ensure_homed(may_bump)
 
-    def ensure_homed(self) -> None:
+    def ensure_homed(self, may_bump: bool = True) -> None:
+        """A real move needs a real zero. With may_bump the board finds it itself ($H: switches, or a slow bump into
+        the corner on a frame without them); otherwise a person must have homed it ($HM by hand, or $H) first."""
         state = self.status()
         if state["state"] == "Alarm" or not state["homed"]:
+            if not may_bump:
+                raise GantryError("The board is not homed. Push the carriage into the bottom-left corner and send $HM "
+                                  "(home.sh manual), or send $H to let it bump-home, then try again.")
             self.home()
 
     def set_board(self, config: dict) -> None:
@@ -683,6 +689,12 @@ def plan_job(job: dict, config: dict) -> list[tuple[str, str]]:
     return plan(job, board, config) if uses_gcode(config) else plan_carry(job, board, config)
 
 
+def may_bump_home(config: dict, link) -> bool:
+    """Whether the driver may send $H itself. On the real frame that is the config's call (home_on_start:
+    false once a person homes it by hand, since there are no switches); the pretend board may always."""
+    return bool(config.get("home_on_start", True)) or bool(getattr(link, "pretend", False))
+
+
 def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry"), progress=None) -> dict:
     """Perform one job on an open link. progress(text), when given, hears about each carry as it starts.
 
@@ -695,8 +707,7 @@ def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry")
     gantry.check_safe()
     if not uses_gcode(config):
         gantry.set_board(config)
-    if config.get("home_on_start", True):
-        gantry.ensure_homed()
+    gantry.ensure_homed(may_bump_home(config, link))
     log.info("JOB %s: %d commands", job.get("label", "?"), len(lines))
     try:
         gantry.perform(lines, config, progress)
@@ -763,7 +774,7 @@ def calibrate(gantry: Gantry, config: dict, config_path: Path, read=input, write
     the origin of the squares, and a1 to h1 is seven squares, which gives their size.
     """
     board = BoardMap(config)
-    gantry.ensure_homed()
+    gantry.ensure_homed(may_bump_home(config, gantry.link))
     pos = [0.0, 0.0]
 
     def goto(x: float, y: float) -> None:
@@ -893,14 +904,14 @@ def main(argv=None) -> int:
             else:
                 gantry = Gantry(link, log)
                 if args.unlock:
-                    gantry.unlock()
+                    gantry.unlock(may_bump_home(config, gantry.link))
                 if args.calibrate:
                     calibrate(gantry, config, args.config)
                 if args.home:
                     gantry.home()
                 if args.goto:
                     BoardMap(config).check(args.goto[0], args.goto[1], "--goto")
-                    gantry.ensure_homed()
+                    gantry.ensure_homed(may_bump_home(config, gantry.link))
                     gantry.command(f"G0 X{args.goto[0]:.3f} Y{args.goto[1]:.3f}")
                     gantry.wait_idle(60, "--goto")
                 state = gantry.status()
