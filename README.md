@@ -49,21 +49,17 @@ The program verifies the starting setup, scans each White move, announces Stockf
 
 ## Touch screen play
 
-Connect the LCD touch screen and make sure Raspberry Pi OS shows its desktop on that display and touch input works. From a desktop terminal, launch the full-screen touch interface:
+Connect the LCD touch screen and make sure Raspberry Pi OS shows its desktop on that display and touch input works. Complete `setup`, `check`, and `scan` above before starting a game. From a desktop terminal, launch the full-screen touch interface:
 
 ```sh
 .venv/bin/python pi_touch.py
 ```
 
-For a USB camera, use `--camera usb` (and `--device 1` if needed). For development in a normal window, add `--windowed`. The `--corners TL_X TL_Y TR_X TR_Y BR_X BR_Y BL_X BL_Y` option is available when corners are already known; touch calibration can also find or select corners without it.
+For a USB camera, use `--camera usb` (and `--device 1` if needed). For development in a normal window, add `--windowed`. If calibration used manually specified corners rather than visible ArUco markers or saved fixed corners, pass `--corners TL_X TL_Y TR_X TR_Y BR_X BR_Y BL_X BL_Y` as with `pi_game.py`.
 
-The first screen after launch is **Calibrate Board**. If this camera and board already have a valid saved calibration, tap **Use Saved Calibration** to continue. Otherwise, remove every piece and tap **Take Empty Photo**. If all four ArUco markers are visible, the app finds the empty-board corners automatically. Otherwise, it displays the empty photo so you can tap the four outer corners in this order: top-left, top-right, bottom-right, bottom-left. Then place all 32 pieces in the standard starting position, with White at the bottom of the photo, and tap **Take Setup Photo**. The app finds the setup photo's corners independently; if markers are not visible, tap the four outer corners again on that new photo. It then checks the starting position before saving calibration. If alignment fails, retake the setup photo or redo either photo's corners. After it reports **Calibration saved**, tap **Choose Difficulty**. You can recalibrate from the difficulty menu whenever the camera or lighting changes.
+Select Beginner, Intermediate, or Advanced, then tap **Start Game**. Place the pieces in the starting position and tap **Scan Starting Board**. Move White on the physical board and tap **Scan Move**. A legal move appears in green; an unchanged, uncertain, or unmatched board asks you to correct it and scan again. Tap a white piece on the displayed board to see its legal destination squares. If several legal moves look identical to the camera, choose the actual move on screen; this includes choosing Queen, Rook, Bishop, or Knight for promotion. Follow Stockfish's displayed move on the physical board, then tap **Verify Computer Move**. **End Game** records a resignation, and the result screen offers **New Game**. Press Escape to exit the app when using a keyboard.
 
-New calibrations measure the lighting shift at each square's bare corners before deciding whether its center contains a piece. This tolerates gradual brightness and exposure changes. A handheld camera can be aligned photo by photo with markers or manual corner taps, but hold it steady during each exposure and keep hands and shadows off the board. Strong local shadows, glare, and blur can still make a scan uncertain. Calibrations created before this lighting correction continue using the older scoring method; retake both calibration photos to enable the new method.
-
-Select Beginner, Intermediate, or Advanced, then tap **Start Game**. Place the pieces in the starting position and tap **Scan Starting Board**. Move White on the physical board and tap **Scan Move**. For every scan, the app uses visible markers to align that photo. Without markers, tap the photo's four corners; if the camera has stayed fixed, **Use Saved Corners** applies the setup alignment. A legal move appears in green; an unchanged, uncertain, or unmatched board asks you to correct it and scan again. Tap a white piece on the displayed board to see its legal destination squares. If several legal moves look identical to the camera, choose the actual move on screen; this includes choosing Queen, Rook, Bishop, or Knight for promotion. Follow Stockfish's displayed move on the physical board, then tap **Verify Computer Move**. **End Game** records a resignation, and the result screen offers **New Game**. Press Escape to exit the app when using a keyboard.
-
-The camera observes occupied squares, not piece identities. It cannot independently prove which piece was placed on a square or distinguish promotions and some captures from the image alone. Keep the physical pieces in sync with the displayed board and use the on-screen choice when prompted. The real LCD, touch coordinates, camera, board, and lighting still require a hardware test. The command-line `check` and `scan` commands remain useful when diagnosing a difficult camera view.
+The camera observes occupied squares, not piece identities. It cannot independently prove which piece was placed on a square or distinguish promotions and some captures from the image alone. Keep the physical pieces in sync with the displayed board and use the on-screen choice when prompted. The real LCD, touch coordinates, camera, board, and lighting still require a hardware test.
 
 ### Open the touch screen automatically when the Pi starts
 
@@ -74,7 +70,7 @@ On the Pi, use Raspberry Pi OS **Desktop** with the **labwc** window manager. In
 sudo reboot
 ```
 
-After the desktop loads, the calibration screen opens full screen on the connected display. For a USB camera, install with `.venv/bin/python scripts/install_touch_autostart.py --camera usb --device 0` (change the device number if necessary). The installer adds one entry to `~/.config/labwc/autostart`, preserving any other entries. It follows Raspberry Pi's [labwc autostart guidance](https://www.raspberrypi.com/tutorials/how-to-use-a-raspberry-pi-in-kiosk-mode/). If the app does not open, check `~/.local/state/chess-board-pi-only/touchscreen.log`.
+After the desktop loads, the chess menu opens full screen on the connected display. For a USB camera, install with `.venv/bin/python scripts/install_touch_autostart.py --camera usb --device 0` (change the device number if necessary). The installer adds one entry to `~/.config/labwc/autostart`, preserving any other entries. It follows Raspberry Pi's [labwc autostart guidance](https://www.raspberrypi.com/tutorials/how-to-use-a-raspberry-pi-in-kiosk-mode/). If the app does not open, check `~/.local/state/chess-board-pi-only/touchscreen.log`.
 
 To stop automatic launch, run `.venv/bin/python scripts/install_touch_autostart.py --remove` on the Pi and reboot. This autostart setup opens the app after the desktop loads; it does not replace the Pi's early boot splash screen.
 
