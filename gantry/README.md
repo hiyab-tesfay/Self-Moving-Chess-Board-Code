@@ -83,9 +83,15 @@ motor stalls against the frame, then calls that spot 0. A stalled stepper is har
 ## Flashing, and the first power-up
 
 Open `firmware/gantry_firmware/gantry_firmware.ino` in the Arduino IDE (the `.h` files in the
-folder come along). Board: **ESP32 Dev Module**. No library is needed unless `PIN_SERVO` is
-set, in which case install "ESP32Servo". Upload, then open the serial monitor at **115200**
-with "Newline" line endings: it says `[duen-gantry 0.1 ready: $X to unlock, $H to home]`.
+folder come along). Board: **ESP32 Dev Module** (Boards Manager: "esp32" by Espressif; it is
+a large download, a few GB of disk). No library is needed unless `PIN_SERVO` is set, in which
+case install "ESP32Servo". Upload, then open the serial monitor at **115200** with "Newline"
+line endings: it says `[duen-gantry 0.1 ready: $X to unlock, $H to home]`.
+
+The sketch uses only the plain Arduino API (`pinMode`, `digitalWrite`, `micros`, `Serial`),
+and the motion and protocol code is the same that runs in the laptop tests. It compiles for
+an Arduino Uno with `GANTRY_CNC_SHIELD` at 15 KB of flash and 990 bytes of RAM
+(`arduino-cli compile --fqbn arduino:avr:uno --build-property compiler.cpp.extra_flags=-DGANTRY_CNC_SHIELD firmware/gantry_firmware`).
 
 Before the first `$H`, check these with the carriage somewhere in the middle of its travel:
 
