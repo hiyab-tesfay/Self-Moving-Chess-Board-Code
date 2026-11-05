@@ -12,13 +12,14 @@
 #define PIN_X_DIR 18
 #define PIN_X_STEP 19
 #define PIN_X_EN 21
-#define PIN_Y_DIR 22
+#define PIN_Y_DIR 27    // bench wiring of 2026-11-05 (Zain's prototype had it on 22)
 #define PIN_Y_STEP 25
 #define PIN_Y_EN 26
-#define PIN_MAGNET 27   // gate of the MOSFET (or relay input) that switches the 12 V electromagnet
-#define PIN_SERVO 13    // signal wire of the MG90 that pushes the magnet up to the board and pulls it back. Prototype_Program.ino
-                        // on main has no servo pin (motors only), so this is a free choice: GPIO 13 is unused by the motors,
-                        // can drive LEDC PWM and is not a strapping pin. -1 = no servo: the magnet stays at the board top.
+#define PIN_MAGNET 32   // gate of the MOSFET (or relay input) that switches the 12 V electromagnet (was 27 until the
+                        // bench wiring of 2026-11-05 put a direction wire there)
+#define PIN_SERVO 12    // signal wire of the MG90 that pushes the magnet up to the board and pulls it back, as wired on
+                        // the bench on 2026-11-05. GPIO 12 is a strapping pin (MTDI): the servo's signal input does not
+                        // pull it, so boot is unaffected, but never tie it high. -1 = no servo: the magnet stays at the board top.
 #define PIN_X_MIN 34    // homing switches at the X=0 and Y=0 ends; -1 when there are none (bump homing)
 #define PIN_Y_MIN 35    // GPIO 34/35 are input-only on the ESP32, so they need external pull-ups
 // DRV8825 microstep inputs M0 M1 M2. Left unconnected they read LOW = full steps, and the
