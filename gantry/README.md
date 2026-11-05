@@ -173,8 +173,9 @@ game until someone checks the board. Playing in person on the touchscreen (`pi_g
 ## Path finding, and making room
 
 `pi/board_paths.py` checks every carry in millimetres: pieces are circles `piece_mm` across
-(27 mm, the widest base in the piece models) and the carried piece must stay `clearance_mm`
-(3 mm) clear of every other piece along the whole way. The search runs over tile centres,
+and the carried piece must stay `clearance_mm` (3 mm) clear of every other piece along the
+whole way. The piece models measure 23 mm (pawn), 25 mm (knight, bishop, rook) and 27 mm
+(king, queen) across the base, so `piece_mm` is 27. The search runs over tile centres,
 the midpoints between tiles and the crossings between four tiles, plus the parking lanes,
 and A* picks the shortest route. With 50 mm squares and 27 mm bases, a lane between two
 occupied tiles is 23 mm wide, so a piece cannot pass there; the finder goes round instead,
