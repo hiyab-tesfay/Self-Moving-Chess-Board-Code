@@ -62,6 +62,10 @@ for Stockfish games. Keep this local development server on a trusted network.
 - `frontend/test/`: JavaScript move-generation and chess rules checks.
 - `test/`: Python rules and Stockfish integration checks.
 - `CAD Files/`: existing mechanical-design files.
+- `gantry/`: the piece-moving gantry. `gantry/firmware/` runs on the ESP32 (or an Arduino
+  with a CNC shield) and only knows millimetres and the magnet; `gantry/pi/` runs on the
+  Raspberry Pi and turns a chess move into those millimetres. `gantry/README.md` has the
+  motor math, the wiring and how to test it on a laptop without the hardware.
 
 The root `chess_game.py` and `simulator.py` remain as compatibility entry points
 so existing imports and the original launch command continue to work.

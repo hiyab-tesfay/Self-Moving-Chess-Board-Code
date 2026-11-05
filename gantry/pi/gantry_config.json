@@ -1,0 +1,18 @@
+{
+  "_comment": "Where the squares are, in mm from the homed corner. Measure these at the board; see ../README.md.",
+  "port": "/dev/ttyUSB0",
+  "baud": 115200,
+  "square_mm": 50.0,
+  "a1_center_mm": [75.0, 40.0],
+  "park_columns_mm": {
+    "w": [43.0, 15.0],
+    "b": [507.0, 535.0]
+  },
+  "park_rows_mm": null,
+  "travel_mm": [450.0, 400.0],
+  "travel_speed_mm_s": 120.0,
+  "carry_speed_mm_s": 60.0,
+  "grab_settle_s": 0.3,
+  "release_settle_s": 0.2,
+  "home_on_start": true
+}
