@@ -23,6 +23,7 @@ Usage (the website runs the first form through CHESS_MOTION_COMMAND):
     gantry_driver.py --home                 home the gantry
     gantry_driver.py --goto 100 50          move the empty magnet to X=100 Y=50 mm
     gantry_driver.py --status               ask the board where it is
+    gantry_driver.py --calibrate            steer the magnet under a1 and h1; saves the squares to the config
     gantry_driver.py --dry-run < job.json   print the G-code and the predicted steps, send nothing
 Add --port sim to drive the pretend board in gantry/firmware/host instead of real hardware.
 """
@@ -354,6 +355,59 @@ def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry")
     return gantry.status()
 
 
+def calibrate(gantry: Gantry, config: dict, config_path: Path, read=input, write=print) -> dict:
+    """Measure the board at the frame: steer the magnet under a1, then h1, and save the result.
+
+    Moves are typed as x+10, y-0.5 and so on (millimetres); 'ok' records the spot. a1 gives
+    the origin of the squares, and a1 to h1 is seven squares, which gives their size.
+    """
+    board = BoardMap(config)
+    gantry.ensure_homed()
+    pos = [0.0, 0.0]
+
+    def goto(x: float, y: float) -> None:
+        board.check(x, y, "that move")
+        gantry.command(f"G0 X{x:.3f} Y{y:.3f}")
+        gantry.wait_idle(60, "the jog")
+        pos[0], pos[1] = x, y
+
+    def steer(prompt: str) -> tuple[float, float]:
+        write(prompt)
+        write("  Type moves like x+10, y-0.5 or x-100 (mm), and ok when the magnet is centred.")
+        while True:
+            try:
+                line = read("> ").strip().lower().replace(" ", "")
+            except EOFError:
+                raise GantryError("calibration cancelled") from None
+            if line in ("ok", "done"):
+                return pos[0], pos[1]
+            found = re.fullmatch(r"([xy])([+-][\d.]+)", line)
+            if not found:
+                write("  x+10 moves 10 mm along X, y-0.5 moves half a mm back along Y, ok records this spot")
+                continue
+            delta = float(found.group(2))
+            x, y = (pos[0] + delta, pos[1]) if found.group(1) == "x" else (pos[0], pos[1] + delta)
+            try:
+                goto(x, y)
+            except GantryError as exc:
+                write(f"  {exc}")
+                continue
+            write(f"  at X={pos[0]:.1f} Y={pos[1]:.1f}")
+
+    a1 = steer("Step 1 of 2: put the magnet under the centre of a1.")
+    h1 = steer("Step 2 of 2: now under the centre of h1, on the same rank.")
+    square = (h1[0] - a1[0]) / 7
+    if square < 10:
+        raise GantryError(f"h1 at X={h1[0]:.1f} is not seven squares to the right of a1 at X={a1[0]:.1f}")
+    config["a1_center_mm"] = [round(a1[0], 2), round(a1[1], 2)]
+    config["square_mm"] = round(square, 2)
+    Path(config_path).write_text(json.dumps(config, indent=2) + "\n")
+    write(f"Saved to {config_path}: a1 centre ({a1[0]:.1f}, {a1[1]:.1f}) mm, squares {square:.2f} mm.")
+    far = BoardMap(config).square_mm("h8")
+    write(f"h8 works out at ({far[0]:.1f}, {far[1]:.1f}) mm; the travel is {board.travel[0]:.0f} x {board.travel[1]:.0f}.")
+    return config
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -362,6 +416,7 @@ def main(argv=None) -> int:
     parser.add_argument("--home", action="store_true")
     parser.add_argument("--goto", nargs=2, type=float, metavar=("X", "Y"), help="move the empty magnet to X Y mm")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--calibrate", action="store_true", help="steer the magnet under a1 and h1, then save the square positions to the config")
     parser.add_argument("--dry-run", action="store_true", help="print the G-code and the prediction; send nothing")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
@@ -373,7 +428,7 @@ def main(argv=None) -> int:
         port = args.port or config.get("port", "/dev/ttyUSB0")
         if args.move:
             job = simple_move_job(args.move)
-        elif args.home or args.goto or args.status:
+        elif args.home or args.goto or args.status or args.calibrate:
             job = None
         else:
             raw = sys.stdin.read()
@@ -396,6 +451,8 @@ def main(argv=None) -> int:
                 state = run_job(job, config, link, log)
             else:
                 gantry = Gantry(link, log)
+                if args.calibrate:
+                    calibrate(gantry, config, args.config)
                 if args.home:
                     gantry.home()
                 if args.goto:

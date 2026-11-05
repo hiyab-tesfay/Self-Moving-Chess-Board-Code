@@ -95,11 +95,17 @@ rectangle is **470 × 420 mm**, which is the travel and the firmware's soft limi
 - `travel_mm`: the soft limits, the same as `MAX_X_MM`/`MAX_Y_MM` in the firmware.
 
 The travel and the lane pitch come from the sketch; the square size (50 mm) and the a1
-centre (60, 35) are read off a photo of it and must be confirmed, either from a DXF of the
-sketch (Fusion: right-click the sketch, Save As DXF) or at the frame: `--home`, then
-`--goto X Y` until the magnet sits under the centre of a1, and a1 to b1 gives the square
-size. Every point of a job is checked against the travel before anything moves, so a
-parking slot that does not fit says so instead of running into the frame.
+centre (60, 35) are read off a photo of it and are confirmed at the frame with
+
+```sh
+python3 gantry_driver.py --calibrate
+```
+
+which homes, asks you to steer the magnet under the centre of a1 by typing moves such as
+`x+10`, `y-0.5` or `x-100` (millimetres) and `ok`, then the same for h1; a1 to h1 is seven
+squares, so that gives the square size, and both numbers are written into the config.
+Every point of a job is checked against the travel before anything moves, so a parking
+slot that does not fit says so instead of running into the frame.
 
 One mismatch to settle with the website side: its planner parks captured pieces in two
 columns of eight per side (slots `w:8`–`w:15` at x = −2), while the sketch has one lane of
@@ -166,9 +172,9 @@ Measured from the files in the team Drive (`Gantry/3D Printing` and `CAD`):
 
 ## What is still open
 
-- Square size, a1 centre and the exact parking slots: confirm from a DXF of sketch 5 or at
-  the frame, and put them in `gantry_config.json`. The travel (470 × 420) is from the sketch;
-  confirm it by homing and jogging to the far corner.
+- Square size and a1 centre: run `--calibrate` at the frame. The travel (470 × 420) is from
+  the sketch; confirm it by homing and jogging to the far corner, and check the parking
+  slots the same way.
 - The website planner's parking layout (two columns of eight) against the sketch's (one lane
   of twelve per side plus the top row).
 - Motor current: read it off the motor's label and set `Vref` (the pulley is confirmed 20 T).

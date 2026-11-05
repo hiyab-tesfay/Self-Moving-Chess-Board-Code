@@ -112,6 +112,27 @@ class PretendBoardTests(unittest.TestCase):
         self.assertEqual(bad.returncode, 1)
         self.assertIn("outside the gantry's travel", json.loads(bad.stdout.strip().splitlines()[-1])["error"])
 
+    def test_calibration_steers_to_a1_and_h1_and_saves_the_squares(self):
+        config = dict(CONFIG, square_mm=1.0, a1_center_mm=[0.0, 0.0])
+        path = Path(__file__).resolve().parent / ".test_calibrated.json"
+        answers = iter(["x+60", "y+35", "bogus", "x+900", "ok", "x+350", "ok"])
+        said = []
+        link = gd.Link("sim", 115200)
+        try:
+            gd.calibrate(gd.Gantry(link), config, path, read=lambda prompt: next(answers), write=said.append)
+            saved = json.loads(path.read_text())
+        finally:
+            link.close()
+            path.unlink(missing_ok=True)
+        self.assertEqual(saved["a1_center_mm"], [60.0, 35.0])
+        self.assertEqual(saved["square_mm"], 50.0)
+        self.assertEqual(saved["travel_mm"], [450.0, 400.0], "the rest of the config is kept")
+        self.assertTrue(any("x+10 moves" in line for line in said), "a typo gets help, not a crash")
+        self.assertTrue(any("outside the gantry's travel" in line for line in said), "a jog past the travel is refused")
+        self.assertTrue(any("squares 50.00 mm" in line for line in said))
+        moves = [t for t in link.traces if t.startswith("# MOVE")]
+        self.assertIn("to X=410.000 Y=35.000", moves[-1], "the last jog ends under h1")
+
     def test_dry_run_prints_the_gcode_and_the_prediction(self):
         result = subprocess.run([sys.executable, str(Path(gd.__file__)), "--dry-run", "--config", str(self.config_path), "--move", "a1a8"],
                                 capture_output=True, text=True)
