@@ -73,11 +73,13 @@ static const gantry::Settings SETTINGS = {
     HOME_X_FIRST,
 };
 
+static const gantry::BoardGeometry BOARD = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS};
+
 static BoardHal hal;
 static BoardPeripherals peripherals;
 static SerialWriter writer;
 static gantry::Motion motion(hal, SETTINGS);
-static gantry::Protocol protocol(motion, peripherals, writer, SETTINGS, FIRMWARE_VERSION);
+static gantry::Protocol protocol(motion, peripherals, writer, SETTINGS, BOARD, FIRMWARE_VERSION);
 
 static char line[96];
 static size_t line_len = 0;
@@ -116,17 +118,23 @@ void setup() {
   lift.attach(PIN_SERVO);
   lift.write(SERVO_UP_DEG);
 #endif
+  protocol.set_carry(CARRY_SPEED_MM_S, GRAB_MS, RELEASE_MS);
   Serial.begin(SERIAL_BAUD);
   delay(50);
   Serial.println();
   Serial.print("[");
   Serial.print(FIRMWARE_VERSION);
-  Serial.println(" ready: $X to unlock, $H to home]");
+  Serial.println(" ready: $X to unlock, $H to home, $T to self-test, CARRY e2 e4 to move a piece]");
+#if SELFTEST_AT_BOOT
+  delay(5000);
+  char test[] = "$T";
+  protocol.handle_line(test, micros());
+#endif
 }
 
 void loop() {
   motion.run();
-  protocol.run(micros());
+  protocol.tick(micros());
   if (protocol.take_disable_request()) hal.enable_motors(false);
   while (Serial.available()) {
     char c = (char)Serial.read();

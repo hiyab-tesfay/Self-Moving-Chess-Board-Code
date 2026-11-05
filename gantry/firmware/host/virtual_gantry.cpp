@@ -86,7 +86,9 @@ int main(int argc, char** argv) {
   gantry::Motion motion(hal, settings);
   peripherals.motion = &motion;
   peripherals.hal = &hal;
-  gantry::Protocol protocol(motion, peripherals, writer, settings, FIRMWARE_VERSION " (virtual)");
+  gantry::BoardGeometry board = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS};
+  gantry::Protocol protocol(motion, peripherals, writer, settings, board, FIRMWARE_VERSION " (virtual)");
+  protocol.set_carry(CARRY_SPEED_MM_S, GRAB_MS, RELEASE_MS);
 
   printf("[%s ready: $X to unlock, $H to home]\n", FIRMWARE_VERSION " (virtual)");
 
@@ -102,7 +104,7 @@ int main(int argc, char** argv) {
                hal.peak_steps_per_s / STEPS_PER_MM);
       was_moving = moving;
       motion.run();
-      protocol.run(hal.t);
+      protocol.tick(hal.t);
       hal.t += moving || protocol.busy() ? 5 : 1000;
     }
   };

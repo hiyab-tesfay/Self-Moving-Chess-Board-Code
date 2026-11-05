@@ -82,5 +82,31 @@
 #define SERVO_DOWN_DEG 10         // magnet touching the underside of the board
 #define SERVO_UP_DEG 70           // magnet dropped away from the board
 
+// ----------------------------------------------------------------------------- the board, as the firmware knows it
+// So that the Pi can say "CARRY g1 f3" and the board works out the millimetres itself. These are
+// the defaults; the Pi sends its calibrated values with $B=square,a1x,a1y,parkWx,parkBx,parkRow0,parkPitch.
+// Squares: a1's centre is at (A1_X_MM, A1_Y_MM) and each square is SQUARE_MM; x.5 are the lanes
+// between squares. Captured pieces dock in a lane each side of the board (sketch 5: 12 circles
+// at a 35 mm pitch), White's at x = PARK_W_X_MM, Black's at x = PARK_B_X_MM.
+#define SQUARE_MM 50.0f
+#define A1_X_MM 60.0f
+#define A1_Y_MM 35.0f
+#define PARK_W_X_MM 17.5f
+#define PARK_B_X_MM 452.5f
+#define PARK_ROW0_MM 17.5f
+#define PARK_PITCH_MM 35.0f
+#define PARK_ROWS 12
+
+#define CARRY_SPEED_MM_S 60.0f    // with a piece under the magnet (G0/GOTO use MAX_SPEED_MM_S)
+#define GRAB_MS 300               // after the magnet switches on, before moving
+#define RELEASE_MS 200            // after it switches off, before moving away
+#define PROGRAM_STEPS 32          // longest sequence one command may queue
+
+// The Arduino's own test: type $T in the serial monitor, or set SELFTEST_AT_BOOT true to run it
+// five seconds after power-up with nothing attached to the USB port. It homes, visits the four
+// corner squares, switches the magnet on and off on e4, and carries e4 -> f6 -> e4 through the
+// lanes the way a knight moves. Needs the motors wired and the travel clear.
+#define SELFTEST_AT_BOOT false
+
 #define SERIAL_BAUD 115200
-#define FIRMWARE_VERSION "duen-gantry 0.1"
+#define FIRMWARE_VERSION "duen-gantry 0.2"
