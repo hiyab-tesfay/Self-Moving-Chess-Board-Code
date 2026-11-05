@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import queue
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,16 +16,158 @@ import chess
 import cv2
 import numpy as np
 
-from board_vision import (VisionError, board_corners, calibrate, load_calibration,
+from board_vision import (Observation, VisionError, board_corners, calibrate, load_calibration,
                           observe, read_image, save_calibration)
 from chess_game import ChessGame, DIFFICULTIES, StockfishPlayer
-from move_observation import match_legal_moves, occupied_squares
-from pi_camera import Camera
-from pi_game import verifies_move
+from move_observation import occupied_squares
+from pi_camera import Camera, CameraSettings
 
 
 class MoveRejected(ValueError):
     """The physical board cannot safely advance to the next position."""
+
+
+@dataclass(frozen=True)
+class ScanFeedback:
+    title: str
+    detail: str
+    source: str | None = None
+    destination: str | None = None
+
+
+MAX_UNCERTAIN_SQUARES = 2
+
+
+@dataclass(frozen=True)
+class PhotoAdjustments:
+    """Edits applied equally to the empty, setup, and move photos."""
+
+    brightness: int = 0
+    contrast: int = 100
+    warmth: int = 0
+
+    def __post_init__(self) -> None:
+        if self.brightness not in range(-60, 61, 10):
+            raise ValueError("Photo brightness must be between -60 and 60 in steps of 10.")
+        if self.contrast not in range(70, 161, 10):
+            raise ValueError("Photo contrast must be between 70 and 160 percent in steps of 10.")
+        if self.warmth not in range(-40, 41, 10):
+            raise ValueError("Photo warmth must be between -40 and 40 in steps of 10.")
+
+
+def adjust_photo(photo: np.ndarray, settings: PhotoAdjustments) -> np.ndarray:
+    result = (photo.astype(np.float32) - 127.5) * (settings.contrast / 100)
+    result += 127.5 + settings.brightness
+    result[:, :, 0] -= settings.warmth
+    result[:, :, 2] += settings.warmth
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def read_photo_adjustments(path: Path) -> PhotoAdjustments | None:
+    try:
+        return PhotoAdjustments(**json.loads(path.read_text()))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def write_photo_adjustments(path: Path, settings: PhotoAdjustments) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(asdict(settings), indent=2) + "\n")
+
+
+def reusable_corners(photo: np.ndarray,
+                     corners: list[list[float]] | None) -> list[list[float]] | None:
+    """Use stored photo coordinates only when they fit the new frame."""
+    if corners is None:
+        return None
+    points = np.asarray(corners, dtype=np.float32)
+    if points.shape != (4, 2) or not np.isfinite(points).all():
+        return None
+    height, width = photo.shape[:2]
+    if (np.any(points[:, 0] < 0) or np.any(points[:, 0] >= width) or
+            np.any(points[:, 1] < 0) or np.any(points[:, 1] >= height) or
+            not cv2.isContourConvex(points) or cv2.contourArea(points) < 10000):
+        return None
+    return points.tolist()
+
+
+def saved_scan_corners(directory: Path, calibration) -> list[list[float]] | None:
+    if calibration.corners is not None:
+        return [point.copy() for point in calibration.corners]
+    try:
+        return board_corners(read_image(directory / "starting.jpg")).tolist()
+    except VisionError:
+        return None
+
+
+def read_camera_settings(path: Path) -> CameraSettings | None:
+    try:
+        return CameraSettings(**json.loads(path.read_text()))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def write_camera_settings(path: Path, settings: CameraSettings) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(asdict(settings), indent=2) + "\n")
+
+
+def _as_observation(value: Observation | frozenset[str]) -> Observation:
+    return value if isinstance(value, Observation) else Observation(frozenset(value), (), {})
+
+
+def _checked_observation(value: Observation | frozenset[str]) -> Observation:
+    observation = _as_observation(value)
+    if len(observation.uncertain) > MAX_UNCERTAIN_SQUARES:
+        raise MoveRejected("Too many unclear squares: " + ", ".join(observation.uncertain) +
+                           ". Retake the photo or adjust the corners.")
+    return observation
+
+
+def _matches_known_squares(expected: frozenset[str], observation: Observation) -> bool:
+    unclear = set(observation.uncertain)
+    return expected - unclear == observation.occupied - unclear
+
+
+def _after_move(board: chess.Board, move: chess.Move) -> tuple[frozenset[str], set[str]]:
+    before = occupied_squares(board)
+    after_board = board.copy(stack=False)
+    after_board.push(move)
+    after = occupied_squares(after_board)
+    affected = set(before ^ after)
+    affected.update((chess.square_name(move.from_square), chess.square_name(move.to_square)))
+    return after, affected
+
+
+def rejected_move_feedback(board: chess.Board, observation: Observation,
+                           reason: str) -> ScanFeedback:
+    """Identify a piece only when occupancy gives one clear origin and destination."""
+    if "No move detected" in reason:
+        return ScanFeedback("NO CLEAR MOVE", "The camera found no clear change in occupied squares. Check the board and rescan.")
+    if len(observation.uncertain) > MAX_UNCERTAIN_SQUARES:
+        return ScanFeedback("PHOTO UNCLEAR", "Several squares are unclear. Check the photo and its corners.")
+    unclear = set(observation.uncertain)
+    before = occupied_squares(board)
+    vacated = sorted(before - observation.occupied - unclear)
+    filled = sorted(observation.occupied - before - unclear)
+    if len(vacated) == 1 and len(filled) == 1:
+        source, destination = vacated[0], filled[0]
+        piece = board.piece_at(chess.parse_square(source))
+        if piece is not None:
+            legal_from_to = any(
+                move.from_square == chess.parse_square(source) and
+                move.to_square == chess.parse_square(destination)
+                for move in board.legal_moves)
+            if not legal_from_to:
+                color = "White" if piece.color else "Black"
+                name = chess.piece_name(piece.piece_type)
+                turn = "White" if board.turn else "Black"
+                detail = (f"Camera sees {color} {name}: {source} → {destination}. "
+                          f"It is {turn}'s turn." if piece.color != board.turn else
+                          f"Camera sees {color} {name}: {source} → {destination}. "
+                          "That move is not legal in this position.")
+                return ScanFeedback("ILLEGAL MOVE", detail, source, destination)
+    return ScanFeedback("MOVE NOT VERIFIED", reason + " Check the board or adjust the photo corners.")
 
 
 class CalibrationFlow:
@@ -51,13 +194,14 @@ class CalibrationFlow:
         self.stage = "starting" if self.empty_auto_corners else "empty_corners"
 
     def accept_starting(self, photo: np.ndarray,
-                        detected_corners: list[list[float]] | None) -> None:
+                        detected_corners: list[list[float]] | None,
+                        *, reused_corners: bool = False) -> None:
         if self.stage != "starting":
             raise ValueError("The starting board is not waiting for a photo.")
         self.starting_photo = photo
         self.starting_corners = detected_corners or []
-        self.starting_auto_corners = detected_corners is not None
-        self.stage = "ready" if self.starting_auto_corners else "starting_corners"
+        self.starting_auto_corners = detected_corners is not None and not reused_corners
+        self.stage = "ready" if detected_corners is not None else "starting_corners"
 
     def add_corner(self, x: float, y: float) -> None:
         if self.stage not in ("empty_corners", "starting_corners"):
@@ -100,11 +244,14 @@ class CalibrationFlow:
 
 def calibrate_photos(empty: np.ndarray, starting: np.ndarray,
                      empty_corners: list[list[float]],
-                     starting_corners: list[list[float]]):
+                     starting_corners: list[list[float]],
+                     adjustments: PhotoAdjustments = PhotoAdjustments()):
     """Build and verify calibration before writing it to disk."""
+    adjusted_starting = adjust_photo(starting, adjustments)
     calibration, reference, _scores = calibrate(
-        empty, starting, empty_corners, starting_corners=starting_corners)
-    observation, _aligned = observe(reference, starting, calibration, starting_corners)
+        adjust_photo(empty, adjustments), adjusted_starting, empty_corners,
+        starting_corners=starting_corners)
+    observation, _aligned = observe(reference, adjusted_starting, calibration, starting_corners)
     if observation.uncertain or observation.occupied != occupied_squares(chess.Board()):
         raise VisionError("Starting board could not be verified. Check the pieces, corners, and lighting.")
     return calibration, reference
@@ -120,27 +267,57 @@ class TouchSession:
         self.choices: tuple[chess.Move, ...] = ()
         self.computer_move: chess.Move | None = None
         self.result: str | None = None
+        self.setup_uncertain: tuple[str, ...] = ()
 
-    def verify_setup(self, occupied: frozenset[str]) -> None:
+    def verify_setup(self, observed: Observation | frozenset[str]) -> None:
         if self.phase != "setup":
             raise ValueError("Setup is not waiting for a scan.")
-        if occupied != occupied_squares(self.game.board):
+        observation = _checked_observation(observed)
+        if not _matches_known_squares(occupied_squares(self.game.board), observation):
             raise MoveRejected("Board does not match the starting position. Correct the pieces and scan again.")
+        self.setup_uncertain = observation.uncertain
+        self.phase = "setup_confirm" if observation.uncertain else "human"
+
+    def confirm_setup(self) -> None:
+        if self.phase != "setup_confirm":
+            raise ValueError("There are no setup squares to confirm.")
+        self.setup_uncertain = ()
         self.phase = "human"
 
-    def scan_human(self, occupied: frozenset[str]) -> str | None:
+    def retry_setup(self) -> None:
+        if self.phase != "setup_confirm":
+            raise ValueError("Setup is not waiting for confirmation.")
+        self.setup_uncertain = ()
+        self.phase = "setup"
+
+    def scan_human(self, observed: Observation | frozenset[str]) -> str | None:
         if self.phase != "human":
             raise ValueError("It is not your turn to scan a move.")
-        match = match_legal_moves(self.game.board, occupied)
-        if match.status == "unchanged":
+        observation = _checked_observation(observed)
+        before = occupied_squares(self.game.board)
+        if _matches_known_squares(before, observation):
             raise MoveRejected("No move detected. Move a white piece, then scan again.")
-        if match.status == "no_match":
+        candidates = []
+        blocked = set()
+        for move in self.game.board.legal_moves:
+            after, affected = _after_move(self.game.board, move)
+            if not _matches_known_squares(after, observation):
+                continue
+            unclear_affected = set(observation.uncertain) & affected
+            if unclear_affected:
+                blocked.update(unclear_affected)
+            else:
+                candidates.append(move)
+        if not candidates and blocked:
+            raise MoveRejected("Move touches unclear squares: " + ", ".join(sorted(blocked)) +
+                               ". Retake the photo or adjust the corners.")
+        if not candidates:
             raise MoveRejected("Illegal or unrecognized move. Correct the board and scan again.")
-        if match.status == "ambiguous":
-            self.choices = match.candidates
+        if len(candidates) > 1:
+            self.choices = tuple(candidates)
             self.phase = "choose"
             return None
-        return self._accept_human(match.candidates[0])
+        return self._accept_human(candidates[0])
 
     def select_move(self, move: chess.Move) -> str:
         if self.phase != "choose" or move not in self.choices:
@@ -171,10 +348,16 @@ class TouchSession:
         self.phase = "computer"
         return self.game.board.san(move)
 
-    def verify_computer(self, occupied: frozenset[str]) -> str:
+    def verify_computer(self, observed: Observation | frozenset[str]) -> str:
         if self.phase != "computer" or self.computer_move is None:
             raise ValueError("There is no computer move to verify.")
-        if not verifies_move(self.game.board, self.computer_move, occupied):
+        observation = _checked_observation(observed)
+        after, affected = _after_move(self.game.board, self.computer_move)
+        unclear_affected = set(observation.uncertain) & affected
+        if unclear_affected:
+            raise MoveRejected("Computer move touches unclear squares: " +
+                               ", ".join(sorted(unclear_affected)) + ". Retake the photo.")
+        if not _matches_known_squares(after, observation):
             raise MoveRejected("Board does not match the computer move. Correct it and scan again.")
         san = self.game.play_computer(self.computer_move)
         self.computer_move = None
@@ -200,7 +383,11 @@ class TouchApp:
     def __init__(self, root: tk.Tk, args: argparse.Namespace) -> None:
         self.root = root
         self.args = args
-        self.camera = Camera(args.camera, args.device)
+        self.camera_settings = ((read_camera_settings(args.calibration / "camera_settings.json")
+                                 or CameraSettings()) if args.camera == "pi" else CameraSettings())
+        self.camera = Camera(args.camera, args.device, self.camera_settings)
+        self.photo_adjustments = (read_photo_adjustments(args.calibration / "photo_adjustments.json")
+                                  or PhotoAdjustments())
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.results: queue.SimpleQueue = queue.SimpleQueue()
         self.generation = 0
@@ -213,16 +400,21 @@ class TouchApp:
         self.startup_calibration = True
         self.scan_photo: np.ndarray | None = None
         self.scan_corners: list[list[float]] = []
+        self.last_scan_corners: list[list[float]] | None = None
+        self.scan_corner_source = ""
+        self.scan_feedback: ScanFeedback | None = None
         self.preview_photo: tk.PhotoImage | None = None
         self.preview_geometry: tuple[float, float, float] | None = None
         self.level = "beginner"
         self.busy = False
         self.selected_square: str | None = None
         self.message = "Calibrate the board, or use a saved calibration."
+        if (args.calibration / "calibration.json").is_file() and not self.saved_calibration_available():
+            self.message = "Saved calibration cannot be reused. Take new calibration photos."
         self.message_color = self.MUTED
         screen_width = 800 if args.windowed else root.winfo_screenwidth()
         screen_height = 480 if args.windowed else root.winfo_screenheight()
-        self.compact = screen_width < 700 or screen_height < 450
+        self.compact = screen_width < 900 or screen_height < 600
         self.panel_width = 235 if self.compact else 320
 
         root.title("Physical Chess")
@@ -329,6 +521,12 @@ class TouchApp:
             self.heading("Set up the board", "Place all 32 pieces in the starting position, then scan.")
             self.button("Scan Starting Board", self.scan, accent=True)
             self.button("Cancel Game", self.end_game)
+        elif session.phase == "setup_confirm":
+            squares = ", ".join(session.setup_uncertain)
+            self.heading("Check unclear squares", f"Confirm {squares} match the displayed starting board.")
+            self.button("Squares Match", self.confirm_setup, accent=True)
+            self.button("Retake Photo", self.retry_setup_scan)
+            self.button("Cancel Game", self.end_game)
         elif session.phase == "human":
             self.heading("Your move · White", "Move a piece on the physical board, then tap Scan Move. Tap a white piece on screen for legal squares.")
             self.button("Scan Move", self.scan, accent=True)
@@ -381,11 +579,30 @@ class TouchApp:
         self.render()
 
     def render_scan_review(self) -> None:
+        if self.scan_feedback is not None:
+            feedback = self.scan_feedback
+            tk.Label(self.panel, text=feedback.title, bg="#8a2f32", fg=self.TEXT,
+                     font=("DejaVu Sans", 15 if self.compact else 20, "bold"),
+                     wraplength=self.panel_width - 35, pady=10).pack(fill="x", pady=(0, 10))
+            tk.Label(self.panel, text=feedback.detail, bg=self.PANEL, fg=self.TEXT,
+                     font=("DejaVu Sans", 11 if self.compact else 13, "bold"),
+                     justify="left", wraplength=self.panel_width - 35).pack(fill="x", pady=(0, 12))
+            if self.scan_corner_source == "saved":
+                tk.Label(self.panel, text="Using saved corners. If the camera moved, adjust them.",
+                         bg=self.PANEL, fg=self.GOLD, justify="left",
+                         font=("DejaVu Sans", 9 if self.compact else 11),
+                         wraplength=self.panel_width - 35).pack(fill="x", pady=(0, 8))
+            action = ("Fix Board & Scan Again" if feedback.title == "ILLEGAL MOVE" else
+                      "Make Move & Rescan" if feedback.title == "NO CLEAR MOVE" else "Retake Photo")
+            self.button(action, self.retake_scan, accent=True)
+            self.button("Adjust Photo Corners", self.redo_scan_corners, short=True)
+            self.button("End Game", self.end_game, short=True)
+            return
         if len(self.scan_corners) < 4:
             corner = CalibrationFlow.CORNER_NAMES[len(self.scan_corners)]
             self.heading("Mark photo corners", f"Tap the outer {corner} corner in this photo.")
             self.button("Undo Corner", self.undo_scan_corner)
-            if self.calibration is not None and self.calibration.corners is not None:
+            if self.last_scan_corners is not None:
                 self.button("Use Saved Corners", self.use_saved_scan_corners)
         else:
             self.heading("Photo aligned", "Check the board using these four corners.")
@@ -398,7 +615,7 @@ class TouchApp:
         flow = self.calibration_flow
         assert flow is not None
         if flow.stage == "empty":
-            self.heading("1. Empty board", "Remove every piece. Keep the whole board in the camera view.")
+            self.heading("1. Empty board", "Remove every piece and take one empty-board photo.")
             self.button("Take Empty Photo", self.capture_empty, accent=True)
             if self.saved_calibration_available():
                 self.button("Use Saved Calibration", self.use_saved_calibration)
@@ -411,7 +628,7 @@ class TouchApp:
             self.button("Retake Empty Photo", self.retake_empty)
             self.button("Cancel Calibration", self.cancel_calibration)
         elif flow.stage == "starting":
-            self.heading("3. Starting pieces", "Place all 32 pieces normally. White pieces should be at the bottom of the photo.")
+            self.heading("3. Starting pieces", "Place all 32 pieces, with White at the bottom. You can edit this photo after capture.")
             self.button("Take Setup Photo", self.capture_starting, accent=True)
             if not flow.empty_auto_corners:
                 self.button("Redo Empty Corners", self.redo_empty_corners)
@@ -423,8 +640,9 @@ class TouchApp:
             self.button("Retake Setup Photo", self.retake_starting)
             self.button("Cancel Calibration", self.cancel_calibration)
         elif flow.stage == "ready":
-            self.heading("Checking calibration", "The two photos are aligned independently.")
-            self.button("Check Again", self.finish_calibration, accent=True, short=True)
+            self.heading("Adjust setup photo", "The same edits will be applied to the empty photo and every game scan.")
+            self.render_photo_adjustments()
+            self.button("Check Board", self.finish_calibration, accent=True, short=True)
             if not flow.starting_auto_corners:
                 self.button("Redo Setup Corners", self.redo_starting_corners, short=True)
             if not flow.empty_auto_corners:
@@ -435,9 +653,43 @@ class TouchApp:
             self.heading("Calibration saved", "The starting board was verified. You can now play.")
             self.button("Choose Difficulty", self.continue_after_calibration, accent=True)
 
+    def render_photo_adjustments(self) -> None:
+        for label, name, start, end in (("Brightness", "brightness", -60, 60),
+                                         ("Contrast %", "contrast", 70, 160),
+                                         ("Color warmth", "warmth", -40, 40)):
+            slider = tk.Scale(self.panel, from_=start, to=end, resolution=10,
+                              orient="horizontal", label=label, showvalue=True,
+                              bg=self.PANEL, fg=self.TEXT, troughcolor="#314554",
+                              activebackground=self.GREEN, highlightthickness=0,
+                              bd=0, font=("DejaVu Sans", 9 if self.compact else 10),
+                              length=self.panel_width - 40)
+            slider.set(getattr(self.photo_adjustments, name))
+            slider.configure(command=lambda value, field=name: self.set_photo_adjustment(field, int(float(value))))
+            slider.pack(fill="x", pady=0 if self.compact else 1)
+
+    def set_photo_adjustment(self, name: str, value: int) -> None:
+        if self.calibration_flow is None or self.calibration_flow.stage != "ready":
+            return
+        settings = replace(self.photo_adjustments, **{name: value})
+        if settings == self.photo_adjustments:
+            return
+        self.photo_adjustments = settings
+        self.draw_board()
+        self.say("Preview updated. Tap Check Board when the pieces stand out.")
+
     def saved_calibration_available(self) -> bool:
-        return ((self.args.calibration / "calibration.json").is_file() and
-                (self.args.calibration / "empty_warp.png").is_file())
+        directory = self.args.calibration
+        if not ((directory / "calibration.json").is_file() and
+                (directory / "empty_warp.png").is_file()):
+            return False
+        recorded = directory / "calibration_camera.json"
+        if not recorded.exists():
+            camera_matches = self.camera_settings == CameraSettings()
+        else:
+            camera_matches = read_camera_settings(recorded) == self.camera_settings
+        adjustments = directory / "photo_adjustments.json"
+        return camera_matches and (not adjustments.exists() or
+                                   read_photo_adjustments(adjustments) is not None)
 
     def use_saved_calibration(self) -> None:
         if self.calibration_flow is None or self.busy or not self.saved_calibration_available():
@@ -531,15 +783,17 @@ class TouchApp:
         self.busy = True
         self.say("Taking the starting-board photo…")
         self.render()
+        previous_corners = [point.copy() for point in flow.empty_corners]
 
         def take_photo():
             path = self.args.calibration / "starting.jpg"
             self.camera.capture(path)
             photo = read_image(path)
             try:
-                return photo, board_corners(photo).tolist()
+                return photo, board_corners(photo).tolist(), False
             except VisionError:
-                return photo, None
+                corners = reusable_corners(photo, previous_corners)
+                return photo, corners, corners is not None
 
         self.submit("cal_start_photo", take_photo)
 
@@ -553,11 +807,12 @@ class TouchApp:
         starting = flow.starting_photo
         empty_corners = [point.copy() for point in flow.empty_corners]
         starting_corners = [point.copy() for point in flow.starting_corners]
+        adjustments = self.photo_adjustments
         self.busy = True
         self.say("Aligning both photos and checking the starting board…")
         self.render()
         self.submit("cal_finish", lambda: calibrate_photos(
-            empty, starting, empty_corners, starting_corners))
+            empty, starting, empty_corners, starting_corners, adjustments))
 
     def continue_after_calibration(self) -> None:
         self.startup_calibration = False
@@ -583,6 +838,12 @@ class TouchApp:
         self.executor.submit(run)
 
     def start_game(self) -> None:
+        if not self.saved_calibration_available():
+            self.start_calibration()
+            self.say("Saved calibration is missing or incomplete. Take empty and setup photos.", self.GOLD)
+            return
+        self.photo_adjustments = (read_photo_adjustments(self.args.calibration / "photo_adjustments.json")
+                                  or PhotoAdjustments())
         self.generation += 1
         self.scan_photo = None
         self.scan_corners = []
@@ -599,6 +860,9 @@ class TouchApp:
     def scan(self) -> None:
         if self.session is None or self.busy:
             return
+        self.scan_feedback = None
+        remembered = (self.last_scan_corners or
+                      (self.calibration.corners if self.calibration is not None else None))
         self.busy = True
         self.say("Taking a photo of the physical board…")
         self.render()
@@ -608,11 +872,12 @@ class TouchApp:
             self.camera.capture(path)
             photo = read_image(path)
             if self.args.corners:
-                return photo, [point.copy() for point in self.args.corners]
+                return photo, [point.copy() for point in self.args.corners], "specified"
             try:
-                return photo, board_corners(photo).tolist()
+                return photo, board_corners(photo).tolist(), "markers"
             except VisionError:
-                return photo, None
+                corners = reusable_corners(photo, remembered)
+                return photo, corners, "saved" if corners is not None else "manual"
 
         self.submit("scan_photo", take_photo)
 
@@ -628,18 +893,18 @@ class TouchApp:
         self.render()
 
         def check_photo():
-            observation, _aligned = observe(reference, photo, calibration, corners)
-            if observation.uncertain:
-                raise VisionError("Uncertain squares: " + ", ".join(observation.uncertain) +
-                                  ". Retake the photo or adjust the corners.")
-            return observation.occupied
+            observation, _aligned = observe(reference, adjust_photo(photo, self.photo_adjustments),
+                                            calibration, corners)
+            return observation
 
         self.submit("scan", check_photo)
 
     def use_saved_scan_corners(self) -> None:
-        if self.calibration is None or self.calibration.corners is None:
+        if self.last_scan_corners is None:
             return
-        self.scan_corners = [point.copy() for point in self.calibration.corners]
+        self.scan_corners = [point.copy() for point in self.last_scan_corners]
+        self.scan_corner_source = "saved"
+        self.scan_feedback = None
         self.process_scan_photo()
 
     def undo_scan_corner(self) -> None:
@@ -650,12 +915,15 @@ class TouchApp:
 
     def redo_scan_corners(self) -> None:
         self.scan_corners = []
+        self.scan_corner_source = "manual"
+        self.scan_feedback = None
         self.say("Tap the outer top-left corner in this photo.")
         self.render()
 
     def retake_scan(self) -> None:
         self.scan_photo = None
         self.scan_corners = []
+        self.scan_feedback = None
         self.scan()
 
     def poll_results(self) -> None:
@@ -682,6 +950,18 @@ class TouchApp:
                     continue
                 try:
                     self.handle_result(tag, value)
+                except MoveRejected as exc:
+                    if tag == "scan" and self.scan_photo is not None and self.session is not None:
+                        if self.session.phase == "human":
+                            self.scan_feedback = rejected_move_feedback(
+                                self.session.game.board, value, str(exc))
+                        elif self.session.phase == "computer":
+                            self.scan_feedback = ScanFeedback("CHECK COMPUTER MOVE", str(exc))
+                        else:
+                            self.scan_feedback = ScanFeedback("SETUP NOT VERIFIED", str(exc))
+                        self.say("Check the message on the photo.", self.RED)
+                    else:
+                        self.say(str(exc), self.RED)
                 except (ValueError, RuntimeError, OSError, cv2.error) as exc:
                     self.say(str(exc), self.RED)
                 self.render()
@@ -692,6 +972,9 @@ class TouchApp:
     def handle_result(self, tag: str, value) -> None:
         if tag == "saved_calibration":
             self.calibration, self.reference = value
+            self.last_scan_corners = saved_scan_corners(self.args.calibration, self.calibration)
+            self.photo_adjustments = (read_photo_adjustments(self.args.calibration / "photo_adjustments.json")
+                                      or PhotoAdjustments())
             self.startup_calibration = False
             self.calibration_flow = None
             if self.calibration.scoring == "legacy":
@@ -713,28 +996,32 @@ class TouchApp:
         elif tag == "cal_start_photo":
             flow = self.calibration_flow
             assert flow is not None
-            photo, detected_corners = value
-            flow.accept_starting(photo, detected_corners)
+            photo, detected_corners, reused_corners = value
+            flow.accept_starting(photo, detected_corners, reused_corners=reused_corners)
             if flow.stage == "ready":
-                self.finish_calibration()
+                self.say("Adjust the captured setup photo, then tap Check Board.")
             else:
                 self.say("Tap the outer top-left corner in the setup photo.")
         elif tag == "cal_finish":
             flow = self.calibration_flow
             assert flow is not None
             calibration, reference = value
-            if flow.starting_auto_corners:
-                calibration = replace(calibration, corners=None)
             save_calibration(self.args.calibration, calibration, reference)
+            write_photo_adjustments(self.args.calibration / "photo_adjustments.json",
+                                    self.photo_adjustments)
+            write_camera_settings(self.args.calibration / "calibration_camera.json",
+                                  self.camera_settings)
             self.calibration, self.reference = calibration, reference
+            self.last_scan_corners = calibration.corners
             flow.stage = "done"
             self.say("Calibration saved and starting board verified. Tap Choose Difficulty.", self.GREEN)
         elif tag == "start":
             self.calibration, self.reference, self.player = value
+            self.last_scan_corners = saved_scan_corners(self.args.calibration, self.calibration)
             self.session = TouchSession(self.level)
             self.say("Place the pieces in their starting squares and scan the board.")
         elif tag == "scan_photo":
-            photo, corners = value
+            photo, corners, self.scan_corner_source = value
             self.scan_photo = photo
             self.scan_corners = corners or []
             if corners is not None:
@@ -743,23 +1030,34 @@ class TouchApp:
                 self.say("Tap the four outer board corners in this photo, starting at top-left.")
         elif tag == "scan":
             assert self.session is not None
+            used_corners = [point.copy() for point in self.scan_corners]
             if self.session.phase == "setup":
                 self.session.verify_setup(value)
                 self.clear_scan_photo()
-                self.say("Starting position verified. Your move is legal when the scan matches a chess move.", self.GREEN)
+                if self.session.phase == "setup_confirm":
+                    self.say("Please check these squares on the physical board: " +
+                             ", ".join(self.session.setup_uncertain) + ".", self.GOLD)
+                else:
+                    self.say("Starting position verified. Your move is legal when the scan matches a chess move.",
+                             self.GREEN)
             elif self.session.phase == "human":
                 san = self.session.scan_human(value)
                 self.clear_scan_photo()
                 if san is None:
                     self.say("Legal move detected. Choose the piece or move shown on screen.", self.GREEN)
                 else:
-                    self.say(f"Legal move: {san}", self.GREEN)
+                    detail = (" Unclear squares outside the move: " + ", ".join(value.uncertain) + "."
+                              if value.uncertain else "")
+                    self.say(f"Legal move: {san}." + detail, self.GREEN)
                     self.after_human_move()
             elif self.session.phase == "computer":
                 san = self.session.verify_computer(value)
                 self.clear_scan_photo()
                 self.say(f"Computer move {san} verified. " +
-                         (self.session.result or "Your turn."), self.GREEN)
+                         (self.session.result or "Your turn.") +
+                         (" Unclear squares outside the move: " + ", ".join(value.uncertain) + "."
+                          if value.uncertain else ""), self.GREEN)
+            self.last_scan_corners = used_corners
         elif tag == "engine":
             assert self.session is not None
             san = self.session.announce_computer(value)
@@ -808,9 +1106,21 @@ class TouchApp:
         self.say("Retake the board photo after your move.")
         self.render()
 
+    def confirm_setup(self) -> None:
+        assert self.session is not None
+        self.session.confirm_setup()
+        self.say("Starting board confirmed. Your turn.", self.GREEN)
+        self.render()
+
+    def retry_setup_scan(self) -> None:
+        assert self.session is not None
+        self.session.retry_setup()
+        self.scan()
+
     def clear_scan_photo(self) -> None:
         self.scan_photo = None
         self.scan_corners = []
+        self.scan_feedback = None
         self.preview_photo = None
         self.preview_geometry = None
 
@@ -882,8 +1192,7 @@ class TouchApp:
         if flow.stage == "starting":
             self.say("Empty-board corners set. Place all starting pieces, then take the setup photo.")
         elif flow.stage == "ready":
-            self.finish_calibration()
-            return
+            self.say("Adjust the captured setup photo, then tap Check Board.")
         else:
             points = flow.empty_corners if flow.stage == "empty_corners" else flow.starting_corners
             self.say(f"Tap the outer {flow.CORNER_NAMES[len(points)]} corner.")
@@ -925,7 +1234,9 @@ class TouchApp:
         scale = min((available_width - 20) / width, (available_height - 20) / height)
         display_width = max(1, round(width * scale))
         display_height = max(1, round(height * scale))
-        resized = cv2.resize(photo, (display_width, display_height), interpolation=cv2.INTER_AREA)
+        resized = adjust_photo(
+            cv2.resize(photo, (display_width, display_height), interpolation=cv2.INTER_AREA),
+            self.photo_adjustments)
         ok, encoded = cv2.imencode(".png", resized)
         if not ok:
             raise VisionError("Could not display the empty-board photo.")
@@ -940,6 +1251,34 @@ class TouchApp:
                                fill=self.GOLD, outline=self.BG, width=2)
             canvas.create_text(px + 12, py - 12, text=str(index + 1), fill=self.GOLD,
                                font=("DejaVu Sans", 12, "bold"))
+        if flow is None and self.scan_feedback is not None:
+            feedback = self.scan_feedback
+            canvas.create_rectangle(left, top, left + display_width, top + 48,
+                                    fill="#8a2f32", outline="")
+            canvas.create_text(left + 15, top + 24, text=feedback.title,
+                               fill=self.TEXT, anchor="w",
+                               font=("DejaVu Sans", 16, "bold"))
+            if (len(points) == 4 and feedback.source and feedback.destination and
+                    (self.calibration is None or self.calibration.rotation == "none")):
+                board_outline = np.float32([[0, 0], [799, 0], [799, 799], [0, 799]])
+                transform = cv2.getPerspectiveTransform(board_outline, np.float32(points))
+                centers = []
+                for square in (feedback.source, feedback.destination):
+                    index = chess.parse_square(square)
+                    board_x = (chess.square_file(index) + 0.5) * 100
+                    board_y = (7 - chess.square_rank(index) + 0.5) * 100
+                    pixel = cv2.perspectiveTransform(
+                        np.float32([[[board_x, board_y]]]), transform)[0, 0]
+                    centers.append((left + float(pixel[0]) * scale,
+                                    top + float(pixel[1]) * scale))
+                canvas.create_line(*centers[0], *centers[1], fill=self.RED,
+                                   width=5, arrow="last")
+                for center, square in zip(centers, (feedback.source, feedback.destination)):
+                    px, py = center
+                    canvas.create_oval(px - 18, py - 18, px + 18, py + 18,
+                                       outline=self.RED, width=4)
+                    canvas.create_text(px, py - 28, text=square, fill=self.RED,
+                                       font=("DejaVu Sans", 15, "bold"))
 
     def board_geometry(self) -> tuple[float, float, float, float]:
         actual_width = self.board_canvas.winfo_width()
@@ -977,6 +1316,9 @@ class TouchApp:
                     fill = "#c6ae65"
                 if pending and square in (pending.from_square, pending.to_square):
                     fill = "#e3b76d"
+                if (self.session and self.session.phase == "setup_confirm" and
+                        name in self.session.setup_uncertain):
+                    fill = "#ff8c85"
                 if name == self.selected_square:
                     fill = "#ffe08a"
                 canvas.create_rectangle(left, top, left + step, top + step,
