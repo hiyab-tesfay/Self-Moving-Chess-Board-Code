@@ -142,8 +142,10 @@ class PretendBoardTests(unittest.TestCase):
         knight = subprocess.run([sys.executable, str(Path(gd.__file__)), "--dry-run", "--config", str(self.config_path), "--move", "g1f3"],
                                 capture_output=True, text=True)
         self.assertEqual(knight.returncode, 0, knight.stderr[-300:])
-        self.assertIn("(make room)", knight.stdout, "at the start a pawn has to step aside for the knight")
-        self.assertIn("(put back)", knight.stdout)
+        self.assertNotIn("(make room)", knight.stdout, "the knight goes through the lanes; nothing steps aside")
+        self.assertEqual(knight.stdout.count("M3"), 1, "one grab: the knight only")
+        self.assertIn("G1 X350.000 Y65.000 F3600", knight.stdout, "the corner between f1, g1, f2 and g2")
+        self.assertIn("G1 X350.000 Y115.000 F3600", knight.stdout, "up the lane between f2 and g2")
 
     @classmethod
     def tearDownClass(cls):

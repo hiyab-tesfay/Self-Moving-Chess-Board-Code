@@ -200,9 +200,9 @@ python3 gantry_driver.py --dry-run --move g1f3            # from the starting po
 python3 gantry_driver.py --dry-run --move a1a8 --occupied a1,a4,b2
 ```
 
-Jobs from the website carry the paths the game server planned; when a job also lists
-`"before"` (the squares and slots occupied as it starts), the Pi finds every path afresh
-with these checks. Both `piece_mm` and `clearance_mm` can be set in `gantry_config.json`.
+Jobs from the website carry `"before"` (the squares and slots occupied as the job starts)
+and `"pieces"` (which piece is on each), so the Pi finds every path afresh with these
+checks and the real widths; a job without them is run with the paths it came with.
 
 ## Testing without hardware
 

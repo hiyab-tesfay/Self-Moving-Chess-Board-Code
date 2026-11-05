@@ -1,14 +1,16 @@
-"""Finding a way for a carried piece that touches nothing, and making room when there is none.
+"""Finding a way for a carried piece that touches nothing, and making room only when there is none.
 
-Every carry is checked in millimetres: pieces are circles of `piece_mm` across, and a path is
-only allowed where the carried piece stays `clearance_mm` clear of every other piece. The
-path runs over a grid of tile centres, the midpoints between tiles and the crossings between
-four tiles (the "lanes"), plus the parking slots beside the board, with A* picking the
-shortest route. With 50 mm squares and 27 mm bases a lane between two occupied tiles is
-23 mm wide, so a piece cannot pass there; the search knows that and goes round, and when
-every way is shut it moves one blocking piece to a free tile, makes the move, and puts the
-blocker back. That gives jobs with three carries instead of one, which is what the firmware
-and the camera check already handle.
+Every carry is checked in millimetres. Pieces are circles: each type has its own base width
+(`piece_sizes_mm`; a piece of unknown type counts as the widest, `piece_mm`). The path runs
+over a grid of tile centres, the midpoints between tiles and the crossings between four
+tiles (the "lanes"), plus the parking slots beside the board, and A* picks the shortest
+route, so a knight goes round through the lanes the way it would on a plotter rather than
+over other pieces. Along a lane between two occupied tiles the carried piece keeps
+`lane_clearance_mm` of air from each neighbour (1 mm by default: with 50 mm squares a 25 mm
+knight between two 23 mm pawns has exactly that); everywhere else it keeps `clearance_mm`
+(3 mm). Only when no lane is wide enough, for instance between a king and a queen, does
+the search move one blocking piece to a free tile, make the move, and put the blocker back:
+three carries instead of one, which the firmware and the camera check already handle.
 
 Names: board squares "a1".."h8"; parking slots "w:0".. and "b:0".. down the lanes beside
 the board. Path points come out in the job's square units: a1 is (0, 0), x.5 are lanes,
@@ -21,6 +23,8 @@ import heapq
 import math
 
 FILES = "abcdefgh"
+# Base widths of the printed pieces, from the models: pawn 23 mm, knight/bishop/rook 25 mm, queen/king 27 mm.
+DEFAULT_PIECE_SIZES_MM = {"p": 23.0, "n": 25.0, "b": 25.0, "r": 25.0, "q": 27.0, "k": 27.0}
 
 
 @dataclass
@@ -29,8 +33,10 @@ class Geometry:
     a1_mm: tuple[float, float]
     park_columns_mm: dict[int, float]            # column index (-1, -2, 8, 9) -> x in mm
     park_rows_mm: list[float]                     # y of each slot down a parking lane
-    piece_mm: float = 27.0                        # widest piece base
-    clearance_mm: float = 3.0                     # air between two pieces at the closest point
+    piece_mm: float = 27.0                        # widest piece base; used when a piece's type is unknown
+    clearance_mm: float = 3.0                     # air between two pieces, out in the open
+    lane_clearance_mm: float = 1.0                # air when sliding along a lane between two tiles
+    piece_sizes_mm: dict = field(default_factory=lambda: dict(DEFAULT_PIECE_SIZES_MM))
 
     def board_mm(self, x: float, y: float) -> tuple[float, float]:
         return self.a1_mm[0] + x * self.square_mm, self.a1_mm[1] + y * self.square_mm
@@ -39,6 +45,10 @@ class Geometry:
         if isinstance(node, Slot):
             return self.park_columns_mm[node.column], self.park_rows_mm[node.row]
         return self.board_mm(*node)
+
+    def size(self, symbol: str | None) -> float:
+        """Base width of a piece by its symbol (either case); the widest when unknown."""
+        return float(self.piece_sizes_mm.get((symbol or "").lower(), self.piece_mm))
 
     @property
     def keep_apart_mm(self) -> float:
@@ -93,14 +103,22 @@ def _dist_point_segment(p, a, b) -> float:
 
 
 class Board:
-    """The pieces on the board and in the lanes, and the ways between them."""
+    """The pieces on the board and in the lanes, and the ways between them.
 
-    def __init__(self, geometry: Geometry, occupied, slots_per_lane: int | None = None):
+    `pieces` maps a square or slot to the piece on it ("P", "n", ...) so each piece's real
+    width is used; a square in `occupied` but not in `pieces` is treated as the widest piece.
+    """
+
+    def __init__(self, geometry: Geometry, occupied, slots_per_lane: int | None = None, pieces=None):
         self.g = geometry
         self.occupied: set[str] = set(occupied)
+        self.pieces: dict[str, str] = {k: v for k, v in (pieces or {}).items() if k in self.occupied}
         self.slots_per_lane = slots_per_lane or len(geometry.park_rows_mm)
         self.nodes = self._build_nodes()
         self.edges = self._build_edges()
+
+    def size_of(self, name: str) -> float:
+        return self.g.size(self.pieces.get(name))
 
     # ------------------------------------------------------------------ names and nodes
 
@@ -175,10 +193,18 @@ class Board:
 
     # ------------------------------------------------------------------ clearance
 
-    def clear(self, a, b, ignore: set[str]) -> bool:
-        """Can a piece slide from node a to node b without touching anything but `ignore`?"""
+    @staticmethod
+    def _lane_run(a, b) -> bool:
+        """A straight slide along a lane line between tiles (x.5 or y.5), where the tight margin applies."""
+        if isinstance(a, Slot) or isinstance(b, Slot):
+            return False
+        return (a[0] == b[0] and a[0] != int(a[0])) or (a[1] == b[1] and a[1] != int(a[1]))
+
+    def clear(self, a, b, ignore: set[str], carried_mm: float | None = None) -> bool:
+        """Can the carried piece slide from node a to node b without touching anything but `ignore`?"""
         pa, pb = self.g.node_mm(a), self.g.node_mm(b)
-        keep = self.g.keep_apart_mm
+        carried = self.g.piece_mm if carried_mm is None else carried_mm
+        air = self.g.lane_clearance_mm if self._lane_run(a, b) else self.g.clearance_mm
         for name in self.occupied:
             if name in ignore:
                 continue
@@ -186,7 +212,8 @@ class Board:
                 p = self.g.node_mm(self.node(name))
             except NoPath:
                 continue
-            if _dist_point_segment(p, pa, pb) < keep:
+            needed = (carried + self.size_of(name)) / 2 + air
+            if _dist_point_segment(p, pa, pb) < needed - 1e-9:
                 return False
         return True
 
@@ -196,6 +223,7 @@ class Board:
         """Nodes from src to dst, or None. The piece on src and the empty dst are not obstacles."""
         start, goal = self.node(src), self.node(dst)
         ignore = {src, dst}
+        carried = self.size_of(src)
         goal_mm = self.g.node_mm(goal)
         best = {start: 0.0}
         came: dict = {}
@@ -212,7 +240,7 @@ class Board:
             cost = best[node]
             here = self.g.node_mm(node)
             for other in self.edges.get(node, []):
-                if not self.clear(node, other, ignore):
+                if not self.clear(node, other, ignore, carried):
                     continue
                 there = self.g.node_mm(other)
                 step = math.hypot(there[0] - here[0], there[1] - here[1])
@@ -264,6 +292,9 @@ class Board:
     def apply(self, carry: Carry) -> None:
         self.occupied.discard(carry.piece_from)
         self.occupied.add(carry.piece_to)
+        symbol = self.pieces.pop(carry.piece_from, None)
+        if symbol is not None:
+            self.pieces[carry.piece_to] = symbol
 
     def plan(self, src: str, dst: str) -> list[Carry]:
         """Carries that get the piece on src to dst: one, or three when a blocker has to make room."""
@@ -278,7 +309,7 @@ class Board:
         best: tuple[float, list[Carry]] | None = None
         blockers = [name for name in self.occupied if name not in (src, dst) and ":" not in name]
         for blocker in blockers:
-            trial = Board(self.g, self.occupied - {blocker}, self.slots_per_lane)
+            trial = Board(self.g, self.occupied - {blocker}, self.slots_per_lane, self.pieces)
             if trial.find_path(src, dst) is None:
                 continue
             for tile in self.free_board_tiles():
@@ -286,9 +317,11 @@ class Board:
                     continue
                 try:
                     out = self.carry(blocker, tile, "make room")
-                    during = Board(self.g, (self.occupied - {blocker}) | {tile}, self.slots_per_lane)
+                    during = Board(self.g, (self.occupied - {blocker}) | {tile}, self.slots_per_lane,
+                                   {**self.pieces, tile: self.pieces.get(blocker, "")})
                     move = during.carry(src, dst)
-                    after = Board(self.g, (during.occupied - {src}) | {dst}, self.slots_per_lane)
+                    after = Board(self.g, (during.occupied - {src}) | {dst}, self.slots_per_lane,
+                                  {**during.pieces, dst: self.pieces.get(src, "")})
                     back = after.carry(tile, blocker, "put back")
                 except NoPath:
                     continue
@@ -308,3 +341,12 @@ class Board:
 
 def occupied_at_start() -> set[str]:
     return {f"{f}{r}" for f in FILES for r in (1, 2, 7, 8)}
+
+
+def pieces_at_start() -> dict[str, str]:
+    back = "RNBQKBNR"
+    pieces = {}
+    for file, symbol in zip(FILES, back):
+        pieces[f"{file}1"], pieces[f"{file}2"] = symbol, "P"
+        pieces[f"{file}7"], pieces[f"{file}8"] = "p", symbol.lower()
+    return pieces

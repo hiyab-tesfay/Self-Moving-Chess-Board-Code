@@ -102,10 +102,12 @@ class BoardMap:
 
     def geometry(self, config: dict):
         """The same numbers for board_paths."""
+        sizes = {str(k).lower(): float(v) for k, v in (config.get("piece_sizes_mm") or board_paths.DEFAULT_PIECE_SIZES_MM).items()}
         return board_paths.Geometry(
             self.square, self.a1, {c: x for c, x in self.columns.items() if c < 0 or c > 7},
             [self.park_rows[i] for i in sorted(self.park_rows)],
-            float(config.get("piece_mm", 27.0)), float(config.get("clearance_mm", 3.0)))
+            float(config.get("piece_mm", 27.0)), float(config.get("clearance_mm", 3.0)),
+            float(config.get("lane_clearance_mm", 1.0)), sizes)
 
     def _interp(self, table: dict, value: float, what: str, outer: dict | None = None) -> float:
         """Whole numbers are configured centres; x.5 lies halfway between its neighbours, or half a square past the last one."""
@@ -138,12 +140,14 @@ def route(job: dict, board: BoardMap, config: dict) -> list[dict]:
     """
     if "before" not in job:
         return list(job.get("steps", []))
-    world = board_paths.Board(board.geometry(config), job["before"])
+    world = board_paths.Board(board.geometry(config), job["before"], pieces=job.get("pieces"))
     steps: list[dict] = []
     for step in job.get("steps", []):
         if step.get("op") != "carry":
             steps.append(step)
             continue
+        if step.get("piece") and step["from"] in world.occupied:
+            world.pieces.setdefault(step["from"], step["piece"])
         try:
             carries = world.plan(step["from"], step["to"])
         except board_paths.NoPath as exc:
@@ -389,8 +393,11 @@ def simple_move_job(uci: str, piece: str = "?", occupied=None) -> dict:
     src, dst = uci[:2], uci[2:4]
     fx, fy = FILES.index(src[0]), int(src[1]) - 1
     tx, ty = FILES.index(dst[0]), int(dst[1]) - 1
+    pieces = board_paths.pieces_at_start() if occupied is None else {}
     before = sorted(board_paths.occupied_at_start() | {src} if occupied is None else set(occupied) | {src})
-    return {"id": 0, "label": uci, "expect": [], "before": before,
+    if piece == "?" and src in pieces:
+        piece = pieces[src]
+    return {"id": 0, "label": uci, "expect": [], "before": before, "pieces": pieces,
             "steps": [{"op": "carry", "piece": piece, "from": src, "to": dst, "path": [[fx, fy], [tx, ty]]}]}
 
 

@@ -7,7 +7,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import board_paths as bp  # noqa: E402
 
-# The sketch's numbers: 50 mm squares, a1 at (60, 35), one lane each side at a 35 mm pitch, 27 mm pieces.
+# The sketch's numbers: 50 mm squares, a1 at (60, 35), one lane each side at a 35 mm pitch.
 ROWS = [17.5 + 35 * i for i in range(12)]
 GEO = bp.Geometry(50.0, (60.0, 35.0), {-1: 17.5, 8: 452.5}, ROWS, piece_mm=27.0, clearance_mm=3.0)
 
@@ -22,6 +22,21 @@ def clearance_ok(board: bp.Board, carry: bp.Carry) -> float:
             if name in (carry.piece_from, carry.piece_to):
                 continue
             smallest = min(smallest, bp._dist_point_segment(board.g.node_mm(board.node(name)), pa, pb))
+    return smallest
+
+
+def air_ok(board: bp.Board, carry: bp.Carry) -> float:
+    """Smallest gap in mm between the carried piece's edge and any other piece's edge along the way."""
+    nodes = [board._node_of(p) for p in carry.path]
+    carried = board.size_of(carry.piece_from)
+    smallest = float("inf")
+    for a, b in zip(nodes, nodes[1:]):
+        pa, pb = board.g.node_mm(a), board.g.node_mm(b)
+        for name in board.occupied:
+            if name in (carry.piece_from, carry.piece_to):
+                continue
+            centre = bp._dist_point_segment(board.g.node_mm(board.node(name)), pa, pb)
+            smallest = min(smallest, centre - (carried + board.size_of(name)) / 2)
     return smallest
 
 
@@ -55,8 +70,19 @@ class PathTests(unittest.TestCase):
         self.assertTrue(any(p[0] in (-1.0, 8.0) for p in carry.path), "uses a lane beside the board")
         self.assertGreaterEqual(clearance_ok(board, carry), GEO.keep_apart_mm)
 
-    def test_the_first_knight_move_makes_room_with_a_pawn_and_puts_it_back(self):
-        board = bp.Board(GEO, bp.occupied_at_start())
+    def test_the_knight_goes_through_the_lanes_between_the_pawns(self):
+        board = bp.Board(GEO, bp.occupied_at_start(), pieces=bp.pieces_at_start())
+        carry, = board.plan("g1", "f3")
+        self.assertEqual(carry.reason, "move", "no piece is moved aside")
+        self.assertEqual(carry.path, [[6.0, 0.0], [5.5, 0.5], [5.5, 1.5], [5.0, 2.0]],
+                         "out to the corner, up the lane between f2 and g2, into f3 from its corner")
+        self.assertGreaterEqual(air_ok(board, carry), GEO.lane_clearance_mm - 1e-9, "1 mm of air between the 25 mm knight and the 23 mm pawns")
+        # The other knight, and Black's, do the same.
+        self.assertEqual(len(board.plan("b1", "c3")), 1)
+        self.assertEqual(len(board.plan("g8", "f6")), 1)
+
+    def test_without_piece_types_the_finder_stays_cautious_and_makes_room(self):
+        board = bp.Board(GEO, bp.occupied_at_start())   # every piece counts as 27 mm: no lane is wide enough
         carries = board.plan("g1", "f3")
         self.assertEqual([c.reason for c in carries], ["make room", "move", "put back"])
         out, move, back = carries
@@ -69,8 +95,18 @@ class PathTests(unittest.TestCase):
             world.apply(carry)
         self.assertEqual(world.occupied, (bp.occupied_at_start() - {"g1"}) | {"f3"}, "only the knight has moved, in the end")
 
+    def test_making_room_is_the_last_resort_between_wide_pieces(self):
+        pieces = {"d1": "Q", "e1": "K", "c2": "B", "d2": "P", "e2": "P"}
+        board = bp.Board(GEO, set(pieces), pieces=pieces)
+        self.assertEqual(len(board.plan("c2", "c4")), 1, "straight up: c3 is clear, one run")
+        boxed = {"a1": "R", "b1": "N", "c1": "B", "d1": "Q", "e1": "K", "f1": "B", "g1": "N", "h1": "R",
+                 "a2": "P", "b2": "P", "c2": "P", "d2": "P", "e2": "P", "f2": "P", "g2": "P", "h2": "P"}
+        board = bp.Board(GEO, set(boxed), pieces=boxed)
+        carries = board.plan("d1", "d3")   # the 27 mm queen needs 26 mm of lane beside a 23 mm pawn; a lane gives 25
+        self.assertEqual([c.reason for c in carries], ["make room", "move", "put back"])
+
     def test_every_path_ends_exactly_on_the_target_centre(self):
-        board = bp.Board(GEO, bp.occupied_at_start())
+        board = bp.Board(GEO, bp.occupied_at_start(), pieces=bp.pieces_at_start())
         for carry in board.plan("g1", "f3"):
             last = board._node_of(carry.path[-1])
             self.assertEqual(board.g.node_mm(last), board.g.node_mm(board.node(carry.piece_to)))
