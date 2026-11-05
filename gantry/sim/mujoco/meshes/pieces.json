@@ -1,0 +1,235 @@
+{
+ "units": "mm",
+ "up": "+Z",
+ "origin": "centre of the base, on the underside",
+ "pieces": {
+  "p": {
+   "name": "pawn",
+   "file": "pawn.stl",
+   "base_diameter_mm": 23.01,
+   "base_straight_mm": 2.0,
+   "pocket_diameter_mm": 10.21,
+   "pocket_depth_mm": 5.0,
+   "height_mm": 37.69,
+   "max_diameter_mm": 23.01,
+   "volume_mm3": 6243.7,
+   "center_of_mass_mm": [
+    0.0,
+    -0.004,
+    15.784
+   ],
+   "inertia_unit_density_mm5": [
+    [
+     984103.6,
+     0.0,
+     -5.0
+    ],
+    [
+     0.0,
+     984102.8,
+     0.0
+    ],
+    [
+     -5.0,
+     0.0,
+     249708.0
+    ]
+   ],
+   "watertight": true,
+   "faces": 1764
+  },
+  "n": {
+   "name": "knight",
+   "file": "knight.stl",
+   "base_diameter_mm": 25.0,
+   "base_straight_mm": 2.0,
+   "pocket_diameter_mm": 10.1,
+   "pocket_depth_mm": 4.75,
+   "height_mm": 46.0,
+   "max_diameter_mm": 25.0,
+   "volume_mm3": 6536.7,
+   "center_of_mass_mm": [
+    0.178,
+    0.0,
+    14.155
+   ],
+   "inertia_unit_density_mm5": [
+    [
+     1114812.4,
+     -1.1,
+     -32995.7
+    ],
+    [
+     -1.1,
+     1121530.7,
+     -40.9
+    ],
+    [
+     -32995.7,
+     -40.9,
+     288069.4
+    ]
+   ],
+   "watertight": true,
+   "faces": 1556
+  },
+  "b": {
+   "name": "bishop",
+   "file": "bishop.stl",
+   "base_diameter_mm": 25.01,
+   "base_straight_mm": 2.5,
+   "pocket_diameter_mm": 10.11,
+   "pocket_depth_mm": 5.0,
+   "height_mm": 59.88,
+   "max_diameter_mm": 25.01,
+   "volume_mm3": 12100.5,
+   "center_of_mass_mm": [
+    0.0,
+    -0.005,
+    24.235
+   ],
+   "inertia_unit_density_mm5": [
+    [
+     3780676.2,
+     2169.5,
+     -75.6
+    ],
+    [
+     2169.5,
+     3779095.5,
+     -58.8
+    ],
+    [
+     -75.6,
+     -58.8,
+     581871.7
+    ]
+   ],
+   "watertight": true,
+   "faces": 3842
+  },
+  "r": {
+   "name": "rook",
+   "file": "rook.stl",
+   "base_diameter_mm": 25.0,
+   "base_straight_mm": 2.5,
+   "pocket_diameter_mm": 10.1,
+   "pocket_depth_mm": 5.0,
+   "height_mm": 42.86,
+   "max_diameter_mm": 25.0,
+   "volume_mm3": 9046.5,
+   "center_of_mass_mm": [
+    0.0,
+    0.0,
+    16.541
+   ],
+   "inertia_unit_density_mm5": [
+    [
+     1647637.3,
+     -1.6,
+     -10.5
+    ],
+    [
+     -1.6,
+     1647634.3,
+     -2.8
+    ],
+    [
+     -10.5,
+     -2.8,
+     453520.8
+    ]
+   ],
+   "watertight": true,
+   "faces": 6288
+  },
+  "q": {
+   "name": "queen",
+   "file": "queen.stl",
+   "base_diameter_mm": 27.0,
+   "base_straight_mm": 7.0,
+   "pocket_diameter_mm": 10.1,
+   "pocket_depth_mm": 4.75,
+   "height_mm": 62.9,
+   "max_diameter_mm": 27.0,
+   "volume_mm3": 15891.4,
+   "center_of_mass_mm": [
+    -0.0,
+    -0.0,
+    26.275
+   ],
+   "inertia_unit_density_mm5": [
+    [
+     6363281.7,
+     -0.0,
+     -4.0
+    ],
+    [
+     -0.0,
+     6363280.6,
+     0.6
+    ],
+    [
+     -4.0,
+     0.6,
+     1038126.5
+    ]
+   ],
+   "watertight": true,
+   "faces": 6430
+  },
+  "k": {
+   "name": "king",
+   "file": "king.stl",
+   "base_diameter_mm": 27.01,
+   "base_straight_mm": 7.0,
+   "pocket_diameter_mm": 10.11,
+   "pocket_depth_mm": 5.0,
+   "height_mm": 75.81,
+   "max_diameter_mm": 27.01,
+   "volume_mm3": 18646.3,
+   "center_of_mass_mm": [
+    0.007,
+    0.0,
+    31.147
+   ],
+   "inertia_unit_density_mm5": [
+    [
+     9479009.5,
+     0.6,
+     0.9
+    ],
+    [
+     0.6,
+     9480956.6,
+     -2.5
+    ],
+    [
+     0.9,
+     -2.5,
+     1252929.5
+    ]
+   ],
+   "watertight": true,
+   "faces": 3946
+  }
+ },
+ "sources": {
+  "p": "PawnTopFinal.stl",
+  "n": "KnightNoSpikes.stl",
+  "b": "BishopNoSpikes.stl",
+  "r": "RookNoSpikes.stl",
+  "q": "QueenNoSpikes.stl",
+  "k": "KingTest.stl"
+ },
+ "holder": {
+  "file": "em_holder.stl",
+  "source": "em holder.stl",
+  "extents_mm": [
+   29.0,
+   31.0,
+   51.9
+  ],
+  "faces": 870
+ }
+}

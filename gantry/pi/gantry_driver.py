@@ -103,11 +103,13 @@ class BoardMap:
     def square_mm(self, name: str) -> tuple[float, float]:
         """A square like "e4" or a slot like "w:3"."""
         if ":" in name:
+            # Slots fill one lane at the configured row pitch (12 on the real board), then the next lane out.
             color, index = name[0], int(name[2:])
-            column = -1 - index // 8 if color == "w" else 8 + index // 8
+            per_lane = len(self.park_rows)
+            column = -1 - index // per_lane if color == "w" else 8 + index // per_lane
             if column not in self.columns:
                 raise GantryError(f"no parking column configured for {name}")
-            return self.columns[column], self.park_rows[index % 8]
+            return self.columns[column], self.park_rows[index % per_lane]
         return self.point_mm(FILES.index(name[0]), int(name[1]) - 1)
 
     def point_mm(self, px: float, py: float) -> tuple[float, float]:
