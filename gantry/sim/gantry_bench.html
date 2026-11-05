@@ -88,7 +88,7 @@
 <div class="bench">
   <div class="boardwrap">
     <svg id="board" viewBox="0 0 470 420" role="img" aria-label="The chess board and the two docking lanes, drawn in millimetres of gantry travel"></svg>
-    <p class="legend">Travel 470 × 420 mm, origin bottom-left. Squares 50 mm, a1 centre at (60, 35). Docking lanes at x = 17.5 and 452.5 mm, twelve slots at 35 mm pitch. Dotted line: the planned path, through the lanes between squares. Widths: pawn 23, knight/bishop/rook 25, queen/king 27 mm.</p>
+    <p class="legend">Travel 470 × 420 mm, origin bottom-left. Squares 50 mm, a1 centre at (60, 35). Captured pieces are taken off by the person: the board waits, the camera checks on each Check, then the gantry moves. The docking lanes at x = 17.5 and 452.5 mm stay in the firmware for a later version. Dotted line: the planned path, through the lanes between squares. Widths: pawn 23, knight/bishop/rook 25, queen/king 27 mm.</p>
   </div>
 
   <div class="panel">
@@ -114,7 +114,7 @@
       <h2>Scenarios</h2>
       <div class="row">
         <button data-scn="knight">Knight through the lanes</button>
-        <button data-scn="capture">Capture → dock</button>
+        <button data-scn="capture">Capture → person removes</button>
         <button data-scn="castle">Castling</button>
         <button data-scn="enpassant">En passant</button>
         <button data-scn="promote">Promotion</button>
@@ -197,38 +197,42 @@
   }
   function dock(pieces, square) { return carry(pieces, square, freeSlot(pieces, pieces[square])); }
 
+  // A person takes a captured piece off the board; the gantry waits until the camera has seen the square empty.
+  function remove(pieces, square) {
+    const piece = pieces[square]; delete pieces[square];
+    return { op: 'remove', piece, square };
+  }
   // The carries for a move the gantry plays. `move` is chess.js's verbose move (flags: c capture, e en passant,
-  // k/q castling, p promotion). Updates `pieces`.
+  // k/q castling, p promotion). Updates `pieces`. Captured pieces are never docked: the person removes them.
   function planMove(pieces, move) {
     const steps = [];
     const rank = move.from[1];
-    if (move.flags.includes('e')) steps.push(dock(pieces, move.to[0] + rank));
-    else if (move.flags.includes('c')) steps.push(dock(pieces, move.to));
+    if (move.flags.includes('e')) steps.push(remove(pieces, move.to[0] + rank));
+    else if (move.flags.includes('c')) steps.push(remove(pieces, move.to));
     if (move.flags.includes('k') || move.flags.includes('q')) {
       const king = move.flags.includes('k');
       steps.push(carry(pieces, move.from, move.to));
       steps.push(carry(pieces, (king ? 'h' : 'a') + rank, (king ? 'f' : 'd') + rank));
     } else if (move.promotion) {
-      const wanted = move.color === 'w' ? move.promotion.toUpperCase() : move.promotion;
-      const spare = docked(pieces, wanted);
-      if (spare) { steps.push(dock(pieces, move.from)); steps.push(carry(pieces, spare, move.to)); }
-      else {
-        steps.push(carry(pieces, move.from, move.to));
-        steps.push({ op: 'note', message: 'No spare ' + NAME[move.promotion] + ' in the lane: the pawn on ' + move.to + ' stands in for it.' });
-      }
+      steps.push(carry(pieces, move.from, move.to));
+      pieces[move.to] = move.color === 'w' ? move.promotion.toUpperCase() : move.promotion;
+      steps.push({ op: 'note', message: 'The pawn on ' + move.to + ' now counts as a ' + NAME[move.promotion] + '; swap it by hand if you have a spare piece.' });
     } else steps.push(carry(pieces, move.from, move.to));
     return steps;
   }
+  // The reset: strays go home by gantry where their home square is free; anything else, and every piece the
+  // person took during the game, is put back by hand.
   function planReset(pieces) {
     const home = layoutFromGame(new Chess());
     const steps = [];
-    Object.keys(pieces).sort().forEach(name => { if (!isSlot(name) && home[name] !== pieces[name]) steps.push(dock(pieces, name)); });
-    Object.keys(home).sort().forEach(square => {
-      if (pieces[square]) return;
-      const spare = docked(pieces, home[square]);
-      if (spare) steps.push(carry(pieces, spare, square));
-      else steps.push({ op: 'note', message: 'Put a ' + NAME[home[square].toLowerCase()] + ' on ' + square + ' by hand.' });
-    });
+    for (const sq of Object.keys(pieces).sort()) {
+      if (home[sq] === pieces[sq]) continue;
+      const target = Object.keys(home).find(h => home[h] === pieces[sq] && !pieces[h]);
+      if (target) steps.push(carry(pieces, sq, target)); else steps.push(remove(pieces, sq));
+    }
+    for (const sq of Object.keys(home).sort()) {
+      if (!pieces[sq]) { steps.push({ op: 'place', piece: home[sq], square: sq }); pieces[sq] = home[sq]; }
+    }
     return steps;
   }
 
@@ -309,11 +313,25 @@
 
   // ---------------------------------------------------------------- a job: carries with their paths and the serial lines
   function moveTime(d, v) { return d > v * v / ACCEL ? d / v + v / ACCEL : 2 * Math.sqrt(d / ACCEL); }
+  function pieceName(symbol) { return (symbol === symbol.toUpperCase() ? 'white ' : 'black ') + NAME[symbol.toLowerCase()]; }
   function buildJob(label, steps, piecesBefore) {
     const pieces = Object.assign({}, piecesBefore);
     const carries = [], lines = [], notes = [];
     for (const step of steps) {
       if (step.op === 'note') { notes.push(step.message); lines.push({ kind: 'note', text: '# ' + step.message }); continue; }
+      if (step.op === 'remove') {
+        // The Pi sends nothing for this: it asks the person, and checks with the camera on every Check, until the square is empty.
+        lines.push({ kind: 'note', text: '# wait: take the ' + pieceName(step.piece) + ' off ' + step.square + ', then Check (camera must see it empty)' });
+        carries.push({ op: 'remove', piece: step.piece, square: step.square });
+        delete pieces[step.square];
+        continue;
+      }
+      if (step.op === 'place') {
+        lines.push({ kind: 'note', text: '# by hand: put a ' + pieceName(step.piece) + ' on ' + step.square });
+        carries.push({ op: 'place', piece: step.piece, square: step.square });
+        pieces[step.square] = step.piece;
+        continue;
+      }
       const path = findPath(pieces, step.from, step.to);
       const straight = [mm(step.from), mm(step.to)];
       const usable = path || straight;
@@ -323,7 +341,7 @@
       const via = usable.slice(1, -1);
       const sq = p => (((p[0] - A1[0]) / SQ).toFixed(1).replace(/\.0$/, '') + ',' + ((p[1] - A1[1]) / SQ).toFixed(1).replace(/\.0$/, ''));
       lines.push({ kind: 'cmd', text: 'CARRY ' + step.from + ' ' + (via.length ? via.map(sq).join(' ') + ' ' : '') + step.to });
-      carries.push({ piece: step.piece, from: step.from, to: step.to, path: usable, planned: !!path });
+      carries.push({ op: 'carry', piece: step.piece, from: step.from, to: step.to, path: usable, planned: !!path });
       delete pieces[step.from]; pieces[step.to] = step.piece;
     }
     return { label, carries, lines, notes, after: pieces };
@@ -460,7 +478,19 @@
     carriage.busy = true; drawStatus(); drawCarriage();
     log([{ kind: 'trace', text: '# job ' + job.label }].concat(job.lines));
     let seconds = 0;
+    let moved = 0;
     for (const c of job.carries) {
+      if (c.op === 'remove') {
+        // The board waits here: the person takes the piece off and taps Check; the camera confirms before anything moves.
+        setPill('st-gantry', 'Waiting: remove ' + c.square, 'warn');
+        await wait(1500);
+        delete pieces[c.square]; drawPieces(null);
+        log([{ kind: 'trace', text: '# camera: ' + c.square + ' is empty, carrying on' }]);
+        seconds += 1.5;
+        continue;
+      }
+      if (c.op === 'place') { pieces[c.square] = c.piece; drawPieces(null); await wait(600); continue; }
+      moved += 1;
       drawPath(c.path);
       const from = c.path[0], traces = [];
       seconds += moveTime(Math.hypot(from[0] - carriage.pos[0], from[1] - carriage.pos[1]), V_TRAVEL);
@@ -482,8 +512,8 @@
       if (!c.planned) log([{ kind: 'note', text: '# no clear path at these widths; straight line shown' }]);
     }
     for (const n of job.notes) log([{ kind: 'note', text: '# ' + n }]);
-    log([{ kind: 'trace', text: 'ok  (about ' + seconds.toFixed(1) + ' s on the real gantry, ' + job.carries.length + ' carr' + (job.carries.length === 1 ? 'y' : 'ies') + ')' }]);
-    lastJobText = job.label + ' · ' + job.carries.length + ' carr' + (job.carries.length === 1 ? 'y' : 'ies') + ' · ~' + seconds.toFixed(1) + ' s';
+    log([{ kind: 'trace', text: 'ok  (about ' + seconds.toFixed(1) + ' s on the real gantry, ' + moved + ' carr' + (moved === 1 ? 'y' : 'ies') + ')' }]);
+    lastJobText = job.label + ' · ' + moved + ' carr' + (moved === 1 ? 'y' : 'ies') + ' · ~' + seconds.toFixed(1) + ' s';
     drawPath(null);
     carriage.busy = false; drawStatus(); drawCarriage();
   }
@@ -515,13 +545,12 @@
     const target = entry.before;
     const steps = [];
     const work = Object.assign({}, pieces);
-    // Dock whatever sits where it should not, then bring each missing piece back from the lane.
-    Object.keys(work).sort().forEach(n => { if (!isSlot(n) && target[n] !== work[n]) steps.push(dock(work, n)); });
-    Object.keys(target).sort().forEach(n => { if (!isSlot(n) && !work[n]) { const s = docked(work, target[n]); if (s) steps.push(carry(work, s, n)); } });
+    // Carry back what moved; a piece the person took has to be put back by hand.
+    Object.keys(work).sort().forEach(n => { if (target[n] !== work[n]) { const home = Object.keys(target).find(sq => target[sq] === work[n] && !work[sq]); if (home) steps.push(carry(work, n, home)); else steps.push(remove(work, n)); } });
+    Object.keys(target).sort().forEach(n => { if (!work[n]) { steps.push({ op: 'place', piece: target[n], square: n }); work[n] = target[n]; } });
     game.undo();
     await runJob(buildJob('undo', steps, pieces));
-    pieces = layoutFromGame(game);      // slots: whatever the carries left in the lanes
-    for (const n of Object.keys(target)) if (isSlot(n)) pieces[n] = target[n];
+    pieces = layoutFromGame(game);
     drawPieces(null); drawStatus();
   }
   async function resetBoard() {
@@ -573,7 +602,7 @@
     capture: { setup: ['e2e4', 'd7d5'], play: ['e4', 'd5'] },
     castle: { setup: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5'], play: ['e1', 'g1'] },
     enpassant: { setup: ['e2e4', 'a7a6', 'e4e5', 'd7d5'], play: ['e5', 'd6'] },
-    promote: { fen: '4k3/P7/8/8/8/8/8/4K3 w - - 0 1', dockedExtra: { 'w:0': 'Q' }, play: ['a7', 'a8', 'q'] },
+    promote: { fen: '4k3/P7/8/8/8/8/8/4K3 w - - 0 1', play: ['a7', 'a8', 'q'] },
   };
   async function runScenario(name) {
     if (carriage.busy) return;
@@ -591,7 +620,7 @@
     pieces = layoutFromGame(game);
     Object.assign(pieces, s.dockedExtra || {});
     drawPieces(null); drawStatus();
-    log([{ kind: 'trace', text: '# scenario ' + name + ': position set up by hand' + (s.dockedExtra ? ', with a white queen waiting in w:0' : '') }]);
+    log([{ kind: 'trace', text: '# scenario ' + name + ': position set up by hand' }]);
     await playMove(s.play[0], s.play[1], s.play[2]);
   }
   document.querySelectorAll('[data-scn]').forEach(b => b.addEventListener('click', () => runScenario(b.getAttribute('data-scn'))));
