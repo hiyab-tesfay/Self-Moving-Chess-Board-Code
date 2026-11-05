@@ -4,11 +4,17 @@ The app (pi_touch.py) keeps playing exactly as before; when a gantry is configur
 module to carry the computer's pieces instead of asking the person to, and still verifies the
 board with the camera afterwards (expected_squares() says what it should see).
 
+The gantry never takes a captured piece off the board. When the computer captures, the app asks
+the person to take the piece off, waits until the camera has seen the square empty (each time the
+person presses Check), and only then lets the gantry play the capturing move:
+
     player = GantryPlayer.from_env()          # None when no gantry is configured
     player.new_game()                          # the pieces are in the starting position
     player.human_moved(board, move)            # the person moved by hand: follow the pieces
+    taken = player.removal_needed(board, move) # ("d5", "p") when the person must take a piece off first, else None
+    ...                                        # the app shows it, waits, and camera-checks that the square is empty
     notes = player.play(board, move, say)      # the gantry plays: returns what the person must still do
-    player.reset(say)                          # everything back to its home square
+    player.reset(say)                          # everything back home; returns the pieces the person must put back
     player.expected_squares()                  # the squares the camera should see occupied
 
 Configuration, from the environment:
@@ -19,9 +25,10 @@ Configuration, from the environment:
                          ~/Self-Moving-Chess-Board-Code/gantry/pi that exists.
     CHESS_GANTRY_CONFIG  gantry_config.json; default <dir>/gantry_config.json.
 
-The planning (carry_plan.py: captures to the dock first, castling as two carries, promotion from
-a docked piece) and the paths with real piece widths (board_paths.py) live in that folder with
-the driver; this file only wires them to the app. Every fault comes back as GantryError whose
+The planning (carry_plan.py: a capture is a removal by the person then one carry, castling is two
+carries, a promotion carries the pawn and leaves a note) and the paths with real piece widths
+(board_paths.py) live in that folder with the driver; this file only wires them to the app. The
+docking lanes beside the board are not used. Every fault comes back as GantryError whose
 text can go straight on the screen, and never leaves the magnet on: the driver releases it, lowers
 the arm and stops the motion on any exception, and this module sends M5 and M8 once more.
 """
@@ -145,8 +152,23 @@ class GantryPlayer:
         except (ValueError, KeyError) as exc:
             raise GantryError(f"The pieces do not match the game ({exc}).") from None
 
+    def removal_needed(self, board_before: chess.Board, move: chess.Move) -> tuple[str, str] | None:
+        """The piece a person must take off before the gantry can play `move`: (square, symbol), or None.
+
+        A capture names the square the taker lands on; en passant names the passed pawn's square.
+        Call this before play(): show it, wait, and have the camera confirm the square is empty.
+        """
+        return self.cp.removal(board_before, move)
+
     def play(self, board_before: chess.Board, move: chess.Move, say=None) -> list[str]:
-        """Carry the pieces for `move`. say(text) hears about each carry; returns the notes left for the person."""
+        """Carry the pieces for `move`. say(text) hears about each carry; returns the notes left for the person.
+
+        Call removal_needed() first; have the camera confirm the square is empty; then play. This
+        method does not wait for anything: the job it plans may start with a "remove" step for the
+        captured piece, but the screen has already verified the removal with the camera, so the
+        driver runs only the carries (one for a capture, straight onto the emptied square). The
+        removed piece leaves the layout: the person keeps it.
+        """
         trial = self.layout.copy()
         try:
             job = self.cp.job_for_move(trial, board_before, move)
@@ -157,7 +179,13 @@ class GantryPlayer:
         return [step["message"] for step in job["steps"] if step["op"] == "note"]
 
     def reset(self, say=None) -> list[str]:
-        """Carry every piece back to its home square; returns the pieces the person has to put back by hand."""
+        """Carry every piece on the board back to a home square; returns what the person must do by hand.
+
+        The gantry cannot bring back the pieces the person took, so the notes say "Put a black pawn
+        on e7." for each such square (and "Take the white queen off e4." for a spare piece that has
+        no home square). After this the layout is the full starting position, as the camera check
+        expects: it only passes once the person has put those pieces back.
+        """
         trial = self.layout.copy()
         job = self.cp.job_for_reset(trial)
         try:
@@ -165,10 +193,11 @@ class GantryPlayer:
         except self.gd.GantryError as exc:
             raise GantryError(str(exc)) from None
         self._run(jobs, say)
-        self.layout = trial
+        self.layout = self.cp.Layout()
         return [step["message"] for step in job["steps"] if step["op"] == "note"]
 
     def expected_squares(self) -> set[str]:
+        """The squares the camera should see occupied: after a capture the taken piece is gone, after reset() the full start."""
         return set(self.layout.on_board())
 
     # ------------------------------------------------------------------ inside

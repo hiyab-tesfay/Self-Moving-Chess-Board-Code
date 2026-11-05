@@ -1,6 +1,7 @@
-"""The gantry bridge against the pretend board: a short game with a capture, the layout after every
-move, and the reset. Needs the gantry folder (CHESS_GANTRY_DIR, or one of the default places) and
-a C++ compiler for the pretend board; skips otherwise.
+"""The gantry bridge against the pretend board: a short game with a capture (the person takes the
+piece off, the gantry makes one carry), the layout after every move, and the reset. Needs the gantry
+folder (CHESS_GANTRY_DIR, or one of the default places) and a C++ compiler for the pretend board;
+skips otherwise.
 
     CHESS_GANTRY_DIR=.../gantry/pi .venv/bin/python -m unittest test.test_pi_gantry
 """
@@ -17,6 +18,7 @@ import pi_gantry
 from move_observation import occupied_squares
 
 GANTRY_DIR = pi_gantry.find_gantry_dir(os.environ.get("CHESS_GANTRY_DIR"))
+GAME = ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "f3e5", "c6e5"]   # White is the person, Black the gantry
 
 
 def pretend_board_builds() -> bool:
@@ -24,6 +26,13 @@ def pretend_board_builds() -> bool:
         return False
     host = GANTRY_DIR.parent / "firmware" / "host"
     return subprocess.run(["make", "-s", "-C", str(host), "virtual_gantry"], capture_output=True).returncode == 0
+
+
+def sim_environment() -> None:
+    os.environ["CHESS_GANTRY_PORT"] = "sim"
+    os.environ["CHESS_GANTRY_DIR"] = str(GANTRY_DIR)
+    os.environ.pop("CHESS_GANTRY_CONFIG", None)
+    os.environ["GANTRY_SIM_SPEED"] = "200"
 
 
 class FromEnvTests(unittest.TestCase):
@@ -36,14 +45,35 @@ class FromEnvTests(unittest.TestCase):
             self.assertIsNone(pi_gantry.GantryPlayer.from_env())
 
 
+@unittest.skipUnless(GANTRY_DIR, "needs the gantry folder (CHESS_GANTRY_DIR)")
+class PlanningTests(unittest.TestCase):
+    """What the bridge works out without touching a board."""
+
+    @classmethod
+    def setUpClass(cls):
+        sim_environment()
+
+    def test_removal_needed_only_for_a_capture(self):
+        player = pi_gantry.GantryPlayer.from_env()
+        board = chess.Board()
+        needed = {}
+        for uci in GAME:
+            move = chess.Move.from_uci(uci)
+            needed[uci] = player.removal_needed(board, move)
+            board.push(move)
+        self.assertEqual(needed, {**{uci: None for uci in GAME}, "f3e5": ("e5", "p"), "c6e5": ("e5", "N")})
+        board = chess.Board()
+        for uci in ["e2e4", "a7a6", "e4e5", "d7d5"]:
+            board.push_uci(uci)
+        self.assertEqual(player.removal_needed(board, chess.Move.from_uci("e5d6")), ("d5", "p"), "en passant: the passed pawn's square")
+        self.assertIsNone(player.link, "nothing was opened")
+
+
 @unittest.skipUnless(pretend_board_builds(), "needs the gantry folder and a C++ compiler for the pretend board")
 class PretendBoardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        os.environ["CHESS_GANTRY_PORT"] = "sim"
-        os.environ["CHESS_GANTRY_DIR"] = str(GANTRY_DIR)
-        os.environ.pop("CHESS_GANTRY_CONFIG", None)
-        os.environ["GANTRY_SIM_SPEED"] = "200"
+        sim_environment()
 
     def test_a_short_game_with_a_capture_then_the_reset(self):
         player = pi_gantry.GantryPlayer.from_env()
@@ -54,27 +84,31 @@ class PretendBoardTests(unittest.TestCase):
             player.new_game()
             board = chess.Board()
             self.assertEqual(player.expected_squares(), set(occupied_squares(board)))
-            # White is the person, Black is the gantry. Nxe5 by the person takes a pawn off the board;
-            # Nxe5 by the gantry docks the white knight first, then carries the black knight.
-            for uci in ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "f3e5", "c6e5"]:
+            # Nxe5 by the person takes a pawn off the board. Nxe5 by the gantry: the person takes the white
+            # knight off e5 (the screen has camera-checked that), then the gantry carries the black knight there.
+            for uci in GAME:
                 move = chess.Move.from_uci(uci)
                 if board.turn == chess.WHITE:
                     player.human_moved(board, move)
                 else:
+                    taken = player.removal_needed(board, move)
+                    self.assertEqual(taken, ("e5", "N") if uci == "c6e5" else None, uci)
                     notes = player.play(board, move, say=said.append)
                     self.assertEqual(notes, [], f"nothing left for the person after {uci}")
                 board.push(move)
                 self.assertEqual(player.expected_squares(), set(occupied_squares(board)), f"after {uci}")
-            self.assertEqual(said[-2:], ["Taking the white knight off e5 to slot w:0", "Moving the black knight from c6 to e5"])
-            self.assertEqual(len(said), 5, "one message per piece carried: e7e5, b8c6, f8c5, and the capture's two")
-            self.assertEqual(said[0], "Moving the black pawn from e7 to e5")
-            self.assertEqual(player.layout.pieces["w:0"], "N", "the taken knight waits in White's lane")
-            self.assertNotIn("b:0", player.layout.pieces, "the pawn the person took is simply gone")
+            self.assertEqual(said, ["Moving the black pawn from e7 to e5", "Moving the black knight from b8 to c6",
+                                    "Moving the black bishop from f8 to c5", "Moving the black knight from c6 to e5"],
+                             "one carry per gantry move; the capture is a single carry onto the emptied square")
+            self.assertEqual([n for n in player.layout.pieces if ":" in n], [], "nothing waits in a lane")
+            self.assertEqual(len(player.layout.pieces), 30, "the two taken pieces are with the person")
 
             notes = player.reset(say=said.append)
-            self.assertEqual(player.expected_squares(), set(occupied_squares(chess.Board())) - {"e7"}, "everything home but the pawn the person kept")
-            self.assertEqual(notes, ["Put a black pawn on e7."])
-            self.assertTrue(any(text.startswith("Bringing the white knight from slot w:0 to g1") for text in said), said)
+            self.assertEqual(notes, ["Put a black pawn on e7.", "Put a white knight on g1."], "what the gantry cannot bring back")
+            self.assertEqual(player.expected_squares(), set(occupied_squares(chess.Board())),
+                             "the camera check expects the full start, so it only passes once the person has put them back")
+            self.assertEqual(said[4:], ["Moving the white bishop from c4 to f1", "Moving the black bishop from c5 to f8",
+                                        "Moving the white pawn from e4 to e2", "Moving the black knight from e5 to b8"])
         finally:
             player.close()
 

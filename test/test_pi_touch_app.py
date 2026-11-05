@@ -12,8 +12,9 @@ import chess
 
 import pi_touch
 from move_observation import occupied_squares
-from pi_online import OnlineSettings
+from pi_online import OnlineSession, OnlineSettings
 from pi_touch import TouchApp, TouchSession, _as_observation
+from test_pi_online import snapshot
 from test_pi_touch import FakeGantry
 
 
@@ -89,6 +90,39 @@ class HeadlessApp(TouchApp):
         self.results.put((self.generation, "scan", self.camera_sees.pop(0), None))
 
 
+class ScreenApp(HeadlessApp):
+    """A HeadlessApp whose render() runs for real, recording the panel's heading and button labels."""
+
+    def __init__(self, directory: Path, camera_sees: list, log: list) -> None:
+        super().__init__(directory, camera_sees, log)
+        self.calibration_flow, self.startup_calibration = None, False   # the menu, as after Use Saved Calibration
+        self.panel = mock.Mock(winfo_children=lambda: [])
+        self.title = self.detail = None
+        self.always = False   # the heading's detail is shown on the small screen too
+        self.buttons: list[str] = []
+
+    def render(self):
+        self.screens += 1
+        self.title = self.detail = None
+        self.always = False
+        self.buttons = []
+        with mock.patch.object(pi_touch.tk, "Label"), mock.patch.object(pi_touch.tk, "Frame"), \
+                mock.patch.object(pi_touch.tk, "Scale"):
+            TouchApp.render(self)
+
+    def heading(self, title, detail="", *, always=False):
+        self.title, self.detail, self.always = title, detail, always
+
+    def button(self, label, command, *, accent=False, short=False):
+        self.buttons.append(label)
+
+
+# After 1.e4 d5 the person plays exd5 and Stockfish answers Qxd5: the white pawn must come off d5 first.
+EXCHANGE = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2"
+REMOVE_D5 = {"state": "waiting", "stage": "remove", "current": "d8d5", "jobId": "job-7",
+             "instructions": ["Take the white pawn off d5, then press Check."]}
+
+
 class GameFlowTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -97,8 +131,8 @@ class GameFlowTest(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def app_in_game(self, gantry, fen=None, stockfish_moves=("e7e5",)):
-        app = HeadlessApp(Path(self.directory.name), [], self.log)
+    def app_in_game(self, gantry, fen=None, stockfish_moves=("e7e5",), cls=HeadlessApp):
+        app = cls(Path(self.directory.name), [], self.log)
         app.gantry = gantry
         app.player = FakePlayer(self.log, stockfish_moves)
         app.calibration = app.reference = object()
@@ -184,7 +218,7 @@ class GameFlowTest(unittest.TestCase):
         self.assertEqual(self.log[-3:], ["play", "camera", "reset"])
         self.assertFalse(app.resetting)
         self.assertFalse(app.busy)
-        self.assertEqual(app.messages[-1], "Stockfish wins by checkmate. The pieces are back on their starting squares. Every piece is home.")
+        self.assertEqual(app.messages[-1], "Stockfish wins by checkmate. The pieces are back on their starting squares.")
 
     def test_end_game_mid_game_resigns_and_puts_the_pieces_back(self):
         gantry = FakeGantry(self.log)
@@ -248,6 +282,150 @@ class GameFlowTest(unittest.TestCase):
         self.assertFalse(app.busy, "the person is asked to move e7e5 by hand")
         self.assertEqual(app.messages[-1], "Stockfish: e5. Move e7 to e5.")
         self.assertEqual(self.log, ["camera", "camera", "stockfish"])
+
+    def test_a_capture_without_a_gantry_is_made_by_hand_as_before(self):
+        app = self.app_in_game(None, fen=EXCHANGE, stockfish_moves=("d8d5",), cls=ScreenApp)
+        board = app.session.game.board
+        app.camera_sees.append(after(board, "e4d5"))
+        app.scan()
+        app.poll_results()
+        self.assertEqual((app.session.phase, app.session.removal), ("computer", None))
+        self.assertEqual(app.messages[-1], "Stockfish: Qxd5. Move d8 to d5. Remove the captured piece.")
+        self.assertEqual(app.title, "Stockfish: Qxd5")
+        self.assertEqual(app.detail, "Move d8 to d5 on the board. Remove the captured piece.")
+        self.assertEqual(app.buttons, ["Verify Computer Move", "Reset Board", "End Game"])
+        self.assertEqual(self.log, ["camera", "camera", "stockfish"])
+
+    def test_a_capture_waits_for_the_piece_to_be_taken_off_then_the_gantry_plays(self):
+        gantry = FakeGantry(self.log)
+        app = self.app_in_game(gantry, fen=EXCHANGE, stockfish_moves=("d8d5",), cls=ScreenApp)
+        board = app.session.game.board.copy(stack=False)
+        exchanged = board.copy(stack=False)
+        exchanged.push_uci("e4d5")
+        instruction = "Stockfish plays Qxd5. Take the white pawn off d5, then tap Check."
+        app.camera_sees.append(after(board, "e4d5"))
+        app.scan()
+        app.poll_results()   # the person's exd5 → Stockfish's Qxd5 → the Remove the piece screen, the gantry waits
+        self.assertEqual(app.session.phase, "remove")
+        self.assertEqual(self.log, ["camera", "new_game", "camera", "human_moved", "stockfish"])
+        self.assertFalse(app.busy)
+        self.assertEqual(app.messages[-1], instruction)
+        self.assertEqual((app.title, app.detail), ("Remove the piece", instruction))
+        self.assertTrue(app.always, "the instruction is on the panel of the small screen too, not only in the status bar")
+        self.assertEqual(app.buttons, ["Check", "Reset Board", "End Game"])
+        # Check while the pawn is still on d5: the photo comes up with the reason, Check stays, nothing moved.
+        app.camera_sees.append(after(board, "e4d5"))
+        app.scan()
+        app.poll_results()
+        self.assertEqual(app.session.phase, "remove")
+        self.assertEqual(app.scan_feedback.title, "REMOVE THE PIECE")
+        self.assertEqual(app.scan_feedback.detail, "d5 still has a piece on it. Take the white pawn off d5, then tap Check.")
+        self.assertEqual(app.buttons, ["Check", "Adjust Photo Corners", "End Game"])
+        self.assertNotIn("play", self.log)
+        self.assertFalse(app.busy)
+        # Check again once the pawn is off: the gantry plays Qxd5, then the usual camera verification.
+        app.camera_sees.extend([_as_observation(occupied_squares(exchanged) - {"d5"}), after(exchanged, "d8d5")])
+        app.retake_scan()
+        app.poll_results()
+        self.assertEqual(self.log[-4:], ["camera", "camera", "play", "camera"])
+        self.assertEqual(gantry.names.count("play"), 1)
+        self.assertEqual(gantry.calls[-1], ("play", exchanged.fen(), "d8d5"))
+        self.assertEqual(app.session.phase, "human")
+        self.assertEqual(app.session.game.board.fen(), after_fen(exchanged, "d8d5"))
+        self.assertIsNone(app.scan_feedback)
+        self.assertIn("d5 is clear.", app.messages)
+        self.assertIn("Gantry moving d8d5… keep hands clear of the board.", app.messages)
+        self.assertEqual(app.messages[-1], "Computer move Qxd5 verified. Your turn. Carried d8d5.")
+        self.assertEqual(app.buttons, ["Scan Move", "Reset Board", "End Game"])
+
+    def test_reset_notes_stay_on_the_setup_screen_until_the_camera_verifies_it(self):
+        gantry = FakeGantry(self.log, reset_notes=["Put a black pawn on e7."])
+        app = self.app_in_game(gantry, cls=ScreenApp)
+        app.reset_board()
+        app.reset_board()
+        app.poll_results()
+        self.assertEqual(app.session.phase, "setup")
+        self.assertEqual(app.reset_notes, ("Put a black pawn on e7.",))
+        self.assertEqual(app.messages[-1], "Board reset. Put a black pawn on e7. Place the pieces in their starting squares and scan the board.")
+        self.assertEqual((app.title, app.detail), ("Set up the board", "Put a black pawn on e7. Place all 32 pieces in the starting position, then scan."))
+        self.assertTrue(app.always, "the notes are on the panel of the small screen too")
+        self.assertEqual(app.buttons, ["Scan Starting Board", "Cancel Game"])
+        app.camera_sees.append(sees(chess.Board()))
+        app.scan()
+        app.poll_results()
+        self.assertEqual(app.session.phase, "human")
+        self.assertEqual(app.reset_notes, (), "the camera saw all 32 pieces")
+        self.assertEqual(app.setup_instructions(), "Place all 32 pieces in the starting position, then scan.")
+        # After a game ends the notes wait through the menu for the next game's Set up the board screen.
+        app.end_game()
+        app.poll_results()
+        self.assertEqual(app.session.phase, "finished")
+        self.assertEqual(app.messages[-1], "You ended the game. Stockfish wins. The pieces are back on their starting squares. Put a black pawn on e7.")
+        app.back_to_menu()
+        self.assertEqual(app.reset_notes, ("Put a black pawn on e7.",))
+        self.assertTrue(app.setup_instructions().startswith("Put a black pawn on e7. "))
+        # Without notes the setup screen is as before: its detail stays off the small screen.
+        app.reset_notes = ()
+        app.session = TouchSession("beginner", gantry=gantry)
+        app.render()
+        self.assertEqual((app.title, app.detail, app.always),
+                         ("Set up the board", "Place all 32 pieces in the starting position, then scan.", False))
+
+    def test_online_remove_shows_check_which_confirms_the_job(self):
+        confirmed = []
+        settings = OnlineSettings("t" * 64, "http://127.0.0.1:1", "https://chess.example.org", "ABCD")
+
+        def confirm(job_id):
+            confirmed.append(job_id)
+            return snapshot(clients=1, started=True, turn="w", motion={"state": "moving", "stage": "gantry", "current": "d8d5"})
+
+        app = ScreenApp(Path(self.directory.name), [], self.log)
+        holder = OnlineSession(settings, app.results, app.generation, client=mock.Mock(confirm=confirm))
+        holder.verified = True   # the camera saw the starting position; the website is playing
+        app.online_session = holder
+        app.handle_online(snapshot(clients=1, started=True, turn="w", motion={"state": "waiting", "instructions": ["Move the black pawn from e7 to e5."]}), None)
+        self.assertEqual(app.buttons, ["End Game", "Back to Menu"], "a move to make by hand has no Check")
+        self.assertFalse(app.always)
+        app.handle_online(snapshot(clients=1, started=True, turn="w", motion=REMOVE_D5), None)
+        self.assertEqual((app.title, app.detail), ("Remove the piece", "Take the white pawn off d5, then press Check."))
+        self.assertTrue(app.always, "which piece to take off is on the panel of the small screen too")
+        self.assertEqual(app.messages[-1], "Waiting for the piece to be removed…")
+        self.assertEqual(app.buttons, ["Check", "End Game", "Back to Menu"])
+        # The piece is still there: the next heartbeat carries the reason, the panel shows it, Check stays.
+        app.handle_online(snapshot(clients=1, started=True, turn="w", motion=dict(REMOVE_D5, error="d5 still has a piece on it. Take it off, then tap Check.")), None)
+        self.assertEqual(app.detail, "d5 still has a piece on it. Take it off, then tap Check.")
+        self.assertEqual(app.messages[-1], "d5 still has a piece on it. Take it off, then tap Check.")
+        self.assertEqual(app.buttons, ["Check", "End Game", "Back to Menu"])
+        # Check: the worker POSTs /api/board-confirm with the job; meanwhile the buttons wait.
+        app.confirm_online_removal()
+        self.assertTrue(holder.confirming)
+        self.assertEqual(app.detail, "Checking the board with the camera…")
+        self.assertEqual(app.buttons, ["Back to Menu"])
+        app.confirm_online_removal()   # a second tap while the first is on its way does nothing
+        app.poll_results()
+        self.assertEqual(confirmed, ["job-7"])
+        self.assertFalse(holder.confirming)
+        self.assertEqual(holder.view.title, "Gantry moving d8d5", "the server's answer is shown at once")
+        self.assertEqual((app.messages[-1], app.message_color), ("Gantry moving d8d5…", app.GREEN))
+        self.assertEqual(app.buttons, ["End Game", "Back to Menu"])
+        self.assertFalse(app.busy)
+        # A Check while the piece is still there: the server stays waiting, its reason in red, Check stays.
+        still = "d5 still has a piece on it. Take it off, then tap Check."
+        holder.client.confirm = lambda job_id: snapshot(clients=1, started=True, turn="w", motion=dict(REMOVE_D5, error=still))
+        app.handle_online(snapshot(clients=1, started=True, turn="w", motion=REMOVE_D5), None)
+        app.confirm_online_removal()
+        app.poll_results()
+        self.assertFalse(holder.confirming)
+        self.assertEqual((app.messages[-1], app.message_color), (still, app.RED))
+        self.assertEqual((app.title, app.detail), ("Remove the piece", still))
+        self.assertEqual(app.buttons, ["Check", "End Game", "Back to Menu"])
+        # Back to Menu while a Check is on its way: its answer is ignored (the generation moved on).
+        app.handle_online(snapshot(clients=1, started=True, turn="w", motion=REMOVE_D5), None)
+        app.confirm_online_removal()
+        app.leave_online()
+        app.poll_results()
+        self.assertIsNone(app.online_session)
+        self.assertEqual(app.messages[-1], "Online mode off. Choose a difficulty to play on the board.")
 
     def test_online_closes_the_gantry_and_a_new_game_opens_one(self):
         gantry = FakeGantry(self.log)
