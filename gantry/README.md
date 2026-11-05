@@ -183,17 +183,21 @@ game until someone checks the board. Playing in person on the touchscreen (`pi_g
 
 ## Path finding, and making room
 
-`pi/board_paths.py` checks every carry in millimetres: pieces are circles `piece_mm` across
-and the carried piece must stay `clearance_mm` (3 mm) clear of every other piece along the
-whole way. The piece models measure 23 mm (pawn), 25 mm (knight, bishop, rook) and 27 mm
-(king, queen) across the base, so `piece_mm` is 27. The search runs over tile centres,
-the midpoints between tiles and the crossings between four tiles, plus the parking lanes,
-and A* picks the shortest route. With 50 mm squares and 27 mm bases, a lane between two
-occupied tiles is 23 mm wide, so a piece cannot pass there; the finder goes round instead,
-and an empty parking lane counts as a corridor. When every way is shut, it moves one
-blocking piece to a free tile, makes the move, and puts the blocker back: the job then has
-three carries, which the firmware and the camera check already handle. The first knight
-move of a game is such a case: a pawn steps aside for it.
+`pi/board_paths.py` checks every carry in millimetres. Each piece is a circle of its own
+base width, from the piece models: 23 mm (pawn), 25 mm (knight, bishop, rook), 27 mm
+(queen, king) — `piece_sizes_mm` in the config, with `piece_mm` (27) for a piece whose type
+is not known. The search runs over tile centres, the midpoints between tiles and the
+crossings between four tiles (the lanes), plus the parking lanes, and A* picks the shortest
+route: a knight goes out to the corner of its square, along the lane between two
+neighbours and into its target from the corner, the way a plotter would, never over a
+piece. Along a lane the carried piece keeps `lane_clearance_mm` (1 mm) of air from each
+neighbour — with 50 mm squares a 25 mm knight between two 23 mm pawns has exactly that —
+and `clearance_mm` (3 mm) everywhere else. An empty parking lane counts as a corridor.
+Only when no lane is wide enough (a 27 mm queen beside a 23 mm pawn needs 26 mm of
+lane; there are 25) does it move one blocking piece to a free tile, make the move and put
+the blocker back, which the firmware and the camera check already handle. If a piece
+brushes a neighbour at the frame, raise `lane_clearance_mm`; if the squares turn out
+bigger, nothing changes but `square_mm`.
 
 ```sh
 python3 gantry_driver.py --dry-run --move g1f3            # from the starting position
