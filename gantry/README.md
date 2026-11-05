@@ -90,8 +90,13 @@ line endings: it says `[duen-gantry 0.1 ready: $X to unlock, $H to home]`.
 
 The sketch uses only the plain Arduino API (`pinMode`, `digitalWrite`, `micros`, `Serial`),
 and the motion and protocol code is the same that runs in the laptop tests. It compiles for
-an Arduino Uno with `GANTRY_CNC_SHIELD` at 15 KB of flash and 990 bytes of RAM
-(`arduino-cli compile --fqbn arduino:avr:uno --build-property compiler.cpp.extra_flags=-DGANTRY_CNC_SHIELD firmware/gantry_firmware`).
+the ESP32 Dev Module (esp32 core 2.0.17: 275 KB of flash, 21 KB of RAM) and for an Arduino
+Uno with `GANTRY_CNC_SHIELD` (15 KB of flash, 990 bytes of RAM):
+
+```sh
+arduino-cli compile --fqbn esp32:esp32:esp32 firmware/gantry_firmware
+arduino-cli compile --fqbn arduino:avr:uno --build-property compiler.cpp.extra_flags=-DGANTRY_CNC_SHIELD firmware/gantry_firmware
+```
 
 Before the first `$H`, check these with the carriage somewhere in the middle of its travel:
 
