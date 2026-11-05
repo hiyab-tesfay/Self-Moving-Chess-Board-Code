@@ -79,20 +79,31 @@ Then try `$H`, `?`, `G0 X50 Y50`, `M3`, `M5`.
 
 ## The Pi side
 
-`pi/gantry_config.json` says where the squares are, in mm from the homed corner:
+`pi/gantry_config.json` says where the squares are, in mm from the origin. The origin is the
+one the mechanical team recommends: the magnet's centre at the **bottom-left corner of
+sketch 5** in the Fusion design, the sketch that traces where the magnet can move. That
+rectangle is **470 × 420 mm**, which is the travel and the firmware's soft limits
+(`MAX_X_MM`, `MAX_Y_MM`). Files run along +X, ranks along +Y.
 
 - `a1_center_mm`: the magnet's position when it is under the centre of a1.
 - `square_mm`: the pitch of the squares.
-- `park_columns_mm`: the two columns beside the board where captured pieces go, White's on
-  the left (`w`), Black's on the right (`b`), eight rows each at the board's row pitch.
+- `park_columns_mm`: the columns beside the board where captured pieces go, White's on the
+  left (`w`), Black's on the right (`b`); `park_rows_mm` lists the slot centres along them.
+  In the sketch each side has one lane of twelve circles at a 35 mm pitch, so the file has
+  one column per side with twelve rows.
 - `travel_mm`: the soft limits, the same as `MAX_X_MM`/`MAX_Y_MM` in the firmware.
 
-To measure them: `--home`, then `--goto X Y` until the magnet sits under the centre of a1 and
-write that down; a1 to b1 gives the square size. Every point of a job is checked against the
-travel before anything moves, so a parking slot that does not fit says so instead of running
-into the frame. The default numbers in the file are placeholders: with a 450 mm travel and
-50 mm squares, Black's parking columns at 507 and 535 mm are out of reach, on purpose, until
-the real travel is measured.
+The travel and the lane pitch come from the sketch; the square size (50 mm) and the a1
+centre (60, 35) are read off a photo of it and must be confirmed, either from a DXF of the
+sketch (Fusion: right-click the sketch, Save As DXF) or at the frame: `--home`, then
+`--goto X Y` until the magnet sits under the centre of a1, and a1 to b1 gives the square
+size. Every point of a job is checked against the travel before anything moves, so a
+parking slot that does not fit says so instead of running into the frame.
+
+One mismatch to settle with the website side: its planner parks captured pieces in two
+columns of eight per side (slots `w:8`–`w:15` at x = −2), while the sketch has one lane of
+twelve per side plus a row along the top. Until the planner's slot layout is made to match,
+jobs that use the second column fail cleanly with "column -2 is not configured".
 
 ```sh
 cd gantry/pi
@@ -133,8 +144,11 @@ contract holds.
 
 ## What is still open
 
-- Real travel, square size and the parking columns: measure at the frame and put them in
-  `gantry_config.json` and `config.h`.
+- Square size, a1 centre and the exact parking slots: confirm from a DXF of sketch 5 or at
+  the frame, and put them in `gantry_config.json`. The travel (470 × 420) is from the sketch;
+  confirm it by homing and jogging to the far corner.
+- The website planner's parking layout (two columns of eight) against the sketch's (one lane
+  of twelve per side plus the top row).
 - Pulley tooth count and motor current: read off the parts, adjust `config.h` and `Vref`.
 - Direction: if +X or +Y moves the wrong way, flip `INVERT_X_DIR` / `INVERT_Y_DIR`.
 - Magnet: the Drive notes weigh an electromagnet against a servo-lifted N52 permanent magnet;

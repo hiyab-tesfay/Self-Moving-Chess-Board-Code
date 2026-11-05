@@ -51,10 +51,12 @@
 #define COREXY false              // false: each motor drives its own axis (the 2D Plotter V2 layout)
 
 // ----------------------------------------------------------------------------- travel and speed
-// Soft limits in mm from the homed corner. Measure the real travel once the frame is built:
-// the 2040 beam is 599 mm and the 2020 rails are 528 mm, minus carriages and end plates.
-#define MAX_X_MM 450.0f
-#define MAX_Y_MM 400.0f
+// Soft limits in mm from the homed corner: how far the centre of the magnet can travel.
+// From sketch 5 of the Fusion design (Chess Board Design), which traces the magnet's centre
+// around the edge of where it can move: 470 x 420 mm, origin at its bottom-left corner.
+// Confirm by homing and jogging to the far corner once the frame is built.
+#define MAX_X_MM 470.0f
+#define MAX_Y_MM 420.0f
 
 // Chosen for the 13 N.cm motor and a light carriage; see README.md for the numbers behind them.
 #define MAX_SPEED_MM_S 120.0f     // G0 and the top of G1

@@ -1,15 +1,15 @@
 {
-  "_comment": "Where the squares are, in mm from the homed corner. Measure these at the board; see ../README.md.",
+  "_comment": "Millimetres from the origin: the magnet's centre at the bottom-left corner of sketch 5 in the Fusion design, which traces where the magnet can move (470 x 420 mm). Files run along +X, ranks along +Y. The travel and the 35 mm lane pitch are from the sketch; the square size and a1 centre are estimates from a photo of it, to confirm from a DXF of the sketch or by jogging (--goto) to the centre of a1.",
   "port": "/dev/ttyUSB0",
   "baud": 115200,
   "square_mm": 50.0,
-  "a1_center_mm": [75.0, 40.0],
+  "a1_center_mm": [60.0, 35.0],
   "park_columns_mm": {
-    "w": [43.0, 15.0],
-    "b": [507.0, 535.0]
+    "w": [17.5],
+    "b": [452.5]
   },
-  "park_rows_mm": null,
-  "travel_mm": [450.0, 400.0],
+  "park_rows_mm": [17.5, 52.5, 87.5, 122.5, 157.5, 192.5, 227.5, 262.5, 297.5, 332.5, 367.5, 402.5],
+  "travel_mm": [470.0, 420.0],
   "travel_speed_mm_s": 120.0,
   "carry_speed_mm_s": 60.0,
   "grab_settle_s": 0.3,
