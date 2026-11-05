@@ -38,7 +38,8 @@
 // ----------------------------------------------------------------------------- mechanics
 // Motor: 1.8 degree NEMA 17 (200 full steps per turn), 13 N.cm / 18.4 oz.in short body.
 // Driver: DRV8825. Microstep jumpers M0 M1 M2: 1/8 = on on off, 1/16 = off off on, 1/32 = on on on.
-// Belt: GT2, 2 mm pitch, on a 20-tooth pulley, so one turn moves the carriage 40 mm.
+// Belt: GT2, 2 mm pitch, on the 20-tooth pulley from the 2D Plotter V2 design, so one turn
+// moves the carriage 40 mm.
 //   steps per mm = 200 * MICROSTEPS / (PULLEY_TEETH * 2 mm) = 40 at 1/8, 80 at 1/16.
 #define MOTOR_FULL_STEPS_PER_REV 200
 #define MICROSTEPS 8

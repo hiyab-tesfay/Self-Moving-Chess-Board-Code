@@ -21,8 +21,9 @@ Nothing here has run on the real frame yet. Everything has run on a pretend boar
 
 Motor: 1.8° NEMA 17, 200 full steps per turn, 13 N·cm (18.4 oz·in) short body, about 1 A per
 phase (the Drive parts list; the Amazon listing was not readable, so confirm the current on the
-motor's label). Driver: DRV8825. Belt: GT2, 2 mm pitch, 20-tooth pulley (count the teeth on the
-pulley set that arrived; `PULLEY_TEETH` in `config.h` if it differs).
+motor's label). Driver: DRV8825. Belt: GT2, 2 mm pitch, on the **20-tooth pulley** that the
+plotter design specifies (`GT2 20 Teeth pulley` in `2D Plotter V2.step`); `PULLEY_TEETH` in
+`config.h` if a different one is fitted.
 
 | Quantity | Formula | Value |
 | --- | ---: | ---: |
@@ -142,6 +143,27 @@ The second suite builds `firmware/host/virtual_gantry`, a pretend board that run
 that an unreachable slot fails before anything moves; and that the website's stdin/exit-code
 contract holds.
 
+## What the design files say
+
+Measured from the files in the team Drive (`Gantry/3D Printing` and `CAD`):
+
+- `2D Plotter V2.step` (the gantry): one `GT2 20 Teeth pulley`, two `NEMA 17 Stepper`, a
+  `20x40 V Slot Profile` and a `20x20 V Slot Profile`, Delrin and solid V-wheel kits, four
+  idler pulleys, 625 bearings, M5 hardware. The original controller is an Arduino Uno with
+  a `CNC shield v1` and A4988 drivers, and the pen lift is an SG90 servo; the team's build
+  swaps in DRV8825 drivers and the ESP32, and the servo pin is where the SG90 was. In the
+  assembly the X pulley plate sits at x = −339 and the X motor plate at x = +150, the base
+  plates at y = −282 and +222, which is consistent with the 470 × 420 mm travel.
+- `em holder.stl`: 29 × 31 × 52 mm, so the electromagnet is about 27 mm across and fits
+  the 35 mm lane pitch and 50 mm squares with room to spare.
+- `camera holder.stl`: 40 × 30 × 20 mm. `67mm rod.stl`: a 3.3 mm rod, 67 mm long.
+  `ss bar assembly.stl`: 15 × 258 × 31 mm. `ss base 2 assembly.stl`: 116 × 60 × 66 mm.
+- `WOODEN BOX.STEP` (SolidWorks): the enclosure, five panels (top, bottom, two sides, a
+  corner); the drawing `WOODEN BOX.png` gives it as 30 in × 30 in with 6 in sides, which is
+  the outer rectangle in sketch 5.
+- `Chess Board Design.f3d` is sketches only, which is why its STEP export and the web share
+  are empty. Open it in Fusion, or save sketch 5 as a DXF, to get the square positions.
+
 ## What is still open
 
 - Square size, a1 centre and the exact parking slots: confirm from a DXF of sketch 5 or at
@@ -149,7 +171,7 @@ contract holds.
   confirm it by homing and jogging to the far corner.
 - The website planner's parking layout (two columns of eight) against the sketch's (one lane
   of twelve per side plus the top row).
-- Pulley tooth count and motor current: read off the parts, adjust `config.h` and `Vref`.
+- Motor current: read it off the motor's label and set `Vref` (the pulley is confirmed 20 T).
 - Direction: if +X or +Y moves the wrong way, flip `INVERT_X_DIR` / `INVERT_Y_DIR`.
 - Magnet: the Drive notes weigh an electromagnet against a servo-lifted N52 permanent magnet;
   the firmware supports both (`PIN_MAGNET`, `PIN_SERVO`). Tune `grab_settle_s` once the real
