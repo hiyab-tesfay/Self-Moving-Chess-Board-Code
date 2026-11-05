@@ -22,5 +22,5 @@
   "servo_settle_s": 0.3,
   "protocol": "duen",
   "max_carries_per_job": 40,
-  "home_on_start": true
+  "home_on_start": false
 }
