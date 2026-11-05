@@ -359,6 +359,21 @@ class Sim:
         v = self.model.jnt_dofadr[self.model.body_jntadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body)]]
         self.data.qvel[v:v + 6] = 0.0
 
+    def take_off(self, place: str) -> str | None:
+        """A person takes the piece on `place` off the board (a job's "remove" step): it goes to the spares shelf.
+
+        The real board waits here until its camera has seen the square empty; the simulation just does it.
+        Returns the body moved, or None when the square was already empty.
+        """
+        body = next((b for b, p in self.where.items() if p == place), None)
+        if body is None:
+            return None
+        del self.where[body]
+        taken = sum(1 for b in self.piece_names if b not in self.where)
+        self._set_pose(body, 40.0 * taken, -250.0 - 40.0)
+        mujoco.mj_forward(self.model, self.data)
+        return body
+
     def settle(self, seconds: float) -> None:
         steps = int(round(seconds / self.model.opt.timestep))
         for _ in range(steps):

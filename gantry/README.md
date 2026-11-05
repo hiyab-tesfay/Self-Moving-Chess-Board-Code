@@ -46,7 +46,8 @@ So the 13 N·cm motor has roughly a 2× margin at these settings. If a motor eve
 skips, halve `MAX_ACCEL_MM_S2` first; speed matters less than acceleration here. One square
 (50 mm) with a piece takes about 0.9 s; a full-board diagonal takes about 3 s; a pawn push
 from the moment the job arrives is about 5 s including the arm and the magnet settling, a
-knight through the lanes about 6.5 s, a capture (dock the taken piece, then move) about 15 s.
+knight through the lanes about 6.5 s, a capture about the same (the person has already taken
+the captured piece off, so it is one carry).
 
 Why 1/8 microstepping: 4.8 kHz at full speed is comfortable for the step loop on an ESP32
 and still fine on an AVR; 1/16 doubles the step rate for no gain the belt can show.
@@ -248,7 +249,7 @@ Two levels, one line per command, every command answered `ok` or `error:<code> <
 | `GOTO e4` | move the empty magnet to a place: a square, a docking slot (`w:3`, `b:0`), or `x,y` in squares (`5.5,0.5` is the lane crossing between e1, f1, e2 and f2; `-0.5,4` the lane beside the a file) |
 | `CARRY g1 f3` | the whole carry as one sequence (see Servo): travel, arm up, magnet on, grab, the moves at carry speed, magnet off, release, arm down. Without via-points the board routes itself: straight when the two places share a file, rank or diagonal, otherwise out to a corner, along the lanes and in from a corner |
 | `CARRY g1 f3 5.5,0.5 5.5,1.5` | the same carry through the via-points the Pi chose. Via-points are places too; a slot name (`b:1`) is fine |
-| `CARRY d5 b:0 …` | a taken piece into slot 0 of Black's lane |
+| `CARRY d5 b:0 …` | a piece into slot 0 of Black's docking lane. The firmware keeps the lanes for a later version; no planner sends a piece to one now (see Captured pieces) |
 | `$T` | the board's own test, homed first: a1, h1, h8, a8, e4, arm and magnet on e4, carry e4 → f6 → e4 through the lanes, back to a1 |
 
 A `GOTO`, `CARRY` or `$T` is queued as a **program** of up to 48 steps (moves, magnet, arm,
@@ -279,10 +280,11 @@ rectangle is **470 × 420 mm**, which is the travel and the firmware's soft limi
 
 - `a1_center_mm`: the magnet's position when it is under the centre of a1.
 - `square_mm`: the pitch of the squares.
-- `park_columns_mm`: the columns beside the board where captured pieces go, White's on the
-  left (`w`), Black's on the right (`b`); `park_rows_mm` lists the slot centres along them.
-  In the sketch each side has one lane of twelve circles at a 35 mm pitch, so the file has
-  one column per side with twelve rows.
+- `park_columns_mm`: the docking lanes beside the board, White's on the left (`w`), Black's on
+  the right (`b`); `park_rows_mm` lists the slot centres along them. In the sketch each side has
+  one lane of twelve circles at a 35 mm pitch, so the file has one column per side with twelve
+  rows. The driver and the firmware understand them, but nothing is sent there in this version
+  (see Captured pieces); they are kept for a later one.
 - `travel_mm`: the soft limits, the same as `MAX_X_MM`/`MAX_Y_MM` in the firmware.
 - `piece_sizes_mm`, `piece_mm`, `clearance_mm`, `lane_clearance_mm`: for the path finder.
 - `servo`, `servo_settle_s`: whether the board has the arm, and how long it takes (only for
@@ -292,29 +294,56 @@ rectangle is **470 × 420 mm**, which is the travel and the firmware's soft limi
 ### What the driver sends, and why
 
 The Pi has the camera and the game, so **the Pi plans**: `carry_plan.py` turns a chess move into
-the pieces to carry (a capture docks the taken piece first, castling is the king then the rook,
-en passant docks the pawn that was passed, a promotion brings a docked piece of that type or
-leaves a note), and `board_paths.py` finds each piece a way round the others with their real
-base widths, moving a blocker aside and back when there is none. **The ESP32 runs the motion**:
-it gets one `CARRY from to via…` per piece, and does the travel, the arm, the magnet, the dwells
-and the speed profile itself, so a serial hiccup or a slow Pi can never leave a sequence
-half-done. On every connection the driver sends `$B=` from the config so the board's idea of e4
-is the Pi's, checks the status (and refuses to start on an alarm, a hold or `Host:lost`), homes
-if `home_on_start` is set, then sends the carries one at a time, polling `?` until `Idle` with a
+the pieces to carry (a capture is a `remove` step for the taken piece, then the taker's carry;
+castling is the king then the rook; en passant removes the pawn that was passed; a promotion
+carries the pawn and leaves a note that it now counts as the promoted piece), and
+`board_paths.py` finds each piece a way round the others with their real base widths, moving a
+blocker aside and back when there is none. **The ESP32 runs the motion**: it gets one
+`CARRY from to via…` per piece, and does the travel, the arm, the magnet, the dwells and the
+speed profile itself, so a serial hiccup or a slow Pi can never leave a sequence half-done. On
+every connection the driver sends `$B=` from the config so the board's idea of e4 is the Pi's,
+checks the status (and refuses to start on an alarm, a hold or `Host:lost`), homes if
+`home_on_start` is set, then sends the carries one at a time, polling `?` until `Idle` with a
 timeout that grows with the carry's predicted length.
+
+### Captured pieces
+
+**The gantry does not take captured pieces off the board; a person does.** When the computer's
+move captures, the job starts with
+
+```
+{"op": "remove", "piece": "p", "square": "d5"}
+```
+
+before the carry of the capturing piece (for en passant it names the passed pawn's square). The
+screen or the website shows "Take the black pawn off d5, then press Check."; each time the person
+presses Check the camera looks at the square, and only once it is empty does the gantry play the
+move, as a single carry straight onto the emptied square. The driver sends nothing for a `remove`
+step (it prints `# person removes p from d5` in `--dry-run` and the log) and plans the carries
+after it as if the square were already empty: **whoever runs the job has already waited for the
+removal** (`pi_gantry.removal_needed()` on the touch screen; the relay for the website). The
+removed piece leaves the Pi's layout: the person keeps it. At the end of a game the reset carries
+every piece that is still on the board to a home square and says "Put a black pawn on e7." for
+each square whose piece the person took; the reset job still expects the full starting position,
+so the camera check after it only passes once those pieces are back.
+
+The docking lanes beside the board (`w:0`…, `b:0`…, `$B=`'s last four numbers, `park_columns_mm`)
+stay in the firmware, the driver and the path finder for a later version that parks the captured
+pieces itself; no planner sends a piece to one now, and `carry_plan.Layout` has no slots.
 
 From the starting position, with the numbers in `gantry_config.json`:
 
 ```
 e2e4:  CARRY e2 e4                                      ; Moving the white pawn from e2 to e4
 g1f3:  CARRY g1 f3 5.5,0.5 5.5,1.5                      ; Moving the white knight from g1 to f3
-e4d5:  CARRY d5 b:0 3.5,3.5 4.5,3.5 6.5,1.5 6.5,0.5 7.5,0.5 b:1   ; Taking the black pawn off d5 to slot b:0
+e4d5:  # person removes p from d5                       ; The person takes the black pawn off d5 (the caller waits for the camera before this job runs)
        CARRY e4 d5                                      ; Moving the white pawn from e4 to d5
 ```
 
-Via-points are in squares (the firmware's own unit), lane crossings at `x.5`; a docking slot is
-named. The travel and the lane pitch come from the sketch; the square size (50 mm) and the a1
-centre (60, 35) are read off a photo of it and are confirmed at the frame with
+Via-points are in squares (the firmware's own unit), lane crossings at `x.5`; a docking slot,
+when one is ever used, is named. The travel and the lane pitch come from the sketch; the square
+size (50 mm) and the a1 centre (60, 35) are read off a photo of it and are confirmed at the frame
+with
 
 ```sh
 python3 gantry_driver.py --calibrate
@@ -345,7 +374,9 @@ echo '{"label":"e2e4","steps":[{"op":"carry","piece":"P","from":"e2","to":"e4","
 
 `--port sim` runs any of these against the pretend board. `--game` and `--reset` need
 `python-chess` (the Pi's `.venv` has it); `--reset` from `--layout` takes `square=piece` pairs
-with docked pieces as `w:n`/`b:n`, or a JSON object.
+(a piece left in a docking slot may be written `w:n`/`b:n` and is carried home), or a JSON
+object. In `--game`, a capture prints the person's removal as a line of its own and then the
+one carry.
 
 ## Path finding, and making room
 
@@ -368,8 +399,8 @@ at the frame, raise `lane_clearance_mm`; if the squares turn out bigger, nothing
 The lanes beside the board (x = −0.5 and 7.5) run halfway between the edge file and the
 docking lane, the same rule in the path finder, the driver and the firmware (`place_mm`). With
 the docking lanes 42.5 mm from the edge files, that lane is 21.25 mm from each, so a piece
-cannot slide along it past an occupied edge square: docked pieces leave and return through the
-lane crossing at their own height instead, which the path finder works out.
+cannot slide along it past an occupied edge square; a piece that is ever docked leaves and
+returns through the lane crossing at its own height instead, which the path finder works out.
 
 ```sh
 python3 gantry_driver.py --dry-run --move g1f3            # from the starting position
@@ -379,7 +410,8 @@ python3 gantry_driver.py --dry-run --move a1a8 --occupied a1,a4,b2
 Jobs from the website and from `carry_plan.py` carry `"before"` (the squares and slots
 occupied as the job starts) and `"pieces"` (which piece is on each), so the Pi finds every path
 afresh with these checks and the real widths; a job without them is run with the paths it came
-with.
+with. A `remove` step empties its square for the carries after it, so the capturing piece's path
+ends on a free square.
 
 ## The Pi deployment
 
@@ -411,15 +443,22 @@ app's autostart environment (`scripts/install_touch_autostart.py` in the app):
 `GantryPlayer.from_env()` gives `None` when `CHESS_GANTRY_PORT` is unset and the app plays as
 before, asking the person to move the computer's pieces. With a gantry, the app calls
 `new_game()` at the start, `human_moved(board, move)` after the camera confirms the person's
-move (so the layout follows the pieces: a piece the person took leaves the board), and
-`play(board, move, say)` for the computer's move, which plans the carries with `carry_plan.py`,
-runs them through `gantry_driver.run_job`, reports each carry through `say(text)` for the
-screen, and returns any note left for the person (a promotion with no spare piece docked). The
-app then verifies the board with the camera against `expected_squares()`. `reset(say)` carries
-everything home for the next game and returns what the person must still place (pieces they
-took stay with them). Every fault is a `GantryError` whose text goes on the screen; after one,
-`unlock()` (or `gantry_driver.py --unlock`) is the way back once someone has looked at the board.
-The link is opened on the first `play()`/`reset()` if `connect()` was not called.
+move (so the layout follows the pieces: a piece the person took leaves the board), and, for the
+computer's move, first `removal_needed(board, move)`: `("d5", "p")` when the move captures (the
+passed pawn's square for en passant), else `None`. When a removal is needed the app asks the
+person to take that piece off and, each time they press Check, looks at the square with the
+camera; only once it is empty does it call `play(board, move, say)`, which plans the carries
+with `carry_plan.py` (the job begins with the `remove` step, which the driver treats as already
+done), runs them through `gantry_driver.run_job`, reports each carry through `say(text)` for the
+screen, and returns any note left for the person (a promotion: the pawn now counts as the
+promoted piece). `play()` never waits for a removal itself. The app then verifies the board with
+the camera against `expected_squares()`, which no longer lists the captured piece. `reset(say)`
+carries every piece on the board home for the next game and returns what the person must still
+do ("Put a black pawn on e7." for each piece they took); after it `expected_squares()` is the
+full starting position, so the check passes once those pieces are back. Every fault is a
+`GantryError` whose text goes on the screen; after one, `unlock()` (or
+`gantry_driver.py --unlock`) is the way back once someone has looked at the board. The link is
+opened on the first `play()`/`reset()` if `connect()` was not called.
 
 **The website relay** (`duen-relay`, playing against someone online) uses the same driver as a
 command: with `CHESS_GANTRY=arduino` and `CHESS_GANTRY_DIR`/`CHESS_GANTRY_PORT` set, it runs
@@ -432,14 +471,16 @@ with the move's job as JSON on standard input; exit status 0 means the pieces ha
 the job said, the last line of standard output is a JSON reply (`{"ok": true, "x_mm": …,
 "y_mm": …, "servo": "down", …}` or `{"ok": false, "error": "…"}`), and anything else stops the
 game until someone checks the board. The job format is the one `backend/board_motion.py` in
-kennynakao/chess-website produces (carries in square units with `"before"` and `"pieces"`); the
-earlier `CHESS_MOTION_COMMAND` form (the same script with no arguments) still works.
+kennynakao/chess-website produces (carries in square units with `"before"` and `"pieces"`, and a
+`remove` step first for a capture, which the relay must have waited for, camera-checked, before
+running the job); the earlier `CHESS_MOTION_COMMAND` form (the same script with no arguments)
+still works.
 
 ## Testing without hardware
 
 ```sh
 make -C gantry/firmware/host test                                   # motion, protocol, servo and guard checks: 186 of them
-cd gantry/pi && python3 -m unittest discover -s . -p 'test_*.py'    # paths 12, carry plan 9, driver 25
+cd gantry/pi && python3 -m unittest discover -s . -p 'test_*.py'    # paths 12, carry plan 14, driver 28
 cd ~/chess-board-pi-only && CHESS_GANTRY_PORT=sim CHESS_GANTRY_DIR=~/chess-gantry/gantry/pi .venv/bin/python -m unittest test.test_pi_gantry
 ```
 
@@ -455,12 +496,16 @@ a simulated clock (`--speed` times faster than real time) and prints what it doe
 (`# SERVO up X=… Y=…`, `# MAG on …`, `# MOVE steps=… to X=… Y=…`, `# MOTORS off`), and drives
 it with the real Pi code (`--port sim`). It checks that a pawn push lifts the arm and switches
 the magnet on over e2, moves exactly 4000 steps on the Y motor (100 mm × 40 steps/mm), and
-releases and lowers over e4; that a capture is two `CARRY` lines, dock first; that a knight is
-one `CARRY` with via-points through the lanes; that a held board is refused until `--unlock`,
-that a fault in mid-carry sends `M5`, `M8`, `!`; that a board which lost its host finishes the
-carry and is then refused until `--unlock`; the website's stdin/exit-code contract; G-code mode;
-`--dry-run`; and `--game … --reset`. The bridge's own test plays a short game with a capture
-against the pretend board and resets it.
+releases and lowers over e4; that a capture (a `remove` step, then the taker) is exactly one
+`CARRY` onto the emptied square with no slot anywhere, and that a hand-written carry into a slot
+is still understood; that a knight is one `CARRY` with via-points through the lanes; that a held
+board is refused until `--unlock`, that a fault in mid-carry sends `M5`, `M8`, `!`; that a board
+which lost its host finishes the carry and is then refused until `--unlock`; the website's
+stdin/exit-code contract; G-code mode; `--dry-run`; and `--game … --reset` (the removals printed,
+the reset's "Put a … on …" notes). The bridge's own tests check `removal_needed()` over a short
+game, then play it with a capture against the pretend board (one carry for the capture, the
+expected squares after every move) and reset it (the notes for the pieces the person took, the
+full start expected afterwards).
 
 ## What the design files say
 
@@ -491,10 +536,13 @@ Measured from the files in the team Drive (`Gantry/3D Printing` and `CAD`):
 - **Piece base diameters are estimates** from the models (23 / 25 / 27 mm); measure the
   printed pieces and put the numbers in `piece_sizes_mm`. The clearances (3 mm, 1 mm in a
   lane) are guesses to tune when a piece first brushes another.
-- **The docking lanes sit 42.5 mm from the edge files**, so a piece cannot slide between an
-  occupied edge square and a docked piece. Docking still works (through the lane crossing at
-  each slot's height), but a reset after a long game may find no way for some piece and say so;
-  the website planner's two-columns-of-eight layout is a separate mismatch with the sketch.
+- **The docking lanes are unused in this version.** A person takes captured pieces off and the
+  camera confirms it before the gantry moves (see Captured pieces). The lanes stay in the
+  firmware, the driver and the path finder for a later version that parks pieces itself; when
+  that comes, note that they sit 42.5 mm from the edge files, so a piece cannot slide between an
+  occupied edge square and a docked piece (docking works through the lane crossing at each
+  slot's height), and that the website planner's two-columns-of-eight layout is a separate
+  mismatch with the sketch.
 - **Servo angles** (`SERVO_EXTEND_DEG` / `SERVO_RETRACT_DEG`) are placeholders to set on the
   real arm; `SERVO_SETTLE_MS` and `grab_settle_s` to tune once the real pull through the board
   top is known.

@@ -49,11 +49,11 @@ ARRIVE_MM = 2.0
 SCENARIO_ORDER = ["knight", "capture", "castle", "enpassant", "promotion", "reset", "game"]
 SCENARIO_TEXT = {
     "knight": "knight g1->f3 from the start position (through the lane between the f and g pawns)",
-    "capture": "1.e4 d5 2.exd5: the d5 pawn docks in Black's lane, then the taker goes",
+    "capture": "1.e4 d5 2.exd5: the person takes the d5 pawn off, then the taker goes",
     "castle": "1.e4 e5 2.Nf3 Nc6 3.Bc4 Bc5 4.O-O: the king, then the rook past it",
-    "enpassant": "1.e4 Nf6 2.e5 d5 3.exd6 e.p.: the d5 pawn docks, then the capturing pawn goes",
-    "promotion": "e7e8=Q with a white queen docked in w:0: the pawn docks, the queen comes out",
-    "reset": "a full reset from a mid-game position with four captured pieces in the lanes",
+    "enpassant": "1.e4 Nf6 2.e5 d5 3.exd6 e.p.: the person takes the d5 pawn off, then the capturing pawn goes",
+    "promotion": "e7e8=Q: the pawn is carried and stands in for the queen (no docked spares any more)",
+    "reset": "a full reset from a mid-game position: strays go home, taken pieces are put back by hand",
     "game": "a random game, 40 plies (20 moves each side), seeded, every carry in sequence",
 }
 
@@ -61,7 +61,7 @@ SCENARIO_TEXT = {
 # ----------------------------------------------------------------------------- the positions
 
 def position_after(ucis: list[str]) -> tuple[chess.Board, carry_plan.Layout]:
-    """Board and physical layout after the computer has played these moves (captures docked)."""
+    """Board and physical layout after the computer has played these moves (captured pieces taken off by the person)."""
     board, layout = chess.Board(), carry_plan.Layout()
     for uci in ucis:
         move = chess.Move.from_uci(uci)
@@ -119,7 +119,6 @@ def build_scenario(name: str, config: dict, seed: int = 7) -> Scenario:
     if name == "promotion":
         board = chess.Board("7k/4P3/8/8/8/8/8/K7 w - - 0 1")
         layout = carry_plan.Layout(board)
-        layout.pieces["w:0"] = "Q"            # a white queen taken earlier, waiting in White's lane
         pieces = dict(layout.pieces)
         job = carry_plan.job_for_move(layout, board, chess.Move.from_uci("e7e8q"))
         return Scenario(name, SCENARIO_TEXT[name], pieces, [job], ["e7e8q"])
@@ -339,6 +338,10 @@ def run_scenario(name: str, config: dict, params: Params, render: bool, out_dir:
         if not quiet:
             for text, note in lines:
                 print(f"    {text:<44s} ; {note}")
+        # A "remove" step is the person's: the piece leaves the board before the gantry carries anything.
+        for step in job.get("steps", []):
+            if step.get("op") == "remove" and sim.take_off(step["square"]) and not quiet:
+                print(f"    (person takes {step['piece']} off {step['square']})")
         results.append(sim.run_lines([t for t, _ in lines], job.get("label", name)))
     result = ScenarioResult(scenario, params.servo, results, all_lines, variant=variant)
     if recorder is not None:

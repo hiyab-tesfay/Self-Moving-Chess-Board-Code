@@ -11,12 +11,19 @@ What lives where:
 
 Jobs are the JSON that the website's game server and carry_plan.py produce, one per chess move:
 
-    {"id": 7, "label": "e7e5", "before": [...], "pieces": {...}, "expect": [...], "steps": [
-        {"op": "carry", "piece": "p", "from": "e7", "to": "e5", "path": [[4, 6], [4, 4]]}]}
+    {"id": 7, "label": "e4d5", "before": [...], "pieces": {...}, "expect": [...], "steps": [
+        {"op": "remove", "piece": "p", "square": "d5"},
+        {"op": "carry", "piece": "P", "from": "e4", "to": "d5", "path": [[4, 3], [3, 4]]}]}
 
-Path points are in squares: a1 is (0, 0), h8 is (7, 7), x.5 are the lanes between squares,
-and captured pieces park in the lanes beside the board at x = -1 (White's) and 8 (Black's),
-with the row an index down the lane. Slots are named "w:0", "w:1", ... and "b:0", ...
+A "remove" step is a captured piece that a person takes off the board; the camera checks the
+square is empty before the job is run. The driver sends nothing for it (it is the caller's job to
+have waited) and plans the carries that follow as if the square were already empty. A "note"
+step is a message for the person. A "carry" is one piece carried.
+
+Path points are in squares: a1 is (0, 0), h8 is (7, 7), x.5 are the lanes between squares. The
+docking lanes beside the board at x = -1 (White's) and 8 (Black's), with the row an index down the
+lane and slots named "w:0", "w:1", ... and "b:0", ..., are still understood here and in the
+firmware for a later version; no planner sends a piece to one now.
 
 When the job lists "before" (the squares and slots occupied as it starts) and "pieces", every
 carry's path is found here by board_paths.py so that the carried piece touches nothing, and a
@@ -191,8 +198,10 @@ def piece_words(symbol: str | None) -> str:
 
 
 def describe_step(step: dict) -> str:
-    """One carry in plain words, for the log and the screen."""
+    """One carry (or a removal by the person) in plain words, for the log and the screen."""
     who = piece_words(step.get("piece"))
+    if step.get("op") == "remove":
+        return f"The person takes {who} off {step['square']} (the caller waits for the camera before this job runs)"
     if ":" in step["to"]:
         text = f"Taking {who} off {step['from']} to slot {step['to']}"
     elif ":" in step["from"]:
@@ -210,13 +219,18 @@ def route(job: dict, board: BoardMap, config: dict) -> list[dict]:
     """The job's steps with every carry's path found afresh, and room made where a piece cannot pass.
 
     Needs the job's "before": the squares and slots occupied when the job starts. Without it
-    the paths in the job are used as they are.
+    the paths in the job are used as they are. A "remove" step is passed through unchanged and
+    empties its square for the carries after it: the person has taken that piece off (the caller
+    checked with the camera before running the job), so nothing has to be carried round it.
     """
     if "before" not in job:
         return list(job.get("steps", []))
     world = board_paths.Board(board.geometry(config), job["before"], pieces=job.get("pieces"))
     steps: list[dict] = []
     for step in job.get("steps", []):
+        if step.get("op") == "remove":
+            world.occupied.discard(step["square"])
+            world.pieces.pop(step["square"], None)
         if step.get("op") != "carry":
             steps.append(step)
             continue
@@ -242,6 +256,15 @@ def check_carry_count(count: int, config: dict, label: str) -> None:
         raise GantryError(f"job {label} would carry {count} pieces; more than {carry_limit(config)} in one job is a planning error, not a chess move")
 
 
+def removal_line(step: dict) -> tuple[str, str]:
+    """A "remove" step as a comment line: printed by --dry-run and logged, never sent to the board.
+
+    No motion and no command: the person has already taken the piece off, and whoever runs the
+    job (the touch-screen app, the website relay) waited for the camera to confirm it first.
+    """
+    return (f"# person removes {step.get('piece', '?')} from {step['square']}", describe_step(step))
+
+
 def checked_points(step: dict, board: BoardMap) -> list[tuple[float, float]]:
     """The carry's path in mm, every point inside the travel."""
     path = step.get("path") or []
@@ -254,7 +277,11 @@ def checked_points(step: dict, board: BoardMap) -> list[tuple[float, float]]:
 
 
 def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
-    """G-code lines for a job (GRBL boards, firmware 0.1), each with a note for the log. Fails before anything moves if a point is out of reach."""
+    """G-code lines for a job (GRBL boards, firmware 0.1), each with a note for the log. Fails before anything moves if a point is out of reach.
+
+    A "remove" step gives no G-code, only a comment line: the caller has waited for the person to
+    take the piece off (and for the camera to see the square empty) before running the job.
+    """
     travel_feed = float(config["travel_speed_mm_s"]) * 60
     carry_feed = float(config["carry_speed_mm_s"]) * 60
     lines: list[tuple[str, str]] = []
@@ -262,6 +289,9 @@ def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
     for step in route(job, board, config):
         if step.get("op") == "note":
             lines.append(("# " + step.get("message", ""), "note"))
+            continue
+        if step.get("op") == "remove":
+            lines.append(removal_line(step))
             continue
         if step.get("op") != "carry":
             raise GantryError(f"unknown step {step.get('op')!r}")
@@ -288,12 +318,17 @@ def plan_carry(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]
     The path comes from route() (board_paths, real piece widths); its inner points become the
     via-points, written as the firmware reads places: slot names, or x,y in squares. Every point
     is checked against the travel first, so nothing is sent that the board would refuse half-way.
+    A "remove" step (a captured piece the person takes off) gives no CARRY, only a comment line;
+    the caller must have waited for the removal, camera-checked, before running the job.
     """
     lines: list[tuple[str, str]] = []
     carries = 0
     for step in route(job, board, config):
         if step.get("op") == "note":
             lines.append(("# " + step.get("message", ""), "note"))
+            continue
+        if step.get("op") == "remove":
+            lines.append(removal_line(step))
             continue
         if step.get("op") != "carry":
             raise GantryError(f"unknown step {step.get('op')!r}")
@@ -364,7 +399,8 @@ def split_job(job: dict, board: BoardMap, config: dict, max_carries: int | None 
 
     The whole job is routed once, so make-room carries are counted; each part is then a plain
     job of already-routed steps (no "before", so the driver uses its paths as they are), with
-    "expect" worked out from where the pieces will be after it.
+    "expect" worked out from where the pieces will be after it. A "remove" step counts as no
+    carry and empties its square for the parts after it.
     """
     limit = carry_limit(config) if max_carries is None else max_carries
     steps = route(job, board, config)
@@ -384,7 +420,10 @@ def split_job(job: dict, board: BoardMap, config: dict, max_carries: int | None 
     jobs = []
     for i, chunk in enumerate(chunks):
         for step in chunk:
-            if step.get("op") == "carry":
+            if step.get("op") == "remove":
+                occupied.discard(step["square"])
+                pieces.pop(step["square"], None)
+            elif step.get("op") == "carry":
                 occupied.discard(step["from"])
                 occupied.add(step["to"])
                 pieces[step["to"]] = pieces.pop(step["from"], step.get("piece", "?"))
@@ -625,7 +664,10 @@ class Gantry:
         self.command(BoardMap(config).setup_line())
 
     def perform(self, lines: list[tuple[str, str]], config: dict, progress=None) -> None:
-        """Run planned commands, waiting for each to finish before the next. progress(text) is told about every carry."""
+        """Run planned commands, waiting for each to finish before the next. progress(text) is told about every carry.
+
+        Comment lines ("# ...": notes, and the removals a person has already made) are logged, not sent.
+        """
         board = BoardMap(config)
         for text, note in lines:
             if text.startswith("#"):
@@ -700,7 +742,9 @@ def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry")
 
     Order: plan (fails early), refuse if the board wants a person first, give it the board
     geometry ($B, firmware 0.2), home if the config says so, then run. Any fault leaves the
-    magnet off and the arm down.
+    magnet off and the arm down. A job that starts with a "remove" step runs its carries at once:
+    the caller must already have waited for the person to take that piece off and for the camera
+    to confirm the square is empty.
     """
     lines = plan_job(job, config)
     gantry = Gantry(link, log)

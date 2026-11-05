@@ -1,6 +1,6 @@
 """The Pi side against the pretend board: the right CARRY lines, the right millimetres in the
-right order (servo, magnet, moves), the safety refusals, and G-code mode for GRBL boards.
-Builds gantry/firmware/host/virtual_gantry first.
+right order (servo, magnet, moves), a capture as a removal by the person then one carry, the
+safety refusals, and G-code mode for GRBL boards. Builds gantry/firmware/host/virtual_gantry first.
 
     python3 -m unittest test_gantry_driver    (from gantry/pi)
 """
@@ -45,6 +45,15 @@ def job(label, *carries, before=None, pieces=None):
 
 def start_job(label, *carries):
     return job(label, *carries, before=gd.board_paths.occupied_at_start(), pieces=gd.board_paths.pieces_at_start())
+
+
+def capture_job():
+    """After 1.e4 d5: the person takes the pawn off d5, then the gantry plays exd5. Hand-written, no python-chess."""
+    pieces = gd.board_paths.pieces_at_start()
+    pieces["e4"], pieces["d5"] = pieces.pop("e2"), pieces.pop("d7")
+    made = job("e4d5", ("P", "e4", "d5", [[4, 3], [3, 4]]), before=set(pieces), pieces=pieces)
+    made["steps"].insert(0, {"op": "remove", "piece": "p", "square": "d5"})
+    return made
 
 
 def texts(lines):
@@ -110,19 +119,40 @@ class CarryPlanTests(unittest.TestCase):
         lines = gd.plan_carry(start_job("g1f3", ("N", "g1", "f3", [[6, 0], [5, 2]])), self.board, REAL)
         self.assertEqual(texts(lines), ["CARRY g1 f3 5.5,0.5 5.5,1.5"])
 
+    def test_a_capture_is_a_removal_by_the_person_then_one_carry(self):
+        lines = gd.plan_carry(capture_job(), self.board, REAL)
+        self.assertEqual(texts(lines), ["# person removes p from d5", "CARRY e4 d5"], "no command for the removal; the taker goes straight to the emptied square")
+        self.assertEqual(lines[0][1], "The person takes the black pawn off d5 (the caller waits for the camera before this job runs)")
+        self.assertEqual(lines[1][1], "Moving the white pawn from e4 to d5")
+        self.assertFalse(any(":" in t for t in texts(lines)), "no docking slot anywhere")
+        gcode = gd.plan(capture_job(), gd.BoardMap(GCODE), GCODE)
+        self.assertEqual(texts(gcode)[0], "# person removes p from d5")
+        self.assertEqual(sum(1 for t in texts(gcode) if t == "M3"), 1, "one grab in G-code too")
+        without = capture_job()
+        del without["steps"][0]
+        with self.assertRaises(gd.GantryError, msg="without the removal d5 is still occupied and the carry has nowhere to go"):
+            gd.plan_carry(without, self.board, REAL)
+
     @unittest.skipUnless(cp, "needs python-chess")
-    def test_a_capture_docks_the_taken_piece_then_moves_the_taker(self):
+    def test_the_planner_and_the_driver_agree_on_a_capture(self):
         board, layout = chess.Board(), cp.Layout()
         for uci in ("e2e4", "d7d5"):
             move = chess.Move.from_uci(uci)
             cp.job_for_move(layout, board, move)
             board.push(move)
         lines = gd.plan_carry(cp.job_for_move(layout, board, chess.Move.from_uci("e4d5")), self.board, REAL)
-        self.assertEqual(len(lines), 2)
-        self.assertTrue(lines[0][0].startswith("CARRY d5 b:0 "), lines[0][0])
-        self.assertTrue(all(re.fullmatch(r"-?\d+\.\d,-?\d+\.\d|[a-h][1-8]|[wb]:\d+", via) for via in lines[0][0].split()[3:]), "via-points are squares, slots or x,y: " + lines[0][0])
-        self.assertEqual(lines[0][1], "Taking the black pawn off d5 to slot b:0")
-        self.assertEqual(lines[1][0], "CARRY e4 d5")
+        self.assertEqual(texts(lines), ["# person removes p from d5", "CARRY e4 d5"])
+
+    def test_split_job_empties_a_removed_square(self):
+        parts = gd.split_job(capture_job(), self.board, REAL, max_carries=10)
+        self.assertEqual(len(parts), 1)
+        made = capture_job()
+        made["steps"].append({"op": "carry", "piece": "P", "from": "a2", "to": "a3", "path": [[0, 1], [0, 2]]})
+        parts = gd.split_job(made, self.board, REAL, max_carries=1)
+        self.assertEqual([[s["op"] for s in p["steps"]] for p in parts], [["remove", "carry"], ["carry"]])
+        self.assertIn("d5", parts[0]["expect"], "the taker stands on d5")
+        self.assertNotIn("e4", parts[0]["expect"])
+        self.assertEqual(len(parts[0]["expect"]), 31, "the taken pawn is gone")
 
     def test_predict_reads_carry_lines(self):
         lines = [("CARRY g1 f3 5.5,0.5 5.5,1.5", "")]
@@ -225,17 +255,21 @@ class PretendBoardTests(unittest.TestCase):
         order = [t.split()[2] for t in [tr for tr in self.last_traces if tr.startswith(("# SERVO", "# MAG"))]]
         self.assertEqual(order, ["up", "on", "off", "down"], "arm up, magnet on, magnet off, arm down")
 
-    def test_a_capture_docks_the_taken_piece_first_as_two_carries(self):
-        captured = ("p", "d5", "w:4", [[3, 4], [2.5, 4.5], [-0.5, 4.5], [-1, 4]])
-        taker = ("P", "e4", "d5", [[4, 3], [3, 4]])
-        state, (moves, mags, servos), sent = self.run_job(job("e4d5", captured, taker))
-        self.assertEqual([s for s in sent if s.startswith("CARRY")], ["CARRY d5 w:4 2.5,4.5 -0.5,4.5", "CARRY e4 d5"])
-        self.assertEqual([m[0] for m in mags], ["on", "off", "on", "off"])
-        self.assertEqual(mags[0][1:], (225.0, 240.0), "picks the pawn up on d5")
-        self.assertEqual(mags[1][1:], (43.0, 240.0), "drops it in slot w:4: White's column, row 4")
-        self.assertEqual(mags[3][1:], (225.0, 240.0), "the taker ends on d5")
-        self.assertEqual([s[0] for s in servos], ["up", "down", "up", "down"])
+    def test_a_capture_is_one_carry_after_the_person_took_the_piece_off(self):
+        state, (moves, mags, servos), sent = self.run_job(capture_job())
+        self.assertEqual([s for s in sent if s.startswith("CARRY")], ["CARRY e4 d5"], "exactly one carry; nothing is sent for the removal")
+        self.assertFalse(any(":" in s for s in sent if not s.startswith("$B")), "no slot anywhere")
+        self.assertEqual(mags, [("on", 275.0, 190.0), ("off", 225.0, 240.0)], "picks the taker up on e4, drops it on d5")
+        self.assertEqual([s[0] for s in servos], ["up", "down"])
         self.assertEqual((state["x"], state["y"]), (225.0, 240.0))
+
+    def test_a_hand_written_slot_carry_is_still_understood(self):
+        # No planner sends a piece to a docking slot any more; the driver and the firmware keep the slots for a later version.
+        docked = ("p", "d5", "w:4", [[3, 4], [2.5, 4.5], [-0.5, 4.5], [-1, 4]])
+        state, (moves, mags, servos), sent = self.run_job(job("dock", docked))
+        self.assertEqual([s for s in sent if s.startswith("CARRY")], ["CARRY d5 w:4 2.5,4.5 -0.5,4.5"])
+        self.assertEqual(mags, [("on", 225.0, 240.0), ("off", 43.0, 240.0)], "from d5 into slot w:4: White's column, row 4")
+        self.assertEqual((state["x"], state["y"]), (43.0, 240.0))
 
     def test_a_knight_goes_through_the_lanes_in_one_carry(self):
         state, (moves, mags, servos), sent = self.run_job(start_job("g1f3", ("N", "g1", "f3", [[6, 0], [5, 2]])))
@@ -381,9 +415,14 @@ class PretendBoardTests(unittest.TestCase):
                              capture_output=True, text=True)
         self.assertEqual(dry.returncode, 0, dry.stderr[-500:])
         self.assertIn("; job e2e4", dry.stdout)
-        self.assertIn("CARRY e5 b:0", dry.stdout, "the capture docks the pawn in Black's lane")
+        self.assertIn("# person removes p from e5", dry.stdout, "Nxe5: the person takes the pawn off, the knight follows")
+        self.assertIn("CARRY f3 e5", dry.stdout)
+        self.assertIn("# person removes N from e5", dry.stdout, "Nxe5 back: the same for the white knight")
+        self.assertFalse(any(":" in line for line in dry.stdout.splitlines() if line.startswith("CARRY")), "no docking slot in any carry")
         self.assertIn("; job reset", dry.stdout)
-        self.assertIn("Bringing the black knight from slot b:2 to b8", dry.stdout)
+        self.assertIn("Moving the black knight from e5 to b8", dry.stdout)
+        self.assertIn("# Put a white knight on g1.", dry.stdout, "the gantry cannot bring back what the person took")
+        self.assertIn("# Put a black pawn on e7.", dry.stdout)
         self.assertIn("jobs, about", dry.stdout)
         played = subprocess.run([sys.executable, str(Path(gd.__file__)), "--port", "sim", "--config", str(gd.DEFAULT_CONFIG), "--quiet", "--game", "e2e4", "e7e5"],
                                 capture_output=True, text=True)
