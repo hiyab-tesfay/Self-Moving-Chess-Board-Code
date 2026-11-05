@@ -6,6 +6,7 @@ import argparse
 import base64
 import json
 import queue
+import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
@@ -22,6 +23,14 @@ from chess_game import ChessGame, DIFFICULTIES, StockfishPlayer
 from move_observation import occupied_squares
 from pi_camera import Camera, CameraSettings
 from pi_online import OnlineError, OnlineSession, OnlineSettings, describe_online, starting_position_problem
+
+try:   # The gantry carries Stockfish's moves in the in-person game. Without pi_gantry (or a gantry) the person moves them.
+    from pi_gantry import GantryError, GantryPlayer
+except ImportError:   # pragma: no cover - depends on the Pi's checkout
+    GantryPlayer = None
+
+    class GantryError(Exception):
+        """str(exc) is plain words for the screen."""
 
 
 class MoveRejected(ValueError):
@@ -259,9 +268,15 @@ def calibrate_photos(empty: np.ndarray, starting: np.ndarray,
 
 
 class TouchSession:
-    """Rules and camera match decisions, independent of the display and hardware."""
+    """Rules and camera match decisions, independent of the display and hardware.
 
-    def __init__(self, level: str) -> None:
+    With a gantry (`GantryPlayer`, injected) the session also keeps the gantry's picture of the
+    board in step: the start position once the camera verified it, the person's move once the
+    camera registered it, and Stockfish's move once the gantry carried it and the camera
+    verified the result. Without one, the person moves Black's pieces by hand as before.
+    """
+
+    def __init__(self, level: str, gantry=None) -> None:
         self.game = ChessGame()
         self.game.start(level)
         self.phase = "setup"
@@ -269,6 +284,10 @@ class TouchSession:
         self.computer_move: chess.Move | None = None
         self.result: str | None = None
         self.setup_uncertain: tuple[str, ...] = ()
+        self.gantry = gantry
+        self.layout_known = False               # the gantry was told the camera-verified start position
+        self.gantry_note: str | None = None     # why the gantry could not carry the current computer move
+        self.gantry_notes: tuple[str, ...] = () # what the gantry reported about the move it carried
 
     def verify_setup(self, observed: Observation | frozenset[str]) -> None:
         if self.phase != "setup":
@@ -278,6 +297,9 @@ class TouchSession:
             raise MoveRejected("Board does not match the starting position. Correct the pieces and scan again.")
         self.setup_uncertain = observation.uncertain
         self.phase = "setup_confirm" if observation.uncertain else "human"
+        if self.gantry is not None:
+            self.gantry.new_game(self.game.board.copy(stack=False))
+            self.layout_known = True
 
     def confirm_setup(self) -> None:
         if self.phase != "setup_confirm":
@@ -333,6 +355,8 @@ class TouchSession:
         self.phase = "human"
 
     def _accept_human(self, move: chess.Move) -> str:
+        if self.gantry is not None:
+            self.gantry.human_moved(self.game.board.copy(stack=False), move)
         san = self.game.play_human(
             chess.square_name(move.from_square),
             chess.square_name(move.to_square),
@@ -359,12 +383,61 @@ class TouchSession:
             raise MoveRejected("Computer move touches unclear squares: " +
                                ", ".join(sorted(unclear_affected)) + ". Retake the photo.")
         if not _matches_known_squares(after, observation):
+            if self.gantry is not None:
+                raise MoveRejected(self._gantry_mismatch(after, observation))
             raise MoveRejected("Board does not match the computer move. Correct it and scan again.")
         san = self.game.play_computer(self.computer_move)
+        if self.gantry is not None and self.gantry_note is not None:
+            # The person made the move by hand after the gantry failed: the gantry's picture follows the camera.
+            self.gantry.new_game(self.game.board.copy(stack=False))
+            self.gantry_note = None
         self.computer_move = None
         self.result = self.game.result_text()
         self.phase = "finished" if self.result else "human"
         return san
+
+    def _gantry_mismatch(self, expected: frozenset[str], observation: Observation) -> str:
+        unclear = set(observation.uncertain)
+        parts = []
+        missing = sorted((expected - observation.occupied) - unclear)
+        extra = sorted((observation.occupied - expected) - unclear)
+        if missing:
+            parts.append("missing on " + ", ".join(missing))
+        if extra:
+            parts.append("extra on " + ", ".join(extra))
+        move = self.computer_move.uci() if self.computer_move else "the move"
+        return (f"The camera does not see the move {move} on the board: " + "; ".join(parts) +
+                ". Fix the pieces, then tap Retake Photo.")
+
+    # ------------------------------------------------------------------ the gantry carries Stockfish's move
+
+    def carry_computer_move(self, say=None) -> list[str]:
+        """Worker thread: the gantry carries the announced computer move; `say(text)` gets progress lines.
+
+        Only the gantry moves here. The game position advances in `verify_computer`, once the camera
+        has seen the move on the board, exactly as after a move made by hand. Raises GantryError.
+        """
+        if self.phase != "computer" or self.computer_move is None:
+            raise ValueError("There is no computer move for the gantry to carry.")
+        if self.gantry is None:
+            raise ValueError("No gantry is connected.")
+        return list(self.gantry.play(self.game.board.copy(stack=False), self.computer_move, say) or ())
+
+    def gantry_moved(self, notes) -> None:
+        """The gantry reports the move carried; the camera check comes next."""
+        self.gantry_note = None
+        self.gantry_notes = tuple(notes or ())
+
+    def gantry_failed(self, message: str) -> None:
+        """The gantry could not carry the move: the person makes it by hand, as without a gantry."""
+        self.gantry_note = message
+        self.gantry_notes = ()
+
+    def put_pieces_back(self, say=None) -> list[str]:
+        """Worker thread: every piece goes back to its home square, if the gantry knows where they are."""
+        if self.gantry is None or not self.layout_known:
+            return []
+        return list(self.gantry.reset(say) or ())
 
     def resign(self) -> None:
         if self.phase != "finished":
@@ -381,39 +454,11 @@ class TouchApp:
     RED = "#ff8c85"
     GOLD = "#ffcf70"
 
+    RESET_CONFIRM_SECONDS = 4.0   # a second tap on Reset Board / End Game within this time confirms it
+
     def __init__(self, root: tk.Tk, args: argparse.Namespace) -> None:
         self.root = root
-        self.args = args
-        self.camera_settings = ((read_camera_settings(args.calibration / "camera_settings.json")
-                                 or CameraSettings()) if args.camera == "pi" else CameraSettings())
-        self.camera = Camera(args.camera, args.device, self.camera_settings)
-        self.photo_adjustments = (read_photo_adjustments(args.calibration / "photo_adjustments.json")
-                                  or PhotoAdjustments())
-        self.executor = ThreadPoolExecutor(max_workers=1)
-        self.results: queue.SimpleQueue = queue.SimpleQueue()
-        self.generation = 0
-        self.closed = False
-        self.player: StockfishPlayer | None = None
-        self.calibration = None
-        self.reference = None
-        self.session: TouchSession | None = None
-        self.calibration_flow: CalibrationFlow | None = CalibrationFlow()
-        self.startup_calibration = True
-        self.scan_photo: np.ndarray | None = None
-        self.scan_corners: list[list[float]] = []
-        self.last_scan_corners: list[list[float]] | None = None
-        self.scan_corner_source = ""
-        self.scan_feedback: ScanFeedback | None = None
-        self.preview_photo: tk.PhotoImage | None = None
-        self.preview_geometry: tuple[float, float, float] | None = None
-        self.level = "beginner"
-        self.online_session: OnlineSession | None = None   # the fourth menu option: the website plays on this board
-        self.busy = False
-        self.selected_square: str | None = None
-        self.message = "Calibrate the board, or use a saved calibration."
-        if (args.calibration / "calibration.json").is_file() and not self.saved_calibration_available():
-            self.message = "Saved calibration cannot be reused. Take new calibration photos."
-        self.message_color = self.MUTED
+        self.init_state(args)
         screen_width = 800 if args.windowed else root.winfo_screenwidth()
         screen_height = 480 if args.windowed else root.winfo_screenheight()
         self.compact = screen_width < 900 or screen_height < 600
@@ -455,6 +500,47 @@ class TouchApp:
         if not args.windowed:
             root.after(250, self.ensure_fullscreen)
         root.after(70, self.poll_results)
+
+    def init_state(self, args: argparse.Namespace) -> None:
+        """Everything but the widgets, so the game flow can run without a display."""
+        self.args = args
+        self.camera_settings = ((read_camera_settings(args.calibration / "camera_settings.json")
+                                 or CameraSettings()) if args.camera == "pi" else CameraSettings())
+        self.camera = Camera(args.camera, args.device, self.camera_settings)
+        self.photo_adjustments = (read_photo_adjustments(args.calibration / "photo_adjustments.json")
+                                  or PhotoAdjustments())
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.results: queue.SimpleQueue = queue.SimpleQueue()
+        self.generation = 0
+        self.closed = False
+        self.player: StockfishPlayer | None = None
+        self.calibration = None
+        self.reference = None
+        self.session: TouchSession | None = None
+        self.calibration_flow: CalibrationFlow | None = CalibrationFlow()
+        self.startup_calibration = True
+        self.scan_photo: np.ndarray | None = None
+        self.scan_corners: list[list[float]] = []
+        self.last_scan_corners: list[list[float]] | None = None
+        self.scan_corner_source = ""
+        self.scan_feedback: ScanFeedback | None = None
+        self.preview_photo: tk.PhotoImage | None = None
+        self.preview_geometry: tuple[float, float, float] | None = None
+        self.level = "beginner"
+        self.online_session: OnlineSession | None = None   # the fourth menu option: the website plays on this board
+        self.busy = False
+        self.selected_square: str | None = None
+        self.message = "Calibrate the board, or use a saved calibration."
+        if (args.calibration / "calibration.json").is_file() and not self.saved_calibration_available():
+            self.message = "Saved calibration cannot be reused. Take new calibration photos."
+        self.message_color = self.MUTED
+        # The gantry (pi_gantry) is opened at the first in-person game and closed when Online is selected,
+        # since the website's game server drives it from its own process while Online.
+        self.gantry = None
+        self.gantry_activity: str | None = None   # heading while the gantry works ("Gantry moving e7e5…")
+        self.resetting = False                    # the gantry is carrying every piece home
+        self.after_reset = None                   # what happens on the Tk thread once the pieces are home
+        self.reset_armed_until = 0.0              # Reset Board / End Game was tapped once; a second tap confirms
 
     def ensure_fullscreen(self) -> None:
         """Repeat the full-screen request after the desktop maps the window."""
@@ -504,7 +590,13 @@ class TouchApp:
             self.render_online()
             return
         if self.busy:
-            self.heading("Please wait", "The camera or chess engine is working.")
+            if self.gantry_activity:
+                self.heading(self.gantry_activity, "Keep hands clear of the board.")
+            else:
+                self.heading("Please wait", "The camera or chess engine is working.")
+            if self.resetting:
+                self.button("Back to Menu", self.back_to_menu)
+                return
             self.button("Cancel Calibration" if self.calibration_flow else "End Game",
                         self.cancel_calibration if self.calibration_flow else self.end_game)
             return
@@ -536,6 +628,7 @@ class TouchApp:
         elif session.phase == "human":
             self.heading("Your move · White", "Move a piece on the physical board, then tap Scan Move. Tap a white piece on screen for legal squares.")
             self.button("Scan Move", self.scan, accent=True)
+            self.button(self.reset_label("Reset Board"), self.reset_board)
             self.button("End Game", self.end_game)
         elif session.phase == "choose":
             promotion = all(move.promotion for move in session.choices)
@@ -556,10 +649,12 @@ class TouchApp:
                 choice_button.grid(row=index // 2, column=index % 2,
                                    sticky="ew", padx=2, pady=2)
             self.button("Retake Photo", self.retake)
+            self.button(self.reset_label("Reset Board"), self.reset_board)
             self.button("End Game", self.end_game)
         elif session.phase == "thinking":
             self.heading("Computer thinking", "Leave the physical board as it is.")
             self.button("Try Computer Move", self.request_computer_move, accent=True)
+            self.button(self.reset_label("Reset Board"), self.reset_board)
             self.button("End Game", self.end_game)
         elif session.phase == "computer":
             move = session.computer_move
@@ -572,8 +667,12 @@ class TouchApp:
                 extra.append("Move the rook too.")
             if move.promotion:
                 extra.append(f"Replace the pawn with a {chess.piece_name(move.promotion)}.")
-            self.heading(f"Stockfish: {san}", f"Move {move.uci()[:2]} to {move.uci()[2:4]} on the board. " + " ".join(extra))
+            by_hand = f"Move {move.uci()[:2]} to {move.uci()[2:4]} on the board. " + " ".join(extra)
+            if session.gantry_note:
+                by_hand = f"The gantry could not make this move: {session.gantry_note} " + by_hand
+            self.heading(f"Stockfish: {san}", by_hand)
             self.button("Verify Computer Move", self.scan, accent=True)
+            self.button(self.reset_label("Reset Board"), self.reset_board)
             self.button("End Game", self.end_game)
         else:
             self.heading("Game over", session.result or "Game finished.")
@@ -603,10 +702,17 @@ class TouchApp:
             self.heading("Online", holder.error)
         elif view is None:
             self.heading("Online", "Connecting to the game server on this Pi…")
-        elif not view.connected:
+        elif view.mode == "pairing" and not view.connected:
             self.heading("Online", view.detail + " This board accepts website games only while Online is selected here.")
         else:
             self.heading(view.title, view.detail)
+        if view is not None and not holder.error:
+            if view.mode == "fix_setup":
+                self.button("Check Again", self.check_online_board, accent=True)
+            elif view.mode == "pairing":
+                self.button(self.reset_label("Reset Board"), self.reset_online_board)
+            elif view.mode == "game":
+                self.button(self.reset_label("End Game"), self.reset_online_board)
         self.button("Back to Menu", self.leave_online)
 
     def go_online(self) -> None:
@@ -622,9 +728,55 @@ class TouchApp:
             return
         self.generation += 1
         self.selected_square = None
+        self.reset_armed_until = 0.0
+        if self.gantry is not None:
+            # The game server drives the gantry from its own process while Online; the next in-person game reopens it.
+            gantry, self.gantry = self.gantry, None
+            self.executor.submit(gantry.close)
         self.online_session = OnlineSession(settings, self.results, self.generation)
         self.say("Online selected. Checking that the board is set up…", self.GOLD)
         self.check_online_board()
+
+    def reset_online_board(self) -> None:
+        """Reset Board (pairing view) / End Game (live game): one confirming tap, then the next heartbeat
+        carries `reset`. The server ends any running game as abandoned, puts the pieces back and clears
+        the lease; the screen follows the snapshots: "Game over / Putting the pieces back…", then pairing."""
+        holder = self.online_session
+        if (holder is None or not holder.verified or holder.checking or holder.error or holder.view is None
+                or holder.view.mode not in ("pairing", "game")):
+            return
+        if not self.confirm_reset("End Game" if holder.view.mode == "game" else "Reset Board"):
+            return
+        holder.request_reset()
+        self.say("Resetting the board: the pieces go back to their starting squares.", self.GOLD)
+        self.render()
+
+    # ------------------------------------------------------------------ one confirming tap for Reset Board / End Game
+
+    def reset_armed(self) -> bool:
+        return self.reset_armed_until > time.monotonic()
+
+    def reset_label(self, label: str) -> str:
+        return "Tap Again to Confirm" if self.reset_armed() else label
+
+    def confirm_reset(self, label: str) -> bool:
+        """True on the second tap within RESET_CONFIRM_SECONDS; the first tap only arms the button,
+        so a brush of the screen does not wipe a game."""
+        if self.reset_armed():
+            self.reset_armed_until = 0.0
+            return True
+        self.reset_armed_until = time.monotonic() + self.RESET_CONFIRM_SECONDS
+        self.say(f"Tap {label} again to end this game; the pieces then go back to their starting squares."
+                 if label == "End Game" else f"Tap {label} again to put every piece back on its starting square.", self.GOLD)
+        self.render()
+        self.root.after(int(self.RESET_CONFIRM_SECONDS * 1000) + 100, self.disarm_reset)
+        return False
+
+    def disarm_reset(self) -> None:
+        if self.closed or self.reset_armed() or not self.reset_armed_until:
+            return
+        self.reset_armed_until = 0.0
+        self.render()
 
     def check_online_board(self) -> None:
         """Photograph the board and compare it with the starting position. The website is let in only on a match."""
@@ -668,9 +820,10 @@ class TouchApp:
         observation = _as_observation(observation)
         holder.problem = starting_position_problem(observation.occupied, observation.uncertain)
         if holder.problem:
+            holder.verified = False   # also after a stopped reset: the setup screen stays until the camera agrees
             self.say(holder.problem, self.RED)
         else:
-            holder.start()   # the heartbeat begins: from now on the website may take the board
+            holder.start()   # the heartbeat begins (its first beat carries `fresh`): from now on the website may take the board
             self.say("Board verified. Open the website and enter the code to play.", self.GREEN)
         self.render()
 
@@ -680,6 +833,7 @@ class TouchApp:
             return
         self.generation += 1   # results still in flight from the thread or the camera are ignored
         self.busy = False
+        self.reset_armed_until = 0.0
         self.online_session = None
         holder.stop()           # its last heartbeat tells the game server Online is off
         self.say("Online mode off. Choose a difficulty to play on the board.")
@@ -699,7 +853,9 @@ class TouchApp:
             return
         view = describe_online(value, holder.settings)
         before, holder.error, holder.view = holder.view, None, view
-        if before is None or before.connected != view.connected or before.title != view.title:
+        if before is None or before.connected != view.connected or before.title != view.title or before.mode != view.mode:
+            if before is not None and before.mode != view.mode:
+                self.reset_armed_until = 0.0   # a half-confirmed End Game / Reset Board does not carry over
             self.say(view.status, self.GREEN if view.connected else self.MUTED)
             self.render()
         else:
@@ -713,7 +869,7 @@ class TouchApp:
         canvas.delete("all")
         self.preview_geometry = None
         view = holder.view if holder else None
-        if view is not None and view.connected:
+        if view is not None and view.mode != "pairing":
             self._draw_position(view.board, view.last_move, None, set(), ())
             return
         width = canvas.winfo_width() if canvas.winfo_width() > 1 else 400
@@ -734,7 +890,8 @@ class TouchApp:
             (settings.website_display if settings else "", int(24 * scale), self.GOLD),
             ("then enter this code" if code else "then enter the board's access code", int(12 * scale), self.MUTED),
             (code or "ask the board owner", int(44 * scale) if code else int(16 * scale), self.TEXT if code else self.MUTED),
-            (holder.error if holder and holder.error else "Board verified · waiting for a player to connect…", int(12 * scale), self.RED if holder and holder.error else self.GREEN),
+            (holder.error if holder and holder.error else view.status if view is not None else "Board verified · waiting for a player to connect…",
+             int(12 * scale), self.RED if holder and holder.error else self.GREEN),
         ]
         total = sum(size * 2.1 for _, size, _ in lines)
         y = max(10, (height - total) / 2)
@@ -994,13 +1151,20 @@ class TouchApp:
             try:
                 value = work()
                 if tag == "start" and (self.closed or generation != self.generation):
-                    value[2].close()
+                    self.discard_start(value)
                     return
                 self.results.put((generation, tag, value, None))
             except Exception as exc:
                 self.results.put((generation, tag, None, exc))
 
         self.executor.submit(run)
+
+    def discard_start(self, value) -> None:
+        """A game start nobody waits for any more: close the Stockfish it opened, and a gantry it opened."""
+        value[2].close()
+        gantry = value[3] if len(value) > 3 else None
+        if gantry is not None and gantry is not self.gantry:
+            gantry.close()
 
     def start_game(self) -> None:
         if not self.saved_calibration_available():
@@ -1012,13 +1176,24 @@ class TouchApp:
         self.generation += 1
         self.scan_photo = None
         self.scan_corners = []
+        self.forget_gantry_work()
         self.busy = True
         self.say("Loading calibration and starting Stockfish…")
         self.render()
+        gantry = self.gantry   # still open from the last game, or None
 
         def load():
             calibration, reference = load_calibration(self.args.calibration)
-            return calibration, reference, StockfishPlayer()
+            player = StockfishPlayer()
+            opened, problem = gantry, None
+            if opened is None and GantryPlayer is not None:
+                opened = GantryPlayer.from_env()   # None when no gantry is configured
+                if opened is not None:
+                    try:
+                        opened.connect()
+                    except GantryError as exc:
+                        opened, problem = None, str(exc)
+            return calibration, reference, player, opened, problem
 
         self.submit("start", load)
 
@@ -1099,12 +1274,18 @@ class TouchApp:
                 generation, tag, value, error = self.results.get_nowait()
                 if generation != self.generation:
                     if tag == "start" and value is not None:
-                        self.executor.submit(value[2].close)
+                        self.executor.submit(self.discard_start, value)
                     continue
                 if tag == "online":
                     self.handle_online(value, error)
                     continue
+                if tag == "gantry_progress":
+                    self.say(value, self.GOLD)   # the gantry's own words while it works; the screen stays busy
+                    continue
                 self.busy = False
+                if tag in ("gantry_play", "gantry_reset"):
+                    self.handle_gantry_result(tag, value, error)
+                    continue
                 if tag == "online_scan":
                     holder = self.online_session
                     if holder is not None:
@@ -1141,7 +1322,7 @@ class TouchApp:
                         self.say("Check the message on the photo.", self.RED)
                     else:
                         self.say(str(exc), self.RED)
-                except (ValueError, RuntimeError, OSError, cv2.error) as exc:
+                except (ValueError, RuntimeError, OSError, cv2.error, GantryError) as exc:
                     self.say(str(exc), self.RED)
                 self.render()
         except queue.Empty:
@@ -1195,10 +1376,14 @@ class TouchApp:
             flow.stage = "done"
             self.say("Calibration saved and starting board verified. Tap Choose Difficulty.", self.GREEN)
         elif tag == "start":
-            self.calibration, self.reference, self.player = value
+            self.calibration, self.reference, self.player, self.gantry, gantry_problem = value
             self.last_scan_corners = saved_scan_corners(self.args.calibration, self.calibration)
-            self.session = TouchSession(self.level)
-            self.say("Place the pieces in their starting squares and scan the board.")
+            self.session = TouchSession(self.level, gantry=self.gantry)
+            if gantry_problem:
+                self.say(f"{gantry_problem} Playing without the gantry: move Black's pieces by hand. "
+                         "Place the pieces in their starting squares and scan the board.", self.GOLD)
+            else:
+                self.say("Place the pieces in their starting squares and scan the board.")
         elif tag == "scan_photo":
             photo, corners, self.scan_corner_source = value
             self.scan_photo = photo
@@ -1232,10 +1417,14 @@ class TouchApp:
             elif self.session.phase == "computer":
                 san = self.session.verify_computer(value)
                 self.clear_scan_photo()
+                notes = " ".join(self.session.gantry_notes)
+                self.session.gantry_notes = ()
                 self.say(f"Computer move {san} verified. " +
                          (self.session.result or "Your turn.") +
                          (" Unclear squares outside the move: " + ", ".join(value.uncertain) + "."
-                          if value.uncertain else ""), self.GREEN)
+                          if value.uncertain else "") + (" " + notes if notes else ""), self.GREEN)
+                if self.session.phase == "finished":
+                    self.reset_pieces()
             self.last_scan_corners = used_corners
         elif tag == "engine":
             assert self.session is not None
@@ -1248,15 +1437,117 @@ class TouchApp:
             if value.promotion:
                 directions += f" Use a {chess.piece_name(value.promotion)}."
             self.say(directions, self.GOLD)
+            if self.session.gantry is not None:
+                self.carry_computer_move()
 
     def after_human_move(self) -> None:
         assert self.session is not None
         self.selected_square = None
         if self.session.phase == "finished":
             self.say(self.session.result or "Game over.", self.GREEN)
+            self.reset_pieces()
             return
         assert self.player is not None
         self.request_computer_move()
+
+    # ------------------------------------------------------------------ the gantry in the in-person game
+
+    def gantry_progress(self):
+        """A `say` for the worker thread: progress lines reach the status bar through the result queue."""
+        generation, results = self.generation, self.results
+        return lambda text: results.put((generation, "gantry_progress", str(text), None))
+
+    def carry_computer_move(self) -> None:
+        """Stockfish's move is known: the gantry carries it in the worker, then the camera verifies the
+        board exactly as after a move made by hand."""
+        session = self.session
+        if session is None or session.phase != "computer" or session.gantry is None or self.busy:
+            return
+        move = session.computer_move
+        assert move is not None
+        self.busy = True
+        self.gantry_activity = f"Gantry moving {move.uci()}…"
+        self.say(f"Gantry moving {move.uci()}… keep hands clear of the board.", self.GOLD)
+        progress = self.gantry_progress()
+        self.submit("gantry_play", lambda: session.carry_computer_move(say=progress))
+
+    def reset_pieces(self, then=None) -> None:
+        """With a gantry that knows the layout: every piece goes home in the worker behind a
+        "Putting the pieces back…" screen, then `then(problem)` runs with the gantry's error text or
+        None. Otherwise `then(None)` runs at once."""
+        session = self.session
+        if self.gantry is None or session is None or not session.layout_known or self.resetting:
+            if then is not None:
+                then(None)
+            return
+        self.resetting = True
+        self.busy = True
+        self.gantry_activity = "Putting the pieces back…"
+        self.after_reset = then
+        self.say("Putting the pieces back… keep hands clear of the board.", self.GOLD)
+        progress = self.gantry_progress()
+        self.submit("gantry_reset", lambda: session.put_pieces_back(say=progress))
+
+    def handle_gantry_result(self, tag: str, value, error) -> None:
+        self.gantry_activity = None
+        session = self.session
+        if tag == "gantry_play":
+            if session is None or session.phase != "computer":
+                self.render()
+                return
+            if error is not None:
+                message = str(error) if isinstance(error, GantryError) else f"Error: {error}"
+                session.gantry_failed(message)
+                move = session.computer_move
+                self.say(f"The gantry could not make the move: {message} Move {move.uci()[:2]} to {move.uci()[2:4]} "
+                         "by hand, then tap Verify Computer Move.", self.RED)
+                self.render()
+                return
+            session.gantry_moved(value)
+            self.say(f"Gantry moved {session.computer_move.uci()}. Checking the board with the camera…", self.GOLD)
+            self.scan()   # the same verification as after a move by hand
+            return
+        # gantry_reset
+        self.resetting = False
+        then, self.after_reset = self.after_reset, None
+        problem = f"The gantry could not put the pieces back: {error}" if error is not None else None
+        if then is not None:
+            then(problem)
+        elif problem:
+            self.say(f"{problem} Set up the starting position by hand before the next game.", self.RED)
+        else:
+            notes = " ".join(value or ())
+            result = session.result + " " if session is not None and session.result else ""
+            self.say(result + "The pieces are back on their starting squares." + (" " + notes if notes else ""), self.GREEN)
+        self.render()
+
+    def forget_gantry_work(self) -> None:
+        """A gantry job whose result nobody waits for any more (the generation moved on)."""
+        self.gantry_activity = None
+        self.resetting = False
+        self.after_reset = None
+        self.reset_armed_until = 0.0
+
+    def reset_board(self) -> None:
+        """Reset Board on the in-person game screens: one confirming tap, then the pieces go back to their
+        starting squares (by the gantry, or by hand) and the game starts over with the usual camera check."""
+        session = self.session
+        if session is None or self.busy or session.phase in ("setup", "setup_confirm", "finished"):
+            return
+        if not self.confirm_reset("Reset Board"):
+            return
+        self.generation += 1
+        self.clear_scan_photo()
+        self.selected_square = None
+        self.forget_gantry_work()
+
+        def start_over(problem: str | None) -> None:
+            self.session = TouchSession(self.level, gantry=self.gantry)
+            self.say((problem or "Board reset.") + " Place the pieces in their starting squares and scan the board.",
+                     self.RED if problem else self.GOLD)
+
+        self.reset_pieces(then=start_over)
+        self.render()
 
     def request_computer_move(self) -> None:
         if self.session is None or self.session.phase != "thinking" or self.busy:
@@ -1307,6 +1598,7 @@ class TouchApp:
         self.generation += 1
         self.busy = False
         self.clear_scan_photo()
+        self.forget_gantry_work()
         if self.player is not None:
             player, self.player = self.player, None
             self.executor.submit(player.close)
@@ -1314,13 +1606,18 @@ class TouchApp:
             self.session = None
             self.say("Game cancelled.")
         else:
+            abandoned = self.session.phase != "finished"
             self.session.resign()
             self.say(self.session.result or "Game ended.", self.GOLD)
+            if abandoned:
+                self.reset_pieces()   # with a gantry: the pieces go home now, behind "Putting the pieces back…"
         self.render()
 
     def back_to_menu(self) -> None:
         self.generation += 1
+        self.busy = False
         self.clear_scan_photo()
+        self.forget_gantry_work()
         if self.player is not None:
             player, self.player = self.player, None
             self.executor.submit(player.close)
@@ -1539,12 +1836,20 @@ class TouchApp:
             while True:
                 _generation, tag, value, _error = self.results.get_nowait()
                 if tag == "start" and value is not None:
-                    self.executor.submit(value[2].close)
+                    self.executor.submit(self.discard_start, value)
         except queue.Empty:
             pass
         if self.player is not None:
             player, self.player = self.player, None
             self.executor.submit(player.close)
+        if self.gantry is not None:
+            # Leaving mid-game: the pieces go home first (the worker finishes before the process exits), then the link closes.
+            gantry, self.gantry = self.gantry, None
+            session = self.session
+            if session is not None and session.layout_known and not self.resetting:
+                self.executor.submit(lambda: (session.put_pieces_back(), gantry.close()))
+            else:
+                self.executor.submit(gantry.close)
         if self.online_session is not None:
             holder, self.online_session = self.online_session, None
             holder.stop()

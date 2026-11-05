@@ -61,6 +61,19 @@ Select Beginner, Intermediate, or Advanced, then tap **Start Game**. Place the p
 
 The camera observes occupied squares, not piece identities. It cannot independently prove which piece was placed on a square or distinguish promotions and some captures from the image alone. Keep the physical pieces in sync with the displayed board and use the on-screen choice when prompted. The real LCD, touch coordinates, camera, board, and lighting still require a hardware test.
 
+### The gantry plays Black's move
+
+When the self-moving gantry is connected, the touch screen plays Stockfish's move with it instead of asking you to move the piece: after your move is read by the camera, the screen shows "Gantry moving e7e5… keep hands clear", the gantry carries the piece (a captured piece goes to the docking lane beside the board first; castling moves the king, then the rook), and then the **same camera check** runs as for a move made by hand, so every piece position is verified after every move, the gantry's included. If the gantry is not connected or fails, the screen falls back to "move it by hand, then tap Verify Computer Move". When a game ends, is abandoned, or **Reset Board** is tapped twice, the gantry carries every piece back to its starting square and the camera checks the starting position before the next game. The logic lives in `pi_gantry.py`, which uses the driver on the `gantry` branch of this repository; configure it with environment variables:
+
+```sh
+CHESS_GANTRY_DIR=/home/smart/chess-gantry/gantry/pi   # a checkout of the gantry branch (default: ~/chess-gantry/gantry/pi or ~/Self-Moving-Chess-Board-Code/gantry/pi)
+CHESS_GANTRY_PORT=/dev/ttyUSB0                        # the ESP32; "sim" runs the pretend board; unset = no gantry
+```
+
+### Online: the website plays on this board
+
+The fourth menu option, **○ Online**, lets a player on the website (kennynakao/chess-website, served by the `duen-relay` service on this Pi) play against Stockfish on this physical board. Tapping it photographs the board and requires the full starting position (the screen names any missing or extra pieces; fix them and tap **Check Again**), then shows the website address and the board's access code (`CHESS_ACCESS_CODE` in `~/.config/duen-chess/relay.env`) until a player connects and starts a game. While Online is selected the screen heartbeats the game server every second; without it the website refuses to play. The first heartbeat tells the server the board is fresh, so an old unfinished game is never shown. During the game the screen mirrors the website's game and the gantry/camera pipeline; **End Game** (tapped twice) ends it from the board, and the pieces go home. When a game ends for any reason, including the website's clock running out, the gantry resets the board, the camera checks it, and the screen returns to the address and code with the last result. The logic lives in `pi_online.py`; the website server drives the gantry itself while Online is selected, so the touch app closes its own connection to it then.
+
 ### Open the touch screen automatically when the Pi starts
 
 On the Pi, use Raspberry Pi OS **Desktop** with the **labwc** window manager. In **Preferences → Control Centre → System**, set **Boot** to **To desktop** and turn on **Desktop Auto Login**. In the **Display** tab, turn off **Screen Blanking** if the menu should stay visible while idle. Raspberry Pi's [configuration guide](https://www.raspberrypi.com/documentation/computers/configuration.html) describes these settings. Test `pi_touch.py` manually first, then from this project directory run:
