@@ -41,7 +41,7 @@ def corners():
 class Board:
     def __init__(self, port: str):
         self.port = serial.Serial(port, 115200, timeout=0.05)
-        time.sleep(0.5)
+        time.sleep(3.0)   # a freshly plugged-in board is still booting; opening the port may also reset it
         self.port.reset_input_buffer()
 
     def send(self, line: str, timeout: float = 2.0) -> str:
@@ -63,7 +63,14 @@ class Board:
         raise RuntimeError(f"no answer to {line!r} in {timeout:.0f} s (is the board on USB and powered?)")
 
     def status(self) -> str:
-        return self.send("?")
+        for attempt in range(3):
+            try:
+                return self.send("?")
+            except RuntimeError:
+                if attempt == 2:
+                    raise
+                time.sleep(1.0)
+        raise AssertionError
 
     def wait_idle(self, timeout: float) -> str:
         end = time.monotonic() + timeout
@@ -151,6 +158,11 @@ def main() -> int:
         board.send("!")
         print("\nStopped. The board is holding: run `bash home.sh manual` with the carriage back on a1 before the next move.")
         return 130
+    except serial.SerialException:
+        print("\nThe board dropped off USB in the middle of the tour. That is its power, not the firmware: a motor"
+              " stalling against the frame (wrong direction, or a loose wire) drags the supply down and the ESP32"
+              " resets. Unplug it, plug it back in, check the direction with direction.sh, then run the tour again.")
+        return 1
     except RuntimeError as problem:
         print(f"\n{problem}")
         try:

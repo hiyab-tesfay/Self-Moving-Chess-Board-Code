@@ -12,7 +12,7 @@
 #define PIN_X_DIR 18
 #define PIN_X_STEP 19
 #define PIN_X_EN 21
-#define PIN_Y_DIR 27    // bench wiring of 2026-11-05 (Zain's prototype had it on 22)
+#define PIN_Y_DIR 22    // bench wiring of 2026-11-05, second pass (it sat on 27 for an hour; Zain's prototype also used 22)
 #define PIN_Y_STEP 25
 #define PIN_Y_EN 26
 #define PIN_MAGNET 32   // gate of the MOSFET (or relay input) that switches the 12 V electromagnet (was 27 until the
