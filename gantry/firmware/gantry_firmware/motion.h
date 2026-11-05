@@ -109,6 +109,17 @@ class Motion {
     return OK;
   }
 
+  // $HM, manual homing for a frame without switches: someone has pushed the carriage into the
+  // bottom-left corner by hand (motors unpowered), and this spot is declared 0,0 and homed.
+  int home_here() {
+    if (state_ == RUN || state_ == HOME) return ERR_BUSY;
+    motors_from_cartesian(0, 0, motor_[0], motor_[1]);
+    homed_ = true;
+    state_ = IDLE;
+    alarm_ = "";
+    return OK;
+  }
+
   // ALARM/HOLD -> IDLE at the current count. After power-up that count is 0, so you can only
   // move in the positive direction until $H has found the real zero.
   void unlock() {

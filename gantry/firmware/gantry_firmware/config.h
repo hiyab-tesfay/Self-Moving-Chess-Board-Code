@@ -20,8 +20,8 @@
 #define PIN_SERVO 12    // signal wire of the MG90 that pushes the magnet up to the board and pulls it back, as wired on
                         // the bench on 2026-11-05. GPIO 12 is a strapping pin (MTDI): the servo's signal input does not
                         // pull it, so boot is unaffected, but never tie it high. -1 = no servo: the magnet stays at the board top.
-#define PIN_X_MIN 34    // homing switches at the X=0 and Y=0 ends; -1 when there are none (bump homing)
-#define PIN_Y_MIN 35    // GPIO 34/35 are input-only on the ESP32, so they need external pull-ups
+#define PIN_X_MIN -1    // homing switches at the X=0 and Y=0 ends; -1 when there are none (bump homing). The bench of
+#define PIN_Y_MIN -1    // 2026-11-05 has none. With switches, use GPIO 34/35 (input-only: they need external pull-ups).
 // DRV8825 microstep inputs M0 M1 M2. Left unconnected they read LOW = full steps, and the
 // motion would be 8x too long for MICROSTEPS 8. Either tie them to 3.3 V by hand for 1/8
 // (M0 and M1 high, M2 low) or wire them to GPIOs here and the sketch sets them.

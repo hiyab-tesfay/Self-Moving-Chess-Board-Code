@@ -26,6 +26,7 @@
 //                       |Servo:up/down with a servo; |Prog:3/12 while a sequence runs; |Host:lost after
 //                       the host went quiet during a sequence, until $X or $H)
 //   $H                  home both axes; the position is then 0,0 (magnet off and arm down first)
+//   $HM                 manual home: the carriage was pushed into the bottom-left corner by hand; call this 0,0, nothing moves
 //   $X                  unlock after power-up, a hold or an alarm (magnet off, arm down)
 //   G0 X.. Y..          rapid move in mm;  G1 X.. Y.. F..  at F mm/min
 //   G4 P..              dwell P seconds;   G92 X.. Y..  call this spot these coordinates
@@ -238,6 +239,14 @@ class Protocol {
       set_servo_up(false);
       host_lost_ = false;
       reply(m_.home());
+      return;
+    }
+    if (!strcmp(line, "$HM")) {
+      // Manual homing: the carriage was pushed into the bottom-left corner by hand. Nothing moves.
+      set_magnet(false, now_us);
+      set_servo_up(false);
+      host_lost_ = false;
+      reply(m_.home_here());
       return;
     }
     if (!strcmp(line, "$X")) {
