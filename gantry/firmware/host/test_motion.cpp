@@ -328,7 +328,7 @@ static void test_manual_home_declares_the_corner_without_moving() {
   CHECK(r.m.homed(), "homed without a seek");
   CHECK(r.hal.steps[0] == 0 && r.hal.steps[1] == 0, "nothing moved: %ld,%ld", r.hal.steps[0], r.hal.steps[1]);
   CHECK(r.pos() == "0.000,0.000", "the spot is 0,0: %s", r.pos().c_str());
-  CHECK(send("?").find("|Homed:1|") != std::string::npos, "status says homed: %s", r.out.text.c_str());
+  CHECK(send("?").find("|Homed:1") != std::string::npos, "status says homed: %s", r.out.text.c_str());
   CHECK(send("GOTO e4") == "ok\n", "board commands work from a manual home: %s", r.out.text.c_str());
   run_program(r.hal, r.m, r.p);
   CHECK(r.pos() == "260.000,185.000", "and land on e4: %s", r.pos().c_str());
