@@ -7,7 +7,7 @@ import numpy as np
 from board_vision import (Calibration, calibrate, legacy_square_scores, observe,
                           observe_temporal, square_scores)
 from move_observation import occupied_squares
-from pi_touch import PhotoAdjustments, TouchSession, calibrate_setup_photo, MoveRejected
+from pi_touch import CalibrationFlow, PhotoAdjustments, TouchSession, calibrate_setup_photo, MoveRejected
 
 
 CORNERS = [[0, 0], [799, 0], [799, 799], [0, 799]]
@@ -42,6 +42,21 @@ def under_light(photo: np.ndarray, *, offset: float, slope: float,
 
 
 class LightingCorrectionTest(unittest.TestCase):
+    def test_default_setup_orientation_rotates_previous_mapping_180_degrees(self):
+        board = chess.Board()
+        flow = CalibrationFlow(setup_only=True)
+        setup = cv2.rotate(board_photo(board), cv2.ROTATE_90_CLOCKWISE)
+        calibration, reference = calibrate_setup_photo(
+            setup, CORNERS, PhotoAdjustments(), rotation=flow.rotation)
+        session = TouchSession("beginner")
+        session.phase = "human"
+        board.push_uci("e2e4")
+        moved = cv2.rotate(board_photo(board), cv2.ROTATE_90_CLOCKWISE)
+        observation, _ = observe_temporal(reference, moved, calibration, CORNERS)
+        self.assertEqual(calibration.rotation, "ccw")
+        self.assertEqual(observation.changed, ("e2", "e4"))
+        self.assertEqual(session.scan_human_temporal(observation), "e4")
+
     def test_white_home_row_on_photo_right_edge(self):
         board = chess.Board()
         setup = cv2.rotate(board_photo(board), cv2.ROTATE_90_COUNTERCLOCKWISE)

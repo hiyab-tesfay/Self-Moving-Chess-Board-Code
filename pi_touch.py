@@ -344,7 +344,7 @@ class CalibrationFlow:
 
     def __init__(self, *, setup_only: bool = False) -> None:
         self.setup_only = setup_only
-        self.rotation = "cw" if setup_only else "none"
+        self.rotation = "ccw" if setup_only else "none"
         self.stage = "setup_only" if setup_only else "empty"
         self.empty_photo: np.ndarray | None = None
         self.starting_photo: np.ndarray | None = None
@@ -431,11 +431,17 @@ def calibrate_photos(empty: np.ndarray, starting: np.ndarray,
     return calibration, reference
 
 
+def aligned_setup_photo(starting: np.ndarray, corners: list[list[float]],
+                        adjustments: PhotoAdjustments, rotation: str) -> np.ndarray:
+    """Show the same adjusted and oriented image that move detection will use."""
+    return rotate_board(warp_board(adjust_photo(starting, adjustments), corners), rotation)
+
+
 def calibrate_setup_photo(starting: np.ndarray, corners: list[list[float]],
                           adjustments: PhotoAdjustments,
                           rotation: str = "none") -> tuple[Calibration, np.ndarray]:
     """Use the confirmed starting position as the first move reference."""
-    aligned = rotate_board(warp_board(adjust_photo(starting, adjustments), corners), rotation)
+    aligned = aligned_setup_photo(starting, corners, adjustments, rotation)
     return Calibration(corners, (0.0, 0.0), (0.0, 0.0), rotation,
                        scoring="temporal_v1"), aligned
 
@@ -832,7 +838,7 @@ class TouchApp:
         flow = self.calibration_flow
         assert flow is not None
         if flow.stage == "setup_only":
-            self.heading("Starting board", "Set up all 32 pieces. White's back row may be on the right of the camera photo.")
+            self.heading("Starting board", "Set up all 32 pieces. The preview will show which edge the camera treats as White's side.")
             self.button("Take Setup Photo", self.capture_starting, accent=True)
             if self.saved_calibration_available():
                 self.button("Use Saved Calibration", self.use_saved_calibration)
@@ -864,11 +870,14 @@ class TouchApp:
             self.button("Retake Setup Photo", self.retake_starting)
             self.button("Cancel Calibration", self.cancel_calibration)
         elif flow.stage == "ready":
-            self.heading("Review setup photo", "Check the a1 and h1 labels on White's back row. Edits apply to later scans.")
+            self.heading("Review setup photo", "White must be at the bottom of this view: a1 left, h1 right.")
             self.render_photo_adjustments()
             if flow.setup_only:
-                a1_corner = dict(flow.A1_CORNERS)[flow.rotation]
-                self.button(f"a1 in photo: {a1_corner} · Change", self.cycle_setup_rotation, short=True)
+                self.button("Rotate View 90°", self.cycle_setup_rotation, short=True)
+                tk.Label(self.panel, text="Queens: d1 / d8 · Kings: e1 / e8",
+                         bg=self.PANEL, fg=self.GOLD,
+                         font=("DejaVu Sans", 9 if self.compact else 11, "bold"),
+                         wraplength=self.panel_width - 30).pack(fill="x", pady=(2, 4))
             self.button("Confirm Starting Board" if flow.setup_only else "Check Board",
                         self.finish_calibration, accent=True, short=True)
             self.button("Redo Setup Corners", self.redo_starting_corners, short=True)
@@ -980,7 +989,7 @@ class TouchApp:
         if flow is None or flow.stage != "ready" or not flow.setup_only:
             return
         flow.cycle_rotation()
-        self.say("Check that a1 and h1 label the ends of White's back row in the photo.")
+        self.say("Rotate until White's back row is at the bottom, with a1 left and h1 right.")
         self.render()
 
     def retake_starting(self) -> None:
@@ -1283,7 +1292,7 @@ class TouchApp:
             photo, detected_corners, reused_corners = value
             flow.accept_starting(photo, detected_corners, reused_corners=reused_corners)
             if flow.stage == "ready":
-                self.say("Review all 32 starting pieces, adjust the image, then confirm the board.")
+                self.say("Check White is at the bottom of the aligned view, then confirm the board.")
             else:
                 self.say("Tap the outer top-left corner in the setup photo.")
         elif tag == "cal_finish":
@@ -1541,37 +1550,53 @@ class TouchApp:
             photo = self.scan_photo
             points = self.scan_corners
         assert photo is not None
-        height, width = photo.shape[:2]
+        aligned_preview = None
+        if flow is not None and flow.setup_only and flow.stage == "ready" and len(points) == 4:
+            try:
+                aligned_preview = aligned_setup_photo(
+                    photo, points, self.photo_adjustments, flow.rotation)
+            except (VisionError, cv2.error):
+                pass
+        shown_photo = aligned_preview if aligned_preview is not None else photo
+        height, width = shown_photo.shape[:2]
         available_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 400
         available_height = canvas.winfo_height() if canvas.winfo_height() > 1 else 360
         scale = min((available_width - 20) / width, (available_height - 20) / height)
         display_width = max(1, round(width * scale))
         display_height = max(1, round(height * scale))
-        resized = adjust_photo(
-            cv2.resize(photo, (display_width, display_height), interpolation=cv2.INTER_AREA),
-            self.photo_adjustments)
+        resized = cv2.resize(shown_photo, (display_width, display_height),
+                             interpolation=cv2.INTER_AREA)
+        if aligned_preview is None:
+            resized = adjust_photo(resized, self.photo_adjustments)
         ok, encoded = cv2.imencode(".png", resized)
         if not ok:
-            raise VisionError("Could not display the empty-board photo.")
+            raise VisionError("Could not display the board photo.")
         self.preview_photo = tk.PhotoImage(data=base64.b64encode(encoded.tobytes()).decode("ascii"))
         left = (available_width - display_width) / 2
         top = (available_height - display_height) / 2
         canvas.create_image(left, top, image=self.preview_photo, anchor="nw")
-        self.preview_geometry = (left, top, scale)
-        for index, (x, y) in enumerate(points):
-            px, py = left + x * scale, top + y * scale
-            canvas.create_oval(px - 7, py - 7, px + 7, py + 7,
-                               fill=self.GOLD, outline=self.BG, width=2)
-            canvas.create_text(px + 12, py - 12, text=str(index + 1), fill=self.GOLD,
-                               font=("DejaVu Sans", 12, "bold"))
-        if flow is not None and flow.setup_only and flow.stage == "ready" and len(points) == 4:
+        self.preview_geometry = None if aligned_preview is not None else (left, top, scale)
+        if aligned_preview is None:
+            for index, (x, y) in enumerate(points):
+                px, py = left + x * scale, top + y * scale
+                canvas.create_oval(px - 7, py - 7, px + 7, py + 7,
+                                   fill=self.GOLD, outline=self.BG, width=2)
+                canvas.create_text(px + 12, py - 12, text=str(index + 1), fill=self.GOLD,
+                                   font=("DejaVu Sans", 12, "bold"))
+        if aligned_preview is not None:
             for square in ("a1", "h1"):
-                x, y = photo_square_center(square, points, flow.rotation)
+                index = chess.parse_square(square)
+                x = (chess.square_file(index) + 0.5) * 100
+                y = (7 - chess.square_rank(index) + 0.5) * 100
                 px, py = left + x * scale, top + y * scale
                 canvas.create_rectangle(px - 21, py - 14, px + 21, py + 14,
                                         fill=self.BG, outline=self.GOLD, width=2)
                 canvas.create_text(px, py, text=square, fill=self.GOLD,
                                    font=("DejaVu Sans", 12, "bold"))
+        elif flow is not None and flow.setup_only and flow.stage == "ready":
+            canvas.create_text(left + 12, top + 18,
+                               text="Corners need adjustment", anchor="w",
+                               fill=self.RED, font=("DejaVu Sans", 12, "bold"))
         if flow is None and self.scan_feedback is not None:
             feedback = self.scan_feedback
             canvas.create_rectangle(left, top, left + display_width, top + 48,

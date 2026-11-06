@@ -193,7 +193,7 @@ class CalibrationFlowTest(unittest.TestCase):
     def test_setup_only_flow_never_requires_empty_board(self):
         flow = CalibrationFlow(setup_only=True)
         self.assertEqual(flow.stage, "setup_only")
-        self.assertEqual(flow.rotation, "cw")
+        self.assertEqual(flow.rotation, "ccw")
         photo = np.zeros((800, 800, 3), dtype=np.uint8)
         corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
         flow.accept_starting(photo, corners)
@@ -201,18 +201,18 @@ class CalibrationFlowTest(unittest.TestCase):
         self.assertIsNone(flow.empty_photo)
         a1 = photo_square_center("a1", corners, flow.rotation)
         h1 = photo_square_center("h1", corners, flow.rotation)
-        self.assertGreater(a1[0], 700)
-        self.assertGreater(h1[0], 700)
-        self.assertGreater(a1[1], h1[1])
-        flow.cycle_rotation()
-        self.assertEqual(flow.rotation, "180")
-        a1 = photo_square_center("a1", corners, flow.rotation)
-        h1 = photo_square_center("h1", corners, flow.rotation)
-        self.assertGreater(a1[0], 700)
-        self.assertGreater(h1[0], 0)
+        self.assertLess(a1[0], 100)
         self.assertLess(h1[0], 100)
         self.assertLess(a1[1], 100)
-        self.assertLess(h1[1], 100)
+        self.assertGreater(h1[1], 700)
+        flow.cycle_rotation()
+        self.assertEqual(flow.rotation, "none")
+        a1 = photo_square_center("a1", corners, flow.rotation)
+        h1 = photo_square_center("h1", corners, flow.rotation)
+        self.assertLess(a1[0], 100)
+        self.assertGreater(h1[0], 700)
+        self.assertGreater(a1[1], 700)
+        self.assertGreater(h1[1], 700)
         flow.retake_starting()
         self.assertEqual(flow.stage, "setup_only")
 
@@ -301,6 +301,25 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_setup_preview_places_a1_and_h1_along_bottom(self):
+        flow = CalibrationFlow(setup_only=True)
+        corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+        flow.accept_starting(np.zeros((800, 800, 3), dtype=np.uint8), corners)
+        app = TouchApp.__new__(TouchApp)
+        app.calibration_flow = flow
+        app.photo_adjustments = PhotoAdjustments()
+        app.board_canvas = Mock()
+        app.board_canvas.winfo_width.return_value = 800
+        app.board_canvas.winfo_height.return_value = 800
+        with patch("pi_touch.tk.PhotoImage"):
+            app.draw_photo_preview()
+        labels = {call.kwargs.get("text"): call.args[:2]
+                  for call in app.board_canvas.create_text.call_args_list}
+        self.assertLess(labels["a1"][0], labels["h1"][0])
+        self.assertAlmostEqual(labels["a1"][1], labels["h1"][1])
+        self.assertGreater(labels["a1"][1], 700)
+        self.assertIsNone(app.preview_geometry)
+
     def test_temporal_capture_feedback_does_not_call_destination_empty(self):
         board = chess.Board("4k3/8/8/4p3/3P4/8/8/4K3 b - - 0 1")
         expected = chess.Move.from_uci("e5d4")
