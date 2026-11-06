@@ -241,7 +241,12 @@ def _temporal_as_occupancy(board: chess.Board,
 def temporal_move_feedback(board: chess.Board, observation: TemporalObservation,
                            reason: str) -> ScanFeedback:
     if not observation.changed:
-        return ScanFeedback("NO CLEAR MOVE", "No clear square changes were found. Check the board and rescan.")
+        strongest = sorted(observation.scores.items(), key=lambda item: -item[1])[:4]
+        detail = "No clear square changes were found. Check the photo corners and rescan."
+        if strongest:
+            detail += " Strongest changes: " + ", ".join(
+                f"{square} ({score:.0f})" for square, score in strongest) + "."
+        return ScanFeedback("NO CLEAR MOVE", detail)
     if len(observation.changed) > 8:
         return ScanFeedback("PHOTO UNCLEAR", "Many squares changed. Check the photo corners and lighting.")
     before = occupied_squares(board)
@@ -482,12 +487,13 @@ class CalibrationFlow:
 def calibrate_photos(empty: np.ndarray, starting: np.ndarray,
                      empty_corners: list[list[float]],
                      starting_corners: list[list[float]],
-                     adjustments: PhotoAdjustments = PhotoAdjustments()):
+                     adjustments: PhotoAdjustments = PhotoAdjustments(),
+                     rotation: str = "none"):
     """Build and verify calibration before writing it to disk."""
     adjusted_starting = adjust_photo(starting, adjustments)
     calibration, reference, _scores = calibrate(
         adjust_photo(empty, adjustments), adjusted_starting, empty_corners,
-        starting_corners=starting_corners)
+        rotation, starting_corners=starting_corners)
     observation, _aligned = observe(reference, adjusted_starting, calibration, starting_corners)
     if observation.uncertain or observation.occupied != occupied_squares(chess.Board()):
         raise VisionError("Starting board could not be verified. Check the pieces, corners, and lighting.")
@@ -898,7 +904,7 @@ class TouchApp:
             action = ("Correct Move & Verify" if feedback.title == "COMPUTER MOVE MISMATCH" else
                       "Fix Board & Scan Again" if feedback.title in
                       ("ILLEGAL MOVE", "MULTIPLE PIECES CHANGED") else
-                      "Make Move & Rescan" if feedback.title == "NO CLEAR MOVE" else "Retake Photo")
+                      "Check Move & Rescan" if feedback.title == "NO CLEAR MOVE" else "Retake Photo")
             self.button(action, self.retake_scan, accent=True)
             self.button("Adjust Photo Corners", self.redo_scan_corners, short=True)
             self.button("End Game", self.end_game, short=True)
@@ -922,6 +928,7 @@ class TouchApp:
         if flow.stage == "setup_only":
             self.heading("Starting board", "Set up all 32 pieces. The preview will show which edge the camera treats as White's side.")
             self.button("Take Setup Photo", self.capture_starting, accent=True)
+            self.button("Calibrate With Empty Board", self.start_empty_calibration, short=True)
             if self.saved_calibration_available():
                 self.button("Use Saved Calibration", self.use_saved_calibration)
             if not self.startup_calibration:
@@ -929,6 +936,7 @@ class TouchApp:
         elif flow.stage == "empty":
             self.heading("1. Empty board", "Remove every piece and take one empty-board photo.")
             self.button("Take Empty Photo", self.capture_empty, accent=True)
+            self.button("Use Setup Photo Only", self.start_calibration, short=True)
             if self.saved_calibration_available():
                 self.button("Use Saved Calibration", self.use_saved_calibration)
             if not self.startup_calibration:
@@ -940,7 +948,7 @@ class TouchApp:
             self.button("Retake Empty Photo", self.retake_empty)
             self.button("Cancel Calibration", self.cancel_calibration)
         elif flow.stage == "starting":
-            self.heading("3. Starting pieces", "Place all 32 pieces, with White at the bottom. You can edit this photo after capture.")
+            self.heading("3. Starting pieces", "Place all 32 pieces. You can rotate and adjust the setup photo after capture.")
             self.button("Take Setup Photo", self.capture_starting, accent=True)
             if not flow.empty_auto_corners:
                 self.button("Redo Empty Corners", self.redo_empty_corners)
@@ -948,25 +956,24 @@ class TouchApp:
         elif flow.stage == "starting_corners":
             next_corner = flow.CORNER_NAMES[len(flow.starting_corners)]
             self.heading("Setup photo corners", f"White should be at the bottom. Tap the outer {next_corner} board corner.")
-            if flow.setup_only:
-                self.render_rotation_controls()
+            self.render_rotation_controls()
             self.button("Undo Corner", self.undo_corner)
             self.button("Retake Setup Photo", self.retake_starting)
             self.button("Cancel Calibration", self.cancel_calibration)
         elif flow.stage == "ready":
             self.heading("Review setup photo", "White must be at the bottom of this view: a1 left, h1 right.")
             self.render_photo_adjustments()
+            side = flow.white_side_in_preview()
+            if side is not None:
+                message = ("WHITE APPEARS AT THE BOTTOM" if side == "bottom" else
+                           f"WHITE APPEARS ON THE {side.upper()}")
+                tk.Label(self.panel, text=message,
+                         bg=self.GREEN if side == "bottom" else "#8a2f32",
+                         fg=self.BG if side == "bottom" else self.TEXT,
+                         font=("DejaVu Sans", 9 if self.compact else 11, "bold"),
+                         wraplength=self.panel_width - 30).pack(fill="x", pady=(2, 4))
+            self.render_rotation_controls()
             if flow.setup_only:
-                side = flow.white_side_in_preview()
-                if side is not None:
-                    message = ("WHITE APPEARS AT THE BOTTOM" if side == "bottom" else
-                               f"WHITE APPEARS ON THE {side.upper()}")
-                    tk.Label(self.panel, text=message,
-                             bg=self.GREEN if side == "bottom" else "#8a2f32",
-                             fg=self.BG if side == "bottom" else self.TEXT,
-                             font=("DejaVu Sans", 9 if self.compact else 11, "bold"),
-                             wraplength=self.panel_width - 30).pack(fill="x", pady=(2, 4))
-                self.render_rotation_controls()
                 tk.Label(self.panel, text="Queens: d1 / d8 · Kings: e1 / e8",
                          bg=self.PANEL, fg=self.GOLD,
                          font=("DejaVu Sans", 9 if self.compact else 11, "bold"),
@@ -1014,7 +1021,9 @@ class TouchApp:
             return
         self.photo_adjustments = settings
         self.draw_board()
-        self.say("Preview updated. Confirm the starting position when the pieces stand out.")
+        self.say("Preview updated. Confirm the starting position when the pieces stand out." if
+                 self.calibration_flow.setup_only else
+                 "Preview updated. Tap Check Board when the pieces stand out.")
 
     def saved_calibration_available(self) -> bool:
         directory = self.args.calibration
@@ -1046,6 +1055,16 @@ class TouchApp:
         self.preview_photo = None
         self.preview_geometry = None
         self.say("Set up the starting position, then take one setup photo.")
+        self.render()
+
+    def start_empty_calibration(self) -> None:
+        if self.session is not None or self.busy:
+            return
+        self.generation += 1
+        self.calibration_flow = CalibrationFlow()
+        self.preview_photo = None
+        self.preview_geometry = None
+        self.say("Remove all pieces, then take an empty-board photo.")
         self.render()
 
     def cancel_calibration(self) -> None:
@@ -1089,7 +1108,7 @@ class TouchApp:
 
     def cycle_setup_rotation(self) -> None:
         flow = self.calibration_flow
-        if flow is None or flow.stage not in ("starting_corners", "ready") or not flow.setup_only:
+        if flow is None or flow.stage not in ("starting_corners", "ready"):
             return
         if flow.stage == "starting_corners":
             flow.starting_corners = []
@@ -1101,7 +1120,7 @@ class TouchApp:
 
     def suggest_starting_orientation(self) -> bool:
         flow = self.calibration_flow
-        if (flow is None or not flow.setup_only or flow.stage != "ready" or
+        if (flow is None or flow.stage != "ready" or
                 flow.starting_photo is None or len(flow.starting_corners) != 4):
             return False
         try:
@@ -1117,7 +1136,7 @@ class TouchApp:
 
     def flip_setup_rotation(self) -> None:
         flow = self.calibration_flow
-        if flow is None or flow.stage not in ("starting_corners", "ready") or not flow.setup_only:
+        if flow is None or flow.stage not in ("starting_corners", "ready"):
             return
         if flow.stage == "starting_corners":
             flow.starting_corners = []
@@ -1201,7 +1220,7 @@ class TouchApp:
             empty = flow.empty_photo
             empty_corners = [point.copy() for point in flow.empty_corners]
             self.submit("cal_finish", lambda: calibrate_photos(
-                empty, starting, empty_corners, starting_corners, adjustments))
+                empty, starting, empty_corners, starting_corners, adjustments, flow.rotation))
 
     def continue_after_calibration(self) -> None:
         self.startup_calibration = False
@@ -1352,7 +1371,10 @@ class TouchApp:
                         self.say("Calibration missing or unreadable. Tap Calibrate Board.", self.RED)
                     elif tag == "cal_finish" and isinstance(error, VisionError):
                         print(f"Calibration check failed: {error}")
-                        self.say("Calibration check failed. Redo the setup photo's corners or retake it.",
+                        flow = self.calibration_flow
+                        self.say(("Calibration failed. Redo the setup photo's corners or retake it." if
+                                  flow is None or flow.setup_only else
+                                  "Calibration failed. Check both photos' corners, lighting, and pieces."),
                                  self.RED)
                     else:
                         self.say(f"Error: {error}", self.RED)
@@ -1643,13 +1665,13 @@ class TouchApp:
             return
         left, top, scale = self.preview_geometry
         shown_photo = (rotate_board(photo, flow.rotation)
-                       if flow.setup_only and flow.stage == "starting_corners" else photo)
+                       if flow.stage == "starting_corners" else photo)
         height, width = shown_photo.shape[:2]
         x = (event.x - left) / scale
         y = (event.y - top) / scale
         if not (0 <= x < width and 0 <= y < height):
             return
-        selecting_setup = flow.setup_only and flow.stage == "starting_corners"
+        selecting_setup = flow.stage == "starting_corners"
         flow.add_corner(x, y)
         if selecting_setup and flow.stage == "ready":
             raw_height, raw_width = photo.shape[:2]
@@ -1658,11 +1680,8 @@ class TouchApp:
         if flow.stage == "starting":
             self.say("Empty-board corners set. Place all starting pieces, then take the setup photo.")
         elif flow.stage == "ready":
-            if flow.setup_only:
-                self.suggest_starting_orientation()
-                self.say("Check White is at the bottom of the aligned view, then confirm the board.")
-            else:
-                self.say("Adjust the captured setup photo, then tap Check Board.")
+            self.suggest_starting_orientation()
+            self.say("Check White is at the bottom of the aligned view, then confirm the board.")
         else:
             points = flow.empty_corners if flow.stage == "empty_corners" else flow.starting_corners
             self.say(f"Tap the outer {flow.CORNER_NAMES[len(points)]} corner.")
@@ -1707,7 +1726,7 @@ class TouchApp:
         assert photo is not None
         raw_height, raw_width = photo.shape[:2]
         aligned_preview = None
-        if flow is not None and flow.setup_only and flow.stage == "ready" and len(points) == 4:
+        if flow is not None and flow.stage == "ready" and len(points) == 4:
             try:
                 aligned_preview = aligned_setup_photo(
                     photo, points, self.photo_adjustments, flow.rotation)
@@ -1715,7 +1734,7 @@ class TouchApp:
                 pass
         if aligned_preview is not None:
             shown_photo = aligned_preview
-        elif flow is not None and flow.setup_only and flow.stage == "starting_corners":
+        elif flow is not None and flow.stage == "starting_corners":
             shown_photo = rotate_board(photo, flow.rotation)
         elif flow is None:
             rotation = self.calibration.rotation if self.calibration is not None else "none"
@@ -1760,7 +1779,7 @@ class TouchApp:
                                         fill=self.BG, outline=self.GOLD, width=2)
                 canvas.create_text(px, py, text=square, fill=self.GOLD,
                                    font=("DejaVu Sans", 12, "bold"))
-        elif flow is not None and flow.setup_only and flow.stage == "ready":
+        elif flow is not None and flow.stage == "ready":
             canvas.create_text(left + 12, top + 18,
                                text="Corners need adjustment", anchor="w",
                                fill=self.RED, font=("DejaVu Sans", 12, "bold"))

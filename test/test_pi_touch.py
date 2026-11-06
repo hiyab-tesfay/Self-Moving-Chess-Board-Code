@@ -17,7 +17,7 @@ from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp,
                       adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
                       reusable_corners, should_retry_scan, temporal_computer_move_feedback,
                       photo_square_center, corners_from_rotated_preview,
-                      corners_to_rotated_preview)
+                      corners_to_rotated_preview, temporal_move_feedback)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -326,6 +326,28 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_user_can_choose_empty_board_calibration(self):
+        app = TouchApp.__new__(TouchApp)
+        app.session = None
+        app.busy = False
+        app.generation = 0
+        app.say = Mock()
+        app.render = Mock()
+        app.start_empty_calibration()
+        self.assertEqual(app.calibration_flow.stage, "empty")
+        app.start_calibration()
+        self.assertEqual(app.calibration_flow.stage, "setup_only")
+
+    def test_no_clear_move_feedback_names_strongest_squares(self):
+        scores = {square: 0.0 for square in chess.SQUARE_NAMES}
+        scores["e2"] = 11.0
+        scores["e4"] = 9.0
+        feedback = temporal_move_feedback(
+            chess.Board(), TemporalObservation((), scores), "No clear move detected.")
+        self.assertEqual(feedback.title, "NO CLEAR MOVE")
+        self.assertIn("e2 (11)", feedback.detail)
+        self.assertIn("e4 (9)", feedback.detail)
+
     def test_check_photo_uses_saved_orientation(self):
         photo = np.zeros((800, 800, 3), dtype=np.uint8)
         photo[:100, :100] = (0, 0, 255)

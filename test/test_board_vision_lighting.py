@@ -8,7 +8,7 @@ from board_vision import (Calibration, calibrate, legacy_square_scores, observe,
                           observe_temporal, square_scores)
 from move_observation import occupied_squares
 from pi_touch import (CalibrationFlow, PhotoAdjustments, TouchSession, calibrate_setup_photo,
-                      suggest_setup_rotation, MoveRejected)
+                      calibrate_photos, suggest_setup_rotation, MoveRejected)
 
 
 CORNERS = [[0, 0], [799, 0], [799, 799], [0, 799]]
@@ -43,6 +43,15 @@ def under_light(photo: np.ndarray, *, offset: float, slope: float,
 
 
 class LightingCorrectionTest(unittest.TestCase):
+    def test_optional_empty_board_calibration_supports_rotated_camera(self):
+        empty = cv2.rotate(board_photo(), cv2.ROTATE_180)
+        starting = cv2.rotate(board_photo(chess.Board()), cv2.ROTATE_180)
+        calibration, reference = calibrate_photos(
+            empty, starting, CORNERS, CORNERS, PhotoAdjustments(), "180")
+        self.assertEqual(calibration.rotation, "180")
+        observation, _ = observe(reference, starting, calibration, CORNERS)
+        self.assertEqual(observation.occupied, occupied_squares(chess.Board()))
+
     def test_setup_photo_suggests_white_at_bottom(self):
         canonical = board_photo(chess.Board())
         settings = PhotoAdjustments()
