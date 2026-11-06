@@ -4,31 +4,35 @@
 #error "Select ESP32 Dev Module for the classic ESP32-WROOM-32."
 #endif
 
-// Motor 1 moves X. Motor 2 moves Y.
-constexpr int DIR_X  = 18;
-constexpr int STEP_X = 19;
-constexpr int EN_X   = 21;
+// Motor 2 moves horizontally.
+constexpr int DIR_X  = 22;
+constexpr int STEP_X = 25;
+constexpr int EN_X   = 26;
 
-constexpr int DIR_Y  = 22;
-constexpr int STEP_Y = 25;
-constexpr int EN_Y   = 26;
+// Motor 1 moves vertically.
+constexpr int DIR_Y  = 18;
+constexpr int STEP_Y = 19;
+constexpr int EN_Y   = 21;
 
-// Change either value to LOW if that axis moves backward.
-constexpr int X_RIGHT = HIGH;
+constexpr int X_LEFT  = HIGH;
+constexpr int X_RIGHT = LOW;
 constexpr int Y_UP    = HIGH;
+constexpr int Y_DOWN  = LOW;
 
-constexpr int STEPS_PER_SQUARE = 400;
-constexpr int STEPS_PER_SIDE = 7 * STEPS_PER_SQUARE;
+// Tune each axis after measuring its travel.
+constexpr int X_STEPS_PER_SQUARE = 50;
+constexpr int Y_STEPS_PER_SQUARE = 50;
+constexpr int SQUARES_PER_SIDE = 7;
 
 constexpr unsigned int STEP_HALF_PERIOD_US = 1500;
 constexpr unsigned long START_DELAY_MS = 3000;
 constexpr unsigned long CORNER_PAUSE_MS = 750;
 
-void moveSide(int dirPin, int stepPin, int direction) {
+void moveSide(int dirPin, int stepPin, int direction, int pulseCount) {
   digitalWrite(dirPin, direction);
   delayMicroseconds(5);
 
-  for (int step = 0; step < STEPS_PER_SIDE; ++step) {
+  for (int pulse = 0; pulse < pulseCount; ++pulse) {
     digitalWrite(stepPin, HIGH);
     delayMicroseconds(STEP_HALF_PERIOD_US);
     digitalWrite(stepPin, LOW);
@@ -60,8 +64,11 @@ void setup() {
 }
 
 void loop() {
-  moveSide(DIR_X, STEP_X, !X_RIGHT);  // Left:  h1 -> a1
-  moveSide(DIR_Y, STEP_Y, Y_UP);      // Up:    a1 -> a8
-  moveSide(DIR_X, STEP_X, X_RIGHT);   // Right: a8 -> h8
-  moveSide(DIR_Y, STEP_Y, !Y_UP);     // Down:  h8 -> h1
+  const int horizontalPulses = SQUARES_PER_SIDE * X_STEPS_PER_SQUARE;
+  const int verticalPulses = SQUARES_PER_SIDE * Y_STEPS_PER_SQUARE;
+
+  moveSide(DIR_X, STEP_X, X_LEFT,  horizontalPulses);
+  moveSide(DIR_Y, STEP_Y, Y_UP,    verticalPulses);
+  moveSide(DIR_X, STEP_X, X_RIGHT, horizontalPulses);
+  moveSide(DIR_Y, STEP_Y, Y_DOWN,  verticalPulses);
 }
