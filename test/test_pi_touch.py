@@ -1,3 +1,4 @@
+import base64
 import unittest
 import tempfile
 import queue
@@ -15,7 +16,7 @@ from move_observation import occupied_squares
 from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp, TouchSession,
                       adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
                       reusable_corners, should_retry_scan, temporal_computer_move_feedback,
-                      photo_square_center)
+                      photo_square_center, corners_from_rotated_preview)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -193,28 +194,46 @@ class CalibrationFlowTest(unittest.TestCase):
     def test_setup_only_flow_never_requires_empty_board(self):
         flow = CalibrationFlow(setup_only=True)
         self.assertEqual(flow.stage, "setup_only")
-        self.assertEqual(flow.rotation, "ccw")
+        self.assertEqual(flow.rotation, "180")
         photo = np.zeros((800, 800, 3), dtype=np.uint8)
         corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
         flow.accept_starting(photo, corners)
         self.assertEqual(flow.stage, "ready")
         self.assertIsNone(flow.empty_photo)
+        flow.suggested_rotation = "cw"
+        self.assertEqual(flow.white_side_in_preview(), "left")
+        flow.suggested_rotation = "180"
+        self.assertEqual(flow.white_side_in_preview(), "bottom")
+        a1 = photo_square_center("a1", corners, flow.rotation)
+        h1 = photo_square_center("h1", corners, flow.rotation)
+        self.assertGreater(a1[0], 700)
+        self.assertLess(h1[0], 100)
+        self.assertLess(a1[1], 100)
+        self.assertLess(h1[1], 100)
+        flow.cycle_rotation()
+        self.assertEqual(flow.rotation, "ccw")
+        self.assertEqual(flow.white_side_in_preview(), "left")
         a1 = photo_square_center("a1", corners, flow.rotation)
         h1 = photo_square_center("h1", corners, flow.rotation)
         self.assertLess(a1[0], 100)
         self.assertLess(h1[0], 100)
         self.assertLess(a1[1], 100)
         self.assertGreater(h1[1], 700)
-        flow.cycle_rotation()
-        self.assertEqual(flow.rotation, "none")
-        a1 = photo_square_center("a1", corners, flow.rotation)
-        h1 = photo_square_center("h1", corners, flow.rotation)
-        self.assertLess(a1[0], 100)
-        self.assertGreater(h1[0], 700)
-        self.assertGreater(a1[1], 700)
-        self.assertGreater(h1[1], 700)
+        flow.flip_rotation()
+        self.assertEqual(flow.rotation, "cw")
+        flow.flip_rotation()
+        self.assertEqual(flow.rotation, "ccw")
         flow.retake_starting()
         self.assertEqual(flow.stage, "setup_only")
+
+    def test_rotated_corner_taps_map_back_to_raw_photo(self):
+        width, height = 900, 600
+        displayed = [[80, 60], [810, 50], [790, 540], [90, 550]]
+        raw = corners_from_rotated_preview(displayed, width, height, "180")
+        self.assertEqual(raw, [[109, 59], [809, 49], [819, 539], [89, 549]])
+        self.assertEqual(corners_from_rotated_preview(
+            [[0, 0], [599, 0], [599, 899], [0, 899]], width, height, "cw"),
+            [[0, 0], [899, 0], [899, 599], [0, 599]])
 
     def test_manual_corners_and_saved_calibration(self):
         empty = np.zeros((800, 800, 3), dtype=np.uint8)
@@ -301,6 +320,44 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_corner_selection_shows_upright_rotated_setup_photo(self):
+        photo = np.zeros((800, 800, 3), dtype=np.uint8)
+        photo[:100, :100] = (0, 0, 255)
+        photo[-100:, -100:] = (0, 255, 0)
+        flow = CalibrationFlow(setup_only=True)
+        flow.accept_starting(photo, None)
+        app = TouchApp.__new__(TouchApp)
+        app.calibration_flow = flow
+        app.photo_adjustments = PhotoAdjustments()
+        app.board_canvas = Mock()
+        app.board_canvas.winfo_width.return_value = 800
+        app.board_canvas.winfo_height.return_value = 800
+        with patch("pi_touch.tk.PhotoImage") as image_widget:
+            app.draw_photo_preview()
+        encoded = base64.b64decode(image_widget.call_args.kwargs["data"])
+        preview = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertGreater(int(preview[20, 20, 1]), 200)
+        self.assertLess(int(preview[20, 20, 2]), 50)
+        self.assertIsNotNone(app.preview_geometry)
+
+    def test_corner_taps_on_rotated_view_are_saved_in_raw_coordinates(self):
+        flow = CalibrationFlow(setup_only=True)
+        flow.accept_starting(np.zeros((600, 900, 3), dtype=np.uint8), None)
+        app = TouchApp.__new__(TouchApp)
+        app.calibration_flow = flow
+        app.preview_geometry = (0, 0, 1)
+        app.busy = False
+        app.say = Mock()
+        app.render = Mock()
+        app.suggest_starting_orientation = Mock()
+        displayed = [[80, 60], [810, 50], [790, 540], [90, 550]]
+        for x, y in displayed:
+            app.tap_calibration_corner(SimpleNamespace(x=x, y=y))
+        self.assertEqual(flow.stage, "ready")
+        self.assertEqual(flow.starting_corners,
+                         [[109, 59], [809, 49], [819, 539], [89, 549]])
+        app.suggest_starting_orientation.assert_called_once()
+
     def test_setup_preview_places_a1_and_h1_along_bottom(self):
         flow = CalibrationFlow(setup_only=True)
         corners = [[0, 0], [799, 0], [799, 799], [0, 799]]

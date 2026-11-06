@@ -7,7 +7,8 @@ import numpy as np
 from board_vision import (Calibration, calibrate, legacy_square_scores, observe,
                           observe_temporal, square_scores)
 from move_observation import occupied_squares
-from pi_touch import CalibrationFlow, PhotoAdjustments, TouchSession, calibrate_setup_photo, MoveRejected
+from pi_touch import (CalibrationFlow, PhotoAdjustments, TouchSession, calibrate_setup_photo,
+                      suggest_setup_rotation, MoveRejected)
 
 
 CORNERS = [[0, 0], [799, 0], [799, 799], [0, 799]]
@@ -42,18 +43,31 @@ def under_light(photo: np.ndarray, *, offset: float, slope: float,
 
 
 class LightingCorrectionTest(unittest.TestCase):
-    def test_default_setup_orientation_rotates_previous_mapping_180_degrees(self):
+    def test_setup_photo_suggests_white_at_bottom(self):
+        canonical = board_photo(chess.Board())
+        settings = PhotoAdjustments()
+        cases = ((canonical, "none"),
+                 (cv2.rotate(canonical, cv2.ROTATE_90_CLOCKWISE), "ccw"),
+                 (cv2.rotate(canonical, cv2.ROTATE_180), "180"),
+                 (cv2.rotate(canonical, cv2.ROTATE_90_COUNTERCLOCKWISE), "cw"))
+        for photo, expected in cases:
+            with self.subTest(rotation=expected):
+                self.assertEqual(suggest_setup_rotation(photo, CORNERS, settings), expected)
+        blank = np.full((800, 800, 3), 120, dtype=np.uint8)
+        self.assertIsNone(suggest_setup_rotation(blank, CORNERS, settings))
+
+    def test_default_setup_corner_view_has_white_at_bottom(self):
         board = chess.Board()
         flow = CalibrationFlow(setup_only=True)
-        setup = cv2.rotate(board_photo(board), cv2.ROTATE_90_CLOCKWISE)
+        setup = cv2.rotate(board_photo(board), cv2.ROTATE_180)
         calibration, reference = calibrate_setup_photo(
             setup, CORNERS, PhotoAdjustments(), rotation=flow.rotation)
         session = TouchSession("beginner")
         session.phase = "human"
         board.push_uci("e2e4")
-        moved = cv2.rotate(board_photo(board), cv2.ROTATE_90_CLOCKWISE)
+        moved = cv2.rotate(board_photo(board), cv2.ROTATE_180)
         observation, _ = observe_temporal(reference, moved, calibration, CORNERS)
-        self.assertEqual(calibration.rotation, "ccw")
+        self.assertEqual(calibration.rotation, "180")
         self.assertEqual(observation.changed, ("e2", "e4"))
         self.assertEqual(session.scan_human_temporal(observation), "e4")
 

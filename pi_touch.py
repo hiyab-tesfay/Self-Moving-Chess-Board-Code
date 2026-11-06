@@ -124,6 +124,28 @@ def photo_square_center(square: str, corners: list[list[float]],
     return float(pixel[0]), float(pixel[1])
 
 
+def corners_from_rotated_preview(points: list[list[float]], width: int, height: int,
+                                 rotation: str) -> list[list[float]]:
+    """Convert corners tapped on a rotated preview to raw photo coordinates."""
+    if len(points) != 4:
+        raise ValueError("Four photo corners are required.")
+    if rotation == "none":
+        raw = [point.copy() for point in points]
+        order = (0, 1, 2, 3)
+    elif rotation == "cw":
+        raw = [[y, height - 1 - x] for x, y in points]
+        order = (1, 2, 3, 0)
+    elif rotation == "180":
+        raw = [[width - 1 - x, height - 1 - y] for x, y in points]
+        order = (2, 3, 0, 1)
+    elif rotation == "ccw":
+        raw = [[width - 1 - y, x] for x, y in points]
+        order = (3, 0, 1, 2)
+    else:
+        raise ValueError(f"Invalid photo rotation: {rotation}")
+    return [raw[index] for index in order]
+
+
 def saved_scan_corners(directory: Path, calibration) -> list[list[float]] | None:
     if calibration.corners is not None:
         return [point.copy() for point in calibration.corners]
@@ -344,7 +366,8 @@ class CalibrationFlow:
 
     def __init__(self, *, setup_only: bool = False) -> None:
         self.setup_only = setup_only
-        self.rotation = "ccw" if setup_only else "none"
+        self.rotation = "180" if setup_only else "none"
+        self.suggested_rotation: str | None = None
         self.stage = "setup_only" if setup_only else "empty"
         self.empty_photo: np.ndarray | None = None
         self.starting_photo: np.ndarray | None = None
@@ -403,17 +426,30 @@ class CalibrationFlow:
         if self.starting_photo is not None:
             self.starting_corners = []
             self.starting_auto_corners = False
+            self.suggested_rotation = None
             self.stage = "starting_corners"
 
     def cycle_rotation(self) -> None:
         rotations = [rotation for rotation, _ in self.A1_CORNERS]
         self.rotation = rotations[(rotations.index(self.rotation) + 1) % len(rotations)]
 
+    def flip_rotation(self) -> None:
+        self.rotation = {"none": "180", "180": "none", "cw": "ccw", "ccw": "cw"}[self.rotation]
+
     def retake_starting(self) -> None:
         self.starting_photo = None
         self.starting_corners = []
         self.starting_auto_corners = False
+        self.suggested_rotation = None
         self.stage = "setup_only" if self.setup_only else "starting"
+
+    def white_side_in_preview(self) -> str | None:
+        if self.suggested_rotation is None:
+            return None
+        rotations = [rotation for rotation, _ in self.A1_CORNERS]
+        turns = (rotations.index(self.rotation) -
+                 rotations.index(self.suggested_rotation)) % 4
+        return ("bottom", "left", "top", "right")[turns]
 
 
 def calibrate_photos(empty: np.ndarray, starting: np.ndarray,
@@ -435,6 +471,25 @@ def aligned_setup_photo(starting: np.ndarray, corners: list[list[float]],
                         adjustments: PhotoAdjustments, rotation: str) -> np.ndarray:
     """Show the same adjusted and oriented image that move detection will use."""
     return rotate_board(warp_board(adjust_photo(starting, adjustments), corners), rotation)
+
+
+def suggest_setup_rotation(starting: np.ndarray, corners: list[list[float]],
+                           adjustments: PhotoAdjustments) -> str | None:
+    """Suggest which rotation puts the lighter starting pieces at the bottom."""
+    aligned = warp_board(adjust_photo(starting, adjustments), corners)
+    lightness = cv2.cvtColor(aligned, cv2.COLOR_BGR2LAB)[:, :, 0].astype(np.float32)
+    contrast = np.empty((8, 8), dtype=np.float32)
+    for row in range(8):
+        for col in range(8):
+            patch = lightness[row * 100:(row + 1) * 100, col * 100:(col + 1) * 100]
+            bare = np.concatenate((patch[:15, :15].ravel(), patch[:15, -15:].ravel(),
+                                   patch[-15:, :15].ravel(), patch[-15:, -15:].ravel()))
+            contrast[row, col] = float(np.median(patch[30:70, 30:70]) - np.median(bare))
+    rotations = (("none", 0), ("cw", -1), ("180", 2), ("ccw", 1))
+    ranked = sorted(((float(np.mean(np.rot90(contrast, k)[-2:]) -
+                            np.mean(np.rot90(contrast, k)[:2])), rotation)
+                     for rotation, k in rotations), reverse=True)
+    return ranked[0][1] if ranked[0][0] >= 12 and ranked[0][0] - ranked[1][0] >= 8 else None
 
 
 def calibrate_setup_photo(starting: np.ndarray, corners: list[list[float]],
@@ -865,7 +920,9 @@ class TouchApp:
             self.button("Cancel Calibration", self.cancel_calibration)
         elif flow.stage == "starting_corners":
             next_corner = flow.CORNER_NAMES[len(flow.starting_corners)]
-            self.heading("Setup photo corners", f"Tap the outer {next_corner} corner of the board as seen in this photo.")
+            self.heading("Setup photo corners", f"White should be at the bottom. Tap the outer {next_corner} board corner.")
+            if flow.setup_only:
+                self.render_rotation_controls()
             self.button("Undo Corner", self.undo_corner)
             self.button("Retake Setup Photo", self.retake_starting)
             self.button("Cancel Calibration", self.cancel_calibration)
@@ -873,12 +930,21 @@ class TouchApp:
             self.heading("Review setup photo", "White must be at the bottom of this view: a1 left, h1 right.")
             self.render_photo_adjustments()
             if flow.setup_only:
-                self.button("Rotate View 90°", self.cycle_setup_rotation, short=True)
+                side = flow.white_side_in_preview()
+                if side is not None:
+                    message = ("WHITE APPEARS AT THE BOTTOM" if side == "bottom" else
+                               f"WHITE APPEARS ON THE {side.upper()}")
+                    tk.Label(self.panel, text=message,
+                             bg=self.GREEN if side == "bottom" else "#8a2f32",
+                             fg=self.BG if side == "bottom" else self.TEXT,
+                             font=("DejaVu Sans", 9 if self.compact else 11, "bold"),
+                             wraplength=self.panel_width - 30).pack(fill="x", pady=(2, 4))
+                self.render_rotation_controls()
                 tk.Label(self.panel, text="Queens: d1 / d8 · Kings: e1 / e8",
                          bg=self.PANEL, fg=self.GOLD,
                          font=("DejaVu Sans", 9 if self.compact else 11, "bold"),
                          wraplength=self.panel_width - 30).pack(fill="x", pady=(2, 4))
-            self.button("Confirm Starting Board" if flow.setup_only else "Check Board",
+            self.button("Confirm White at Bottom" if flow.setup_only else "Check Board",
                         self.finish_calibration, accent=True, short=True)
             self.button("Redo Setup Corners", self.redo_starting_corners, short=True)
             if not flow.setup_only and not flow.empty_auto_corners:
@@ -888,6 +954,16 @@ class TouchApp:
         else:
             self.heading("Calibration saved", "The starting position is ready. You can now play.")
             self.button("Choose Difficulty", self.continue_after_calibration, accent=True)
+
+    def render_rotation_controls(self) -> None:
+        rotations = tk.Frame(self.panel, bg=self.PANEL)
+        rotations.pack(fill="x", pady=2 if self.compact else 4)
+        for column, (label, command) in enumerate(
+                (("Flip 180°", self.flip_setup_rotation),
+                 ("Rotate 90°", self.cycle_setup_rotation))):
+            rotations.grid_columnconfigure(column, weight=1)
+            self.button_widget(rotations, label, command, short=True).grid(
+                row=0, column=column, sticky="ew", padx=2)
 
     def render_photo_adjustments(self) -> None:
         for label, name, start, end in (("Brightness", "brightness", -60, 60),
@@ -986,10 +1062,42 @@ class TouchApp:
 
     def cycle_setup_rotation(self) -> None:
         flow = self.calibration_flow
-        if flow is None or flow.stage != "ready" or not flow.setup_only:
+        if flow is None or flow.stage not in ("starting_corners", "ready") or not flow.setup_only:
             return
+        if flow.stage == "starting_corners":
+            flow.starting_corners = []
         flow.cycle_rotation()
-        self.say("Rotate until White's back row is at the bottom, with a1 left and h1 right.")
+        self.say("Photo rotated. White's pieces should be at the bottom; tap the outer top-left corner." if
+                 flow.stage == "starting_corners" else
+                 "Rotate until White's back row is at the bottom, with a1 left and h1 right.")
+        self.render()
+
+    def suggest_starting_orientation(self) -> bool:
+        flow = self.calibration_flow
+        if (flow is None or not flow.setup_only or flow.stage != "ready" or
+                flow.starting_photo is None or len(flow.starting_corners) != 4):
+            return False
+        try:
+            suggestion = suggest_setup_rotation(
+                flow.starting_photo, flow.starting_corners, self.photo_adjustments)
+        except (VisionError, cv2.error):
+            return False
+        if suggestion is None:
+            return False
+        flow.rotation = suggestion
+        flow.suggested_rotation = suggestion
+        return True
+
+    def flip_setup_rotation(self) -> None:
+        flow = self.calibration_flow
+        if flow is None or flow.stage not in ("starting_corners", "ready") or not flow.setup_only:
+            return
+        if flow.stage == "starting_corners":
+            flow.starting_corners = []
+        flow.flip_rotation()
+        self.say("Photo flipped. White's pieces should be at the bottom; tap the outer top-left corner." if
+                 flow.stage == "starting_corners" else
+                 "White's back row should now be at the bottom. Check a1 on the left and h1 on the right.")
         self.render()
 
     def retake_starting(self) -> None:
@@ -1292,7 +1400,10 @@ class TouchApp:
             photo, detected_corners, reused_corners = value
             flow.accept_starting(photo, detected_corners, reused_corners=reused_corners)
             if flow.stage == "ready":
-                self.say("Check White is at the bottom of the aligned view, then confirm the board.")
+                suggested = self.suggest_starting_orientation()
+                self.say(("White's side was oriented from the setup photo. " if suggested else
+                          "Check the setup photo's orientation. ") +
+                         "Confirm White is at the bottom before saving.")
             else:
                 self.say("Tap the outer top-left corner in the setup photo.")
         elif tag == "cal_finish":
@@ -1504,17 +1615,27 @@ class TouchApp:
         if photo is None:
             return
         left, top, scale = self.preview_geometry
-        height, width = photo.shape[:2]
+        shown_photo = (rotate_board(photo, flow.rotation)
+                       if flow.setup_only and flow.stage == "starting_corners" else photo)
+        height, width = shown_photo.shape[:2]
         x = (event.x - left) / scale
         y = (event.y - top) / scale
         if not (0 <= x < width and 0 <= y < height):
             return
+        selecting_setup = flow.setup_only and flow.stage == "starting_corners"
         flow.add_corner(x, y)
+        if selecting_setup and flow.stage == "ready":
+            raw_height, raw_width = photo.shape[:2]
+            flow.starting_corners = corners_from_rotated_preview(
+                flow.starting_corners, raw_width, raw_height, flow.rotation)
         if flow.stage == "starting":
             self.say("Empty-board corners set. Place all starting pieces, then take the setup photo.")
         elif flow.stage == "ready":
-            self.say("Review all 32 starting pieces, then confirm the board." if flow.setup_only else
-                     "Adjust the captured setup photo, then tap Check Board.")
+            if flow.setup_only:
+                self.suggest_starting_orientation()
+                self.say("Check White is at the bottom of the aligned view, then confirm the board.")
+            else:
+                self.say("Adjust the captured setup photo, then tap Check Board.")
         else:
             points = flow.empty_corners if flow.stage == "empty_corners" else flow.starting_corners
             self.say(f"Tap the outer {flow.CORNER_NAMES[len(points)]} corner.")
@@ -1557,7 +1678,12 @@ class TouchApp:
                     photo, points, self.photo_adjustments, flow.rotation)
             except (VisionError, cv2.error):
                 pass
-        shown_photo = aligned_preview if aligned_preview is not None else photo
+        if aligned_preview is not None:
+            shown_photo = aligned_preview
+        elif flow is not None and flow.setup_only and flow.stage == "starting_corners":
+            shown_photo = rotate_board(photo, flow.rotation)
+        else:
+            shown_photo = photo
         height, width = shown_photo.shape[:2]
         available_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 400
         available_height = canvas.winfo_height() if canvas.winfo_height() > 1 else 360
