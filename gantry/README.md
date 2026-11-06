@@ -67,13 +67,13 @@ plus the electromagnet; the servo takes 5 V (see Servo).
 
 ## Wiring
 
-Pins are in `firmware/gantry_firmware/config.h`. The default block is the ESP32 Dev Module
-with the same motor pins as `Prototype_Program/Prototype_Program.ino`:
+Pins are in `firmware/gantry_firmware/config.h`. The default ESP32 Dev Module block follows
+Zain's gantry wiring:
 
 | Signal | ESP32 pin | Notes |
 | --- | --- | --- |
-| X DIR / STEP / EN | 18 / 19 / 21 | motor 1 in the prototype |
-| Y DIR / STEP / EN | 22 / 25 / 26 | motor 2 in the prototype |
+| X DIR / STEP / EN | 22 / 25 / 26 | motor 2 in the prototype, DIR low moves right |
+| Y DIR / STEP / EN | 18 / 19 / 21 | motor 1 in the prototype, DIR high moves up |
 | magnet | 32 | gate of a logic-level MOSFET (or a relay module) switching the 12 V electromagnet; flyback diode across the coil |
 | servo signal | 12 | the MG90's signal wire; its power comes from 5 V, not the ESP32. The prototype sketch has no servo pin; 12 is the bench wiring of 2026-11-05 (LEDC-capable; it is a strapping pin, so the servo must not pull it high at power-up); set `PIN_SERVO -1` without a servo |
 | X / Y homing switch (optional) | 34 / 35 | to ground, with an external pull-up (34/35 have none); `-1` without switches |

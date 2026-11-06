@@ -3,18 +3,18 @@
 #pragma once
 
 // ----------------------------------------------------------------------------- pins
-// Default: ESP32 Dev Module, the same pins as Prototype_Program.ino (motor 1 = X, motor 2 = Y).
+// Default: ESP32 Dev Module. On Zain's gantry, motor 2 drives X and motor 1 drives Y.
 // Build with -DGANTRY_CNC_SHIELD (or uncomment the define) for an Arduino Uno/Nano on a CNC
 // Shield v3, which is what the GRBL kit in the Drive folder expects.
 // #define GANTRY_CNC_SHIELD
 
 #ifndef GANTRY_CNC_SHIELD
-#define PIN_X_DIR 18
-#define PIN_X_STEP 19
-#define PIN_X_EN 21
-#define PIN_Y_DIR 22    // bench wiring of 2026-11-05, second pass (it sat on 27 for an hour; Zain's prototype also used 22)
-#define PIN_Y_STEP 25
-#define PIN_Y_EN 26
+#define PIN_X_DIR 22
+#define PIN_X_STEP 25
+#define PIN_X_EN 26
+#define PIN_Y_DIR 18
+#define PIN_Y_STEP 19
+#define PIN_Y_EN 21
 #define PIN_MAGNET 32   // gate of the MOSFET (or relay input) that switches the 12 V electromagnet (was 27 until the
                         // bench wiring of 2026-11-05 put a direction wire there)
 #define PIN_SERVO 12    // signal wire of the MG90 that pushes the magnet up to the board and pulls it back, as wired on
@@ -59,7 +59,11 @@
 #define BELT_PITCH_MM 2.0f
 #define STEPS_PER_MM ((float)MOTOR_FULL_STEPS_PER_REV * MICROSTEPS / (PULLEY_TEETH * BELT_PITCH_MM))
 
-#define INVERT_X_DIR false        // flip if +X moves the wrong way
+#if defined(ARDUINO_ARCH_ESP32) && !defined(GANTRY_CNC_SHIELD)
+#define INVERT_X_DIR true         // DIR low moves Zain's gantry right (+X)
+#else
+#define INVERT_X_DIR false
+#endif
 #define INVERT_Y_DIR false
 #define COREXY false              // false: each motor drives its own axis (the 2D Plotter V2 layout)
 
