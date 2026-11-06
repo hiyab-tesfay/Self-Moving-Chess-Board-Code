@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import queue
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,8 +12,8 @@ import numpy as np
 from board_vision import Observation, VisionError, load_calibration, observe, save_calibration
 from move_observation import occupied_squares
 from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp, TouchSession,
-                      adjust_photo, calibrate_photos, rejected_move_feedback,
-                      reusable_corners)
+                      adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
+                      reusable_corners, should_retry_scan)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -26,6 +27,21 @@ def unclear(occupied: frozenset[str], *squares: str) -> Observation:
 
 
 class TouchSessionTest(unittest.TestCase):
+    def test_multiple_piece_feedback_names_all_changed_sources(self):
+        board = chess.Board()
+        observed = Observation((occupied_squares(board) - {"d2", "e2"}) | {"d4", "e4"}, (), {})
+        session = TouchSession("beginner")
+        session.verify_setup(occupied_squares(board))
+        with self.assertRaises(MoveRejected):
+            session.scan_human(observed)
+        feedback = rejected_move_feedback(board, observed, "Illegal or unrecognized move.")
+        self.assertEqual(feedback.title, "MULTIPLE PIECES CHANGED")
+        self.assertEqual(feedback.sources, ("d2", "e2"))
+        self.assertEqual(feedback.destinations, ("d4", "e4"))
+        self.assertIn("White pawn d2", feedback.detail)
+        self.assertIn("White pawn e2", feedback.detail)
+        self.assertFalse(should_retry_scan(feedback, "saved", 1))
+
     def test_illegal_move_feedback_names_piece_only_for_clear_move(self):
         board = chess.Board()
         observed = Observation((occupied_squares(board) - {"e2"}) | {"e5"}, (), {})
@@ -61,6 +77,40 @@ class TouchSessionTest(unittest.TestCase):
         self.assertEqual(session.game.board.turn, chess.BLACK)
         self.assertEqual(session.verify_computer(after(session.game.board, "e7e5")), "e5")
         self.assertEqual(session.phase, "human")
+
+    def test_computer_move_feedback_identifies_wrong_destination_and_piece(self):
+        session = TouchSession("beginner")
+        session.verify_setup(occupied_squares(session.game.board))
+        session.scan_human(after(session.game.board, "e2e4"))
+        move = chess.Move.from_uci("e7e5")
+        session.announce_computer(move)
+        wrong_square = Observation(after(session.game.board, "e7e6"), (), {})
+        with self.assertRaises(MoveRejected):
+            session.verify_computer(wrong_square)
+        feedback = computer_move_feedback(session.game.board, move, wrong_square)
+        self.assertEqual(feedback.title, "COMPUTER MOVE MISMATCH")
+        self.assertIn("Expected: Black pawn e7 → e5", feedback.detail)
+        self.assertIn("Camera sees: Black pawn e7 → e6", feedback.detail)
+        self.assertEqual(feedback.expected_destinations, ("e5",))
+        self.assertEqual(feedback.destinations, ("e6",))
+        self.assertTrue(should_retry_scan(feedback, "saved", 1))
+
+        wrong_piece = Observation(after(session.game.board, "d7d5"), (), {})
+        feedback = computer_move_feedback(session.game.board, move, wrong_piece)
+        self.assertIn("Camera sees: Black pawn d7 → d5", feedback.detail)
+
+    def test_computer_move_feedback_shows_castling_rook_and_uncertainty(self):
+        board = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1")
+        move = chess.Move.from_uci("e8g8")
+        observed = Observation((occupied_squares(board) - {"e8"}) | {"g8"}, (), {})
+        feedback = computer_move_feedback(board, move, observed)
+        self.assertEqual(feedback.expected_sources, ("e8", "h8"))
+        self.assertEqual(feedback.expected_destinations, ("g8", "f8"))
+        self.assertIn("rook h8 → f8", feedback.detail)
+        unclear = Observation(observed.occupied, ("f8",), {})
+        feedback = computer_move_feedback(board, move, unclear)
+        self.assertEqual(feedback.title, "PHOTO UNCLEAR")
+        self.assertIn("f8", feedback.detail)
 
     def test_unclear_setup_squares_require_one_manual_confirmation(self):
         session = TouchSession("beginner")
@@ -223,6 +273,87 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_computer_mismatch_reaches_large_feedback_after_retries(self):
+        session = TouchSession("beginner")
+        session.verify_setup(occupied_squares(session.game.board))
+        session.scan_human(after(session.game.board, "e2e4"))
+        session.announce_computer(chess.Move.from_uci("e7e5"))
+        app = TouchApp.__new__(TouchApp)
+        app.closed = False
+        app.generation = 0
+        app.results = queue.SimpleQueue()
+        app.root = SimpleNamespace(after=Mock())
+        app.session = session
+        app.scan_photo = np.zeros((8, 8, 3), dtype=np.uint8)
+        app.scan_corners = [[0, 0], [7, 0], [7, 7], [0, 7]]
+        app.scan_corner_source = "saved"
+        app.scan_attempts = 3
+        app.scan_feedback = None
+        app.say = Mock()
+        app.render = Mock()
+        wrong = Observation(after(session.game.board, "e7e6"), (), {})
+        app.results.put((0, "scan", wrong, None))
+        app.poll_results()
+        self.assertEqual(app.scan_feedback.title, "COMPUTER MOVE MISMATCH")
+        self.assertIn("Expected: Black pawn e7 → e5", app.scan_feedback.detail)
+        self.assertIn("Camera sees: Black pawn e7 → e6", app.scan_feedback.detail)
+        self.assertEqual(session.phase, "computer")
+
+    def test_setup_retries_unclear_photo_before_manual_confirmation(self):
+        app = TouchApp.__new__(TouchApp)
+        app.session = TouchSession("beginner")
+        app.scan_corner_source = "saved"
+        app.scan_attempts = 1
+        app._capture_scan_attempt = Mock()
+        app.scan_corners = [[0, 0], [1, 0], [1, 1], [0, 1]]
+        observed = unclear(occupied_squares(app.session.game.board), "f7")
+        app.handle_result("scan", observed)
+        app._capture_scan_attempt.assert_called_once()
+        self.assertEqual(app.session.phase, "setup")
+
+    def test_missing_corners_retry_before_manual_prompt(self):
+        app = TouchApp.__new__(TouchApp)
+        app.scan_attempts = 1
+        app._capture_scan_attempt = Mock()
+        app.say = Mock()
+        photo = np.zeros((8, 8, 3), dtype=np.uint8)
+        app.handle_result("scan_photo", (photo, None, "manual"))
+        app._capture_scan_attempt.assert_called_once()
+        app.say.assert_not_called()
+        app.scan_attempts = 3
+        app.handle_result("scan_photo", (photo, None, "manual"))
+        app.say.assert_called_once()
+
+    def test_unclear_scan_retries_twice_then_reports_result(self):
+        app = TouchApp.__new__(TouchApp)
+        app.closed = False
+        app.generation = 0
+        app.results = queue.SimpleQueue()
+        app.root = SimpleNamespace(after=Mock())
+        app.session = TouchSession("beginner")
+        app.session.phase = "human"
+        app.scan_photo = np.zeros((8, 8, 3), dtype=np.uint8)
+        app.scan_corners = [[0, 0], [7, 0], [7, 7], [0, 7]]
+        app.scan_corner_source = "saved"
+        app.scan_attempts = 1
+        app.scan_feedback = None
+        app.say = Mock()
+        app.render = Mock()
+        app._capture_scan_attempt = Mock(side_effect=lambda: setattr(
+            app, "scan_attempts", app.scan_attempts + 1))
+        observed = Observation(occupied_squares(app.session.game.board),
+                               ("a7", "f7", "g8"), {})
+        for expected_attempt in (2, 3):
+            app.results.put((0, "scan", observed, None))
+            app.poll_results()
+            self.assertEqual(app.scan_attempts, expected_attempt)
+            self.assertIsNone(app.scan_feedback)
+        app.results.put((0, "scan", observed, None))
+        app.poll_results()
+        self.assertEqual(app._capture_scan_attempt.call_count, 2)
+        self.assertEqual(app.scan_feedback.title, "PHOTO UNCLEAR")
+        self.assertIn("Tried 3 photos", app.scan_feedback.detail)
+
     def test_editing_captured_setup_photo_keeps_both_raw_photos(self):
         app = TouchApp.__new__(TouchApp)
         flow = CalibrationFlow()

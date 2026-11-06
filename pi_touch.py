@@ -20,7 +20,7 @@ from board_vision import (Observation, VisionError, board_corners, calibrate, lo
                           observe, read_image, save_calibration)
 from chess_game import ChessGame, DIFFICULTIES, StockfishPlayer
 from move_observation import occupied_squares
-from pi_camera import Camera, CameraSettings
+from pi_camera import Camera, CameraError, CameraSettings
 
 
 class MoveRejected(ValueError):
@@ -31,11 +31,22 @@ class MoveRejected(ValueError):
 class ScanFeedback:
     title: str
     detail: str
-    source: str | None = None
-    destination: str | None = None
+    sources: tuple[str, ...] = ()
+    destinations: tuple[str, ...] = ()
+    expected_sources: tuple[str, ...] = ()
+    expected_destinations: tuple[str, ...] = ()
+
+    @property
+    def source(self) -> str | None:
+        return self.sources[0] if len(self.sources) == 1 else None
+
+    @property
+    def destination(self) -> str | None:
+        return self.destinations[0] if len(self.destinations) == 1 else None
 
 
 MAX_UNCERTAIN_SQUARES = 2
+MAX_SCAN_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -141,7 +152,7 @@ def _after_move(board: chess.Board, move: chess.Move) -> tuple[frozenset[str], s
 
 def rejected_move_feedback(board: chess.Board, observation: Observation,
                            reason: str) -> ScanFeedback:
-    """Identify a piece only when occupancy gives one clear origin and destination."""
+    """Name changed pieces without guessing which destination belongs to each."""
     if "No move detected" in reason:
         return ScanFeedback("NO CLEAR MOVE", "The camera found no clear change in occupied squares. Check the board and rescan.")
     if len(observation.uncertain) > MAX_UNCERTAIN_SQUARES:
@@ -150,6 +161,17 @@ def rejected_move_feedback(board: chess.Board, observation: Observation,
     before = occupied_squares(board)
     vacated = sorted(before - observation.occupied - unclear)
     filled = sorted(observation.occupied - before - unclear)
+    if not unclear and 2 <= len(vacated) <= 4 and len(filled) <= 4:
+        pieces = [board.piece_at(chess.parse_square(square)) for square in vacated]
+        names = [f"{'White' if piece.color else 'Black'} {chess.piece_name(piece.piece_type)} {square}"
+                 for piece, square in zip(pieces, vacated) if piece is not None]
+        destination_text = ("New occupied squares: " + ", ".join(filled) + ". "
+                            if filled else "")
+        return ScanFeedback(
+            "MULTIPLE PIECES CHANGED",
+            "Camera sees these pieces leave their squares: " + ", ".join(names) + ". " +
+            destination_text + "Restore the board and make one move, then scan again.",
+            tuple(vacated), tuple(filled))
     if len(vacated) == 1 and len(filled) == 1:
         source, destination = vacated[0], filled[0]
         piece = board.piece_at(chess.parse_square(source))
@@ -166,8 +188,66 @@ def rejected_move_feedback(board: chess.Board, observation: Observation,
                           f"It is {turn}'s turn." if piece.color != board.turn else
                           f"Camera sees {color} {name}: {source} → {destination}. "
                           "That move is not legal in this position.")
-                return ScanFeedback("ILLEGAL MOVE", detail, source, destination)
+                return ScanFeedback("ILLEGAL MOVE", detail, (source,), (destination,))
     return ScanFeedback("MOVE NOT VERIFIED", reason + " Check the board or adjust the photo corners.")
+
+
+def computer_move_feedback(board: chess.Board, move: chess.Move,
+                           observation: Observation) -> ScanFeedback:
+    """Compare the requested Black move with observable square changes."""
+    source = chess.square_name(move.from_square)
+    destination = chess.square_name(move.to_square)
+    piece = board.piece_at(move.from_square)
+    name = chess.piece_name(piece.piece_type) if piece else "piece"
+    expected = f"Expected: Black {name} {source} → {destination}"
+    expected_sources = (source,)
+    expected_destinations = (destination,)
+    if board.is_castling(move):
+        rank = "8" if piece and piece.color == chess.BLACK else "1"
+        rook_source, rook_destination = (("h" + rank, "f" + rank) if
+                                         chess.square_file(move.to_square) == 6 else
+                                         ("a" + rank, "d" + rank))
+        expected += f", rook {rook_source} → {rook_destination}"
+        expected_sources += (rook_source,)
+        expected_destinations += (rook_destination,)
+    expected += ". "
+    unclear = set(observation.uncertain)
+    before = occupied_squares(board)
+    vacated = tuple(sorted(before - observation.occupied - unclear))
+    filled = tuple(sorted(observation.occupied - before - unclear))
+    _, affected = _after_move(board, move)
+    if len(unclear) > MAX_UNCERTAIN_SQUARES or unclear & affected:
+        squares = ", ".join(sorted(unclear & affected or unclear))
+        return ScanFeedback(
+            "PHOTO UNCLEAR", expected + f"Camera cannot read {squares} clearly. Retake the photo.",
+            expected_sources=expected_sources, expected_destinations=expected_destinations)
+    if len(vacated) + len(filled) > 8:
+        return ScanFeedback(
+            "PHOTO UNCLEAR", expected + "Too many squares changed to identify the move. "
+            "Check the photo corners and try again.",
+            expected_sources=expected_sources, expected_destinations=expected_destinations)
+    if len(vacated) == 1 and len(filled) == 1:
+        actual_piece = board.piece_at(chess.parse_square(vacated[0]))
+        actual_name = (f"{'White' if actual_piece.color else 'Black'} "
+                       f"{chess.piece_name(actual_piece.piece_type)}" if actual_piece else "piece")
+        seen = f"Camera sees: {actual_name} {vacated[0]} → {filled[0]}. "
+    elif vacated or filled:
+        removed = ", ".join(vacated) if vacated else "none"
+        added = ", ".join(filled) if filled else "none"
+        seen = (f"Camera sees emptied squares: {removed}; newly occupied squares: {added}. "
+                "It cannot tell which destination belongs to which piece. ")
+    else:
+        seen = "Camera sees no clear square changes. "
+    return ScanFeedback(
+        "COMPUTER MOVE MISMATCH", expected + seen + "Correct the physical board and scan again.",
+        vacated, filled, expected_sources, expected_destinations)
+
+
+def should_retry_scan(feedback: ScanFeedback, corner_source: str, attempts: int) -> bool:
+    """Retry uncertain captures, while showing clear rule violations immediately."""
+    return (corner_source != "manual" and attempts < MAX_SCAN_ATTEMPTS and
+            feedback.title in ("NO CLEAR MOVE", "PHOTO UNCLEAR", "MOVE NOT VERIFIED",
+                               "SETUP NOT VERIFIED", "COMPUTER MOVE MISMATCH"))
 
 
 class CalibrationFlow:
@@ -403,6 +483,7 @@ class TouchApp:
         self.last_scan_corners: list[list[float]] | None = None
         self.scan_corner_source = ""
         self.scan_feedback: ScanFeedback | None = None
+        self.scan_attempts = 0
         self.preview_photo: tk.PhotoImage | None = None
         self.preview_geometry: tuple[float, float, float] | None = None
         self.level = "beginner"
@@ -587,12 +668,19 @@ class TouchApp:
             tk.Label(self.panel, text=feedback.detail, bg=self.PANEL, fg=self.TEXT,
                      font=("DejaVu Sans", 11 if self.compact else 13, "bold"),
                      justify="left", wraplength=self.panel_width - 35).pack(fill="x", pady=(0, 12))
+            if feedback.expected_sources:
+                tk.Label(self.panel, text="Green: expected · Red: observed",
+                         bg=self.PANEL, fg=self.MUTED, justify="left",
+                         font=("DejaVu Sans", 9 if self.compact else 11),
+                         wraplength=self.panel_width - 35).pack(fill="x", pady=(0, 6))
             if self.scan_corner_source == "saved":
                 tk.Label(self.panel, text="Using saved corners. If the camera moved, adjust them.",
                          bg=self.PANEL, fg=self.GOLD, justify="left",
                          font=("DejaVu Sans", 9 if self.compact else 11),
                          wraplength=self.panel_width - 35).pack(fill="x", pady=(0, 8))
-            action = ("Fix Board & Scan Again" if feedback.title == "ILLEGAL MOVE" else
+            action = ("Correct Move & Verify" if feedback.title == "COMPUTER MOVE MISMATCH" else
+                      "Fix Board & Scan Again" if feedback.title in
+                      ("ILLEGAL MOVE", "MULTIPLE PIECES CHANGED") else
                       "Make Move & Rescan" if feedback.title == "NO CLEAR MOVE" else "Retake Photo")
             self.button(action, self.retake_scan, accent=True)
             self.button("Adjust Photo Corners", self.redo_scan_corners, short=True)
@@ -860,11 +948,18 @@ class TouchApp:
     def scan(self) -> None:
         if self.session is None or self.busy:
             return
+        self.scan_attempts = 0
+        self._capture_scan_attempt()
+
+    def _capture_scan_attempt(self) -> None:
+        self.scan_attempts += 1
         self.scan_feedback = None
+        self.scan_photo = None
+        self.scan_corners = []
         remembered = (self.last_scan_corners or
                       (self.calibration.corners if self.calibration is not None else None))
         self.busy = True
-        self.say("Taking a photo of the physical board…")
+        self.say(f"Taking board photo {self.scan_attempts} of {MAX_SCAN_ATTEMPTS}…")
         self.render()
 
         def take_photo():
@@ -938,7 +1033,20 @@ class TouchApp:
                     continue
                 self.busy = False
                 if error is not None:
-                    if tag == "start" and isinstance(error, VisionError):
+                    if (((tag == "scan_photo" and
+                          isinstance(error, (CameraError, VisionError, cv2.error))) or
+                         (tag == "scan" and self.scan_corner_source != "manual" and
+                          isinstance(error, (VisionError, cv2.error)))) and
+                            self.scan_attempts < MAX_SCAN_ATTEMPTS):
+                        self._capture_scan_attempt()
+                        continue
+                    if (tag == "scan" and self.scan_photo is not None and
+                            isinstance(error, (VisionError, cv2.error))):
+                        self.scan_feedback = ScanFeedback(
+                            "PHOTO UNCLEAR", f"Tried {self.scan_attempts} photos. "
+                            "The board could not be read. Check lighting or adjust the photo corners.")
+                        self.say("Check the message on the photo.", self.RED)
+                    elif tag == "start" and isinstance(error, VisionError):
                         self.say("Calibration missing or unreadable. Tap Calibrate Board.", self.RED)
                     elif tag == "cal_finish" and isinstance(error, VisionError):
                         print(f"Calibration check failed: {error}")
@@ -953,12 +1061,23 @@ class TouchApp:
                 except MoveRejected as exc:
                     if tag == "scan" and self.scan_photo is not None and self.session is not None:
                         if self.session.phase == "human":
-                            self.scan_feedback = rejected_move_feedback(
+                            feedback = rejected_move_feedback(
                                 self.session.game.board, value, str(exc))
                         elif self.session.phase == "computer":
-                            self.scan_feedback = ScanFeedback("CHECK COMPUTER MOVE", str(exc))
+                            assert self.session.computer_move is not None
+                            feedback = computer_move_feedback(
+                                self.session.game.board, self.session.computer_move, value)
                         else:
-                            self.scan_feedback = ScanFeedback("SETUP NOT VERIFIED", str(exc))
+                            feedback = ScanFeedback("SETUP NOT VERIFIED", str(exc))
+                        if should_retry_scan(feedback, self.scan_corner_source,
+                                             self.scan_attempts):
+                            self._capture_scan_attempt()
+                            continue
+                        if (self.scan_attempts == MAX_SCAN_ATTEMPTS and
+                                feedback.title not in ("ILLEGAL MOVE", "MULTIPLE PIECES CHANGED")):
+                            feedback = replace(feedback, detail=(
+                                f"Tried {MAX_SCAN_ATTEMPTS} photos. " + feedback.detail))
+                        self.scan_feedback = feedback
                         self.say("Check the message on the photo.", self.RED)
                     else:
                         self.say(str(exc), self.RED)
@@ -1026,10 +1145,18 @@ class TouchApp:
             self.scan_corners = corners or []
             if corners is not None:
                 self.process_scan_photo()
+            elif self.scan_attempts < MAX_SCAN_ATTEMPTS:
+                self._capture_scan_attempt()
             else:
-                self.say("Tap the four outer board corners in this photo, starting at top-left.")
+                self.say("Could not find corners in three photos. Tap the four outer board corners.",
+                         self.GOLD)
         elif tag == "scan":
             assert self.session is not None
+            if (self.session.phase == "setup" and value.uncertain and
+                    self.scan_corner_source != "manual" and
+                    self.scan_attempts < MAX_SCAN_ATTEMPTS):
+                self._capture_scan_attempt()
+                return
             used_corners = [point.copy() for point in self.scan_corners]
             if self.session.phase == "setup":
                 self.session.verify_setup(value)
@@ -1258,26 +1385,43 @@ class TouchApp:
             canvas.create_text(left + 15, top + 24, text=feedback.title,
                                fill=self.TEXT, anchor="w",
                                font=("DejaVu Sans", 16, "bold"))
-            if (len(points) == 4 and feedback.source and feedback.destination and
+            if (len(points) == 4 and
+                    (feedback.sources or feedback.destinations or feedback.expected_sources) and
                     (self.calibration is None or self.calibration.rotation == "none")):
                 board_outline = np.float32([[0, 0], [799, 0], [799, 799], [0, 799]])
                 transform = cv2.getPerspectiveTransform(board_outline, np.float32(points))
-                centers = []
-                for square in (feedback.source, feedback.destination):
+                centers = {}
+                all_squares = (feedback.expected_sources + feedback.expected_destinations +
+                               feedback.sources + feedback.destinations)
+                for square in all_squares:
                     index = chess.parse_square(square)
                     board_x = (chess.square_file(index) + 0.5) * 100
                     board_y = (7 - chess.square_rank(index) + 0.5) * 100
                     pixel = cv2.perspectiveTransform(
                         np.float32([[[board_x, board_y]]]), transform)[0, 0]
-                    centers.append((left + float(pixel[0]) * scale,
-                                    top + float(pixel[1]) * scale))
-                canvas.create_line(*centers[0], *centers[1], fill=self.RED,
-                                   width=5, arrow="last")
-                for center, square in zip(centers, (feedback.source, feedback.destination)):
-                    px, py = center
+                    centers[square] = (left + float(pixel[0]) * scale,
+                                       top + float(pixel[1]) * scale)
+                for expected_source, expected_destination in zip(
+                        feedback.expected_sources, feedback.expected_destinations):
+                    canvas.create_line(*centers[expected_source], *centers[expected_destination],
+                                       fill=self.GREEN, width=4, dash=(8, 5), arrow="last")
+                for square in feedback.expected_sources + feedback.expected_destinations:
+                    px, py = centers[square]
+                    canvas.create_oval(px - 24, py - 24, px + 24, py + 24,
+                                       outline=self.GREEN, width=4)
+                    canvas.create_text(px, py + 32, text=square, fill=self.GREEN,
+                                       font=("DejaVu Sans", 15, "bold"))
+                if (feedback.title in ("ILLEGAL MOVE", "COMPUTER MOVE MISMATCH") and
+                        feedback.source and feedback.destination):
+                    canvas.create_line(*centers[feedback.source], *centers[feedback.destination],
+                                       fill=self.RED, width=5, arrow="last")
+                for square in feedback.sources + feedback.destinations:
+                    px, py = centers[square]
+                    color = (self.RED if feedback.expected_sources or square in feedback.sources
+                             else self.GOLD)
                     canvas.create_oval(px - 18, py - 18, px + 18, py + 18,
-                                       outline=self.RED, width=4)
-                    canvas.create_text(px, py - 28, text=square, fill=self.RED,
+                                       outline=color, width=4)
+                    canvas.create_text(px, py - 28, text=square, fill=color,
                                        font=("DejaVu Sans", 15, "bold"))
 
     def board_geometry(self) -> tuple[float, float, float, float]:
