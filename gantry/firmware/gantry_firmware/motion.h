@@ -24,11 +24,13 @@ struct Hal {
 };
 
 struct Settings {
-  float steps_per_mm;
+  float steps_per_mm;     // $100 changes it at run time
   float max_mm[2];
-  float max_speed;        // mm/s
-  float accel;            // mm/s^2
-  float homing_speed;     // mm/s
+  float max_speed;        // mm/s: the travel speed, G0 and the top of G1 ($110 changes it)
+  float accel;            // mm/s^2, for every move ($120 changes it)
+  float speed_ceiling;    // mm/s: no setting and no feed can go past this
+  float accel_ceiling;    // mm/s^2: nor past this
+  float homing_speed;     // mm/s (never above max_speed)
   float homing_bump;      // mm past the end, when there are no switches
   float pull_off;         // mm to back away from the end after homing
   bool invert_dir[2];
@@ -51,6 +53,7 @@ enum {
   ERR_BUSY = 3,       // a move is already running
   ERR_LIMIT = 4,      // target outside the soft limits
   ERR_ALARM = 5,      // locked: $X to unlock, $H to home
+  ERR_RANGE = 13,     // a $1xx setting outside its range
 };
 
 class Motion {
@@ -85,7 +88,29 @@ class Motion {
     return (axis == X ? cx : cy) / s_.steps_per_mm;
   }
 
-  // Absolute move in cartesian mm at up to speed mm/s. 0 on success, else an error code.
+  const Settings& settings() const { return s_; }
+
+  // $110 / $120 / $100 at run time: the travel speed, the acceleration and the steps per mm (the
+  // caller checks the ranges; values past the ceilings are clamped here all the same). Refused
+  // while a move or homing runs. A new steps/mm changes what every step count means, so the
+  // position is no longer known: alarm "not homed", and $H or $HM before the next board command.
+  int tune(float speed, float accel, float steps_per_mm) {
+    if (moving()) return ERR_BUSY;
+    if (speed <= 0 || accel <= 0 || steps_per_mm <= 0) return ERR_RANGE;
+    s_.max_speed = speed > s_.speed_ceiling ? s_.speed_ceiling : speed;
+    s_.accel = accel > s_.accel_ceiling ? s_.accel_ceiling : accel;
+    if (fabsf(steps_per_mm - s_.steps_per_mm) > 1e-4f) {
+      s_.steps_per_mm = steps_per_mm;
+      state_ = ALARM;
+      homed_ = false;
+      alarm_ = "not homed";
+    }
+    return OK;
+  }
+
+  // Absolute move in cartesian mm at up to speed mm/s; 0 (or less) means the travel speed. Any
+  // speed up to the ceiling is honoured: the protocol picks the travel or the carry speed.
+  // 0 on success, else an error code.
   int move_to(float x_mm, float y_mm, float speed) {
     if (state_ == ALARM || state_ == HOLD) return ERR_ALARM;
     if (state_ != IDLE) return ERR_BUSY;
@@ -93,7 +118,7 @@ class Motion {
     long cx, cy;
     cartesian_steps(cx, cy);
     long tx = lroundf(x_mm * s_.steps_per_mm), ty = lroundf(y_mm * s_.steps_per_mm);
-    if (speed <= 0 || speed > s_.max_speed) speed = s_.max_speed;
+    speed = feed(speed);
     start_segment(tx - cx, ty - cy, speed, false);
     if (n_ == 0) return OK;  // already there
     state_ = RUN;
@@ -208,8 +233,7 @@ class Motion {
   // trapezoid the step timer runs, so a command's planned time (and the magnet's planned on-time)
   // can be checked before it starts.
   float move_seconds(float d_mm, float speed) const {
-    if (speed <= 0 || speed > s_.max_speed) speed = s_.max_speed;
-    speed = step_capped(speed);
+    speed = step_capped(feed(speed));
     if (d_mm <= 0) return 0;
     float ramp = speed * speed / (2 * s_.accel);
     if (2 * ramp >= d_mm) return 2 * sqrtf(d_mm / s_.accel);
@@ -224,6 +248,15 @@ class Motion {
   }
 
  private:
+  // The speed a move asks for, made legal: 0 or less means the travel speed, never past the ceiling.
+  float feed(float speed) const {
+    if (speed <= 0) speed = s_.max_speed;
+    return speed > s_.speed_ceiling ? s_.speed_ceiling : speed;
+  }
+
+  // Homing keeps its own slow speed, and slows further if the travel speed is set lower still.
+  float homing_speed() const { return s_.homing_speed < s_.max_speed ? s_.homing_speed : s_.max_speed; }
+
   void cartesian_steps(long& x, long& y) const {
     if (s_.corexy) {
       x = (motor_[0] + motor_[1]) / 2;
@@ -279,6 +312,7 @@ class Motion {
     a_ = s_.accel * s_.steps_per_mm * scale;
     v_min_ = v_max_ * 0.05f;
     if (v_min_ < 20.0f) v_min_ = 20.0f;  // steps/s; keeps the first interval under 50 ms
+    if (v_min_ > v_max_) v_min_ = v_max_;  // a very slow feed at few steps/mm (say $110=3 at $100=5) has no ramp
     // Steps needed to reach v_max, or half the move if it is too short to get there.
     float ramp = (v_max_ * v_max_ - v_min_ * v_min_) / (2.0f * a_);
     if (ramp * 2 > n_) ramp = n_ / 2.0f;
@@ -317,9 +351,10 @@ class Motion {
   }
 
   // Homing phases: for each axis, seek the minimum end, call it 0, pull off, call that 0.
-  // The seek keeps homing_speed and homing_bump from the settings and nothing can raise them:
-  // without switches the motor stalls against the frame on purpose, and a stalled stepper at
-  // speed is the most current the motors ever draw, so the bump is slow (25 mm/s) and short.
+  // The seek keeps homing_speed and homing_bump from the settings and nothing can raise them
+  // (a lower travel speed lowers the homing speed with it): without switches the motor stalls
+  // against the frame on purpose, and a stalled stepper at speed is the most current the motors
+  // ever draw, so the bump is slow (25 mm/s) and short.
   void next_home_phase() {
     int first = s_.home_x_first ? X : Y, second = 1 - first;
     int axis = phase_ < 2 ? first : second;
@@ -329,14 +364,14 @@ class Motion {
         float travel = s_.max_mm[axis] + (s_.use_endstops ? 10.0f : s_.homing_bump);
         long d = lroundf(travel * s_.steps_per_mm);
         seek_axis_ = axis;
-        start_segment(axis == X ? -d : 0, axis == Y ? -d : 0, s_.homing_speed, true);
+        start_segment(axis == X ? -d : 0, axis == Y ? -d : 0, homing_speed(), true);
         return;
       }
       case 1:
       case 3: {
         zero_axis(axis);
         long d = lroundf(s_.pull_off * s_.steps_per_mm);
-        start_segment(axis == X ? d : 0, axis == Y ? d : 0, s_.homing_speed, false);
+        start_segment(axis == X ? d : 0, axis == Y ? d : 0, homing_speed(), false);
         return;
       }
       default:

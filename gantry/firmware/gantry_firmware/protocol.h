@@ -16,9 +16,9 @@
 //   $T                  the Arduino's own test (homed first): four corners, servo and magnet on e4, a
 //                       knight's carry e4 -> f6 -> e4 through the lanes, back to a1
 //
-// A CARRY runs as one sequence: travel to `from` at full speed, servo arm up (M7), settle, magnet
-// on (M3), grab dwell, the carry moves at carry speed, magnet off (M5), release dwell, arm down
-// (M8), settle. Without a servo (PIN_SERVO -1) the arm steps are left out.
+// A CARRY runs as one sequence: travel to `from` at the travel speed ($110), servo arm up (M7),
+// settle, magnet on (M3), grab dwell, the carry moves at the carry speed ($111), magnet off (M5),
+// release dwell, arm down (M8), settle. Without a servo (PIN_SERVO -1) the arm steps are left out.
 //
 // Millimetre level, the same as GRBL, so the Pi side also works unchanged against real GRBL:
 //
@@ -35,6 +35,16 @@
 //   M17 / M18           motors on (they enable themselves on the first move) / off now
 //   !                   stop at once, drop the sequence, magnet off, arm down (then $X)
 //   $$                  settings;  $I  version
+//
+// Motion settings, GRBL-style, for finding and curing a stall without reflashing. Accepted only
+// while nothing moves and no sequence runs (else error:3); kept in RAM only, so a reset brings
+// back the config.h defaults. A value past its range is "error:13 $110 must be 1..120".
+//   $110=<mm/s>         travel speed: G0, GOTO, CARRY's travel to the piece, the top of G1 (1..MAX_SPEED_MM_S)
+//   $111=<mm/s>         carry speed: CARRY's moves with the piece, and the fastest G1 with the arm up (1..MAX_SPEED_MM_S)
+//   $120=<mm/s^2>       acceleration of every move (1..MAX_ACCEL_MM_S2)
+//   $100=<steps/mm>     steps per mm, for a driver not at MICROSTEPS (40 at 1/8, 5 at full steps; 1..400).
+//                       Changing it forgets the position: alarm "not homed", then $H or $HM.
+// Homing keeps its own slow speed (never above $110); MAX_STEP_HZ still caps every feed.
 //
 // Every command is answered with "ok" (accepted) or "error:<code> <text>". Poll ? until Idle before
 // the next motion. Lines starting with # or ( are comments. Trace lines the board prints by itself
@@ -56,6 +66,12 @@
 
 #ifndef PROGRAM_STEPS
 #define PROGRAM_STEPS 48
+#endif
+#ifndef MIN_STEPS_PER_MM
+#define MIN_STEPS_PER_MM 1.0f
+#endif
+#ifndef MAX_STEPS_PER_MM
+#define MAX_STEPS_PER_MM 400.0f
 #endif
 
 namespace gantry {
@@ -108,7 +124,8 @@ enum {
   ERR_MAGNET_LONG = 10,   // a CARRY that would keep the magnet on longer than MAGNET_MAX_ON_MS
   ERR_SERVO_UP = 11,      // rapid motion with the arm extended
   ERR_SERVO_DOWN = 12,    // M3 with the arm retracted
-  ERR_COUNT = 13
+  // 13 range: motion.h ($110, $111, $120 or $100 outside its range; the reply names the range)
+  ERR_COUNT = 14
 };
 
 enum StepType { STEP_MOVE, STEP_MAG, STEP_DWELL, STEP_SERVO };
@@ -125,7 +142,7 @@ class Protocol {
   static const int PROGRAM_CAPACITY = PROGRAM_STEPS;
 
   Protocol(Motion& motion, Peripherals& p, Writer& out, const Settings& s, const BoardGeometry& board, const char* version)
-      : m_(motion), p_(p), out_(out), s_(s), board_(board), version_(version), feed_mm_s_(s.max_speed),
+      : m_(motion), p_(p), out_(out), s_(s), board_(board), version_(version), feed_mm_s_(0),
         carry_speed_(s.max_speed / 2), grab_ms_(300), release_ms_(200),
         servo_present_(false), servo_extend_(90), servo_retract_(0), servo_settle_ms_(300), servo_up_(false),
         magnet_max_on_us_(15000UL * 1000UL), magnet_min_off_us_(500UL * 1000UL), host_timeout_us_(20000UL * 1000UL),
@@ -209,6 +226,7 @@ class Protocol {
 
   bool busy() const { return dwelling_ || m_.moving() || prog_active_; }
   bool servo_up() const { return servo_up_; }
+  float carry_speed() const { return carry_speed_; }
   bool host_lost() const { return host_lost_; }
   const BoardGeometry& board() const { return board_; }
 
@@ -261,6 +279,7 @@ class Protocol {
     if (!strcmp(line, "$I")) { out_.write("["); out_.write(version_); out_.write("]\n"); reply(OK); return; }
     if (!strcmp(line, "$T")) { reply(selftest()); return; }
     if (!strncmp(line, "$B=", 3)) { reply(set_board(line + 3)); return; }
+    if (line[0] == '$' && line[1] >= '0' && line[1] <= '9') { setting_command(line + 1); return; }
     if (!strcmp(line, "M3")) { reply(magnet_command(true, now_us)); return; }
     if (!strcmp(line, "M5")) { reply(magnet_command(false, now_us)); return; }
     if (!strcmp(line, "M7")) { reply(servo_command(true)); return; }
@@ -282,11 +301,8 @@ class Protocol {
       if (g == 0 || g == 1) {
         if (busy()) { reply(ERR_BUSY); return; }
         if (m_.state() == ALARM || m_.state() == HOLD) { reply(ERR_ALARM); return; }
-        if (has_f) {
-          feed_mm_s_ = f / 60.0f;
-          if (feed_mm_s_ <= 0 || feed_mm_s_ > s_.max_speed) feed_mm_s_ = s_.max_speed;
-        }
-        float speed = g == 0 ? s_.max_speed : feed_mm_s_;
+        if (has_f) feed_mm_s_ = f / 60.0f;   // kept as asked; capped below by whatever $110 is when it runs
+        float speed = (g == 0 || feed_mm_s_ <= 0 || feed_mm_s_ > s_.max_speed) ? s_.max_speed : feed_mm_s_;
         // With the arm up the magnet is at the board: anything faster than a carry drags pieces.
         if (servo_up_ && speed > carry_speed_ + 0.001f) { reply(ERR_SERVO_UP); return; }
         float tx = has_x ? x : m_.position_mm(X), ty = has_y ? y : m_.position_mm(Y);
@@ -602,7 +618,57 @@ class Protocol {
     return c;
   }
 
-  // ------------------------------------------------------------------ $B and $T
+  // ------------------------------------------------------------------ $1xx, $B and $T
+
+  // "120" for a whole number, "12.500" otherwise.
+  static void number(float value, char* out, size_t size) {
+    if (value == (float)(long)value) snprintf(out, size, "%ld", (long)value);
+    else fixed3(value, out, size);
+  }
+
+  // $110=, $111=, $120=, $100= (text is what follows the $). Replies itself, so that a value out
+  // of range is answered with the range: "error:13 $110 must be 1..120".
+  void setting_command(const char* text) {
+    char* end;
+    long key = strtol(text, &end, 10);
+    if (*end != '=' || (key != 100 && key != 110 && key != 111 && key != 120)) { reply(ERR_UNKNOWN); return; }
+    const char* digits = end + 1;
+    float value = (float)strtod(digits, &end);
+    if (end == digits || *end) { reply(ERR_NUMBER); return; }
+    float low = key == 100 ? MIN_STEPS_PER_MM : 1.0f;
+    float high = key == 100 ? MAX_STEPS_PER_MM : key == 120 ? s_.accel_ceiling : s_.speed_ceiling;
+    if (!(value >= low && value <= high)) {   // written this way round so that NAN fails too
+      char lo[16], hi[16], buf[64];
+      number(low, lo, sizeof lo);
+      number(high, hi, sizeof hi);
+      snprintf(buf, sizeof buf, "error:%d $%ld must be %s..%s\n", (int)ERR_RANGE, key, lo, hi);
+      out_.write(buf);
+      return;
+    }
+    if (busy()) { reply(ERR_BUSY); return; }
+    if (key == 111) {
+      carry_speed_ = value;
+      reply(OK);
+      return;
+    }
+    float speed = s_.max_speed, accel = s_.accel, steps = s_.steps_per_mm;
+    if (key == 110) speed = value;
+    else if (key == 120) accel = value;
+    else steps = value;
+    int code = m_.tune(speed, accel, steps);
+    if (code == OK) {
+      // The protocol's copy follows the motion's, so GOTO, CARRY's travel, G0 and $$ see the new numbers.
+      const Settings& now = m_.settings();
+      s_.max_speed = now.max_speed;
+      s_.accel = now.accel;
+      s_.steps_per_mm = now.steps_per_mm;
+      if (key == 100 && m_.state() == ALARM) {   // the position is gone: nothing stays held or raised
+        set_magnet(false, last_now_);
+        set_servo_up(false);
+      }
+    }
+    reply(code);
+  }
 
   int set_board(const char* text) {
     float v[7];
@@ -630,7 +696,7 @@ class Protocol {
     return OK;
   }
 
-  // Homed first: the test runs at full speed to the corner squares, so the position must be real.
+  // Homed first: the test runs at the travel speed to the corner squares, so the position must be real.
   int selftest() {
     int code = ready_for_board_command();
     if (code != OK) return code;
@@ -682,7 +748,7 @@ class Protocol {
         "", "unknown command", "bad number", "busy", "outside the travel limits",
         "locked: $X to unlock, $H to home", "not a square, slot or x,y", "sequence too long",
         "not homed: $H first", "magnet cooling: wait", "magnet would be on too long",
-        "servo arm up: M8 first", "servo arm down: M7 first"};
+        "servo arm up: M8 first", "servo arm down: M7 first", "setting out of range"};
     char buf[96];
     const char* note = (code == ERR_LIMIT && !m_.homed()) ? " (not homed: $H first)" : "";
     snprintf(buf, sizeof buf, "error:%d %s%s\n", code, code < ERR_COUNT ? texts[code] : "", note);
@@ -716,7 +782,8 @@ class Protocol {
 
   void settings() {
     struct { const char* key; float value; const char* note; } rows[] = {
-        {"$100", s_.steps_per_mm, "steps/mm"}, {"$110", s_.max_speed, "max mm/s"}, {"$120", s_.accel, "mm/s^2"},
+        {"$100", s_.steps_per_mm, "steps/mm"}, {"$110", s_.max_speed, "travel mm/s"}, {"$111", carry_speed_, "carry mm/s"},
+        {"$120", s_.accel, "mm/s^2"},
         {"$130", s_.max_mm[X], "max X mm"}, {"$131", s_.max_mm[Y], "max Y mm"}, {"$22", s_.use_endstops ? 1.0f : 0.0f, "homing switches"}};
     for (auto& row : rows) {
       char value[16], buf[64];

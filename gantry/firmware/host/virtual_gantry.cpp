@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
 
   gantry::Settings settings = {
-      STEPS_PER_MM, {MAX_X_MM, MAX_Y_MM}, MAX_SPEED_MM_S, MAX_ACCEL_MM_S2, HOMING_SPEED_MM_S,
+      STEPS_PER_MM, {MAX_X_MM, MAX_Y_MM}, DEFAULT_SPEED_MM_S, DEFAULT_ACCEL_MM_S2, MAX_SPEED_MM_S, MAX_ACCEL_MM_S2, HOMING_SPEED_MM_S,
       HOMING_BUMP_MM, HOMING_PULL_OFF_MM, {INVERT_X_DIR, INVERT_Y_DIR}, COREXY, endstops, HOME_X_FIRST,
       MAX_STEP_HZ, IDLE_DISABLE_MS, ENABLE_SETTLE_MS, MOVE_BUDGET_FACTOR, MOVE_BUDGET_MARGIN_MS};
   SimHal hal;
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
       if (!moving && was_moving)
         printf("# MOVE steps=%ld,%ld to X=%.3f Y=%.3f took=%.3fs peak=%.1fmm/s\n", hal.seg_steps[0], hal.seg_steps[1],
                motion.position_mm(gantry::X), motion.position_mm(gantry::Y), (hal.last_step - hal.seg_start) / 1e6,
-               hal.peak_steps_per_s / STEPS_PER_MM);
+               hal.peak_steps_per_s / motion.settings().steps_per_mm);   // $100 may have changed it
       was_moving = moving;
       protocol.tick(hal.t);
       hal.t += moving || protocol.busy() ? 5 : 1000;

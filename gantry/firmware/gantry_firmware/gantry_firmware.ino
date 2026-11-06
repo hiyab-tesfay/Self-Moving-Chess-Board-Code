@@ -90,10 +90,13 @@ struct SerialWriter : gantry::Writer {
   void write(const char* text) override { Serial.print(text); }
 };
 
+// The boot values. $100, $110, $111 and $120 change them in RAM until the next reset.
 static const gantry::Settings SETTINGS = {
     STEPS_PER_MM,
     {MAX_X_MM, MAX_Y_MM},
-    MAX_SPEED_MM_S,
+    DEFAULT_SPEED_MM_S,
+    DEFAULT_ACCEL_MM_S2,
+    MAX_SPEED_MM_S,       // ceilings
     MAX_ACCEL_MM_S2,
     HOMING_SPEED_MM_S,
     HOMING_BUMP_MM,
@@ -172,6 +175,12 @@ void setup() {
 
   // 3. Settle, then listen. Anything the Pi sent while the ESP32 was resetting is dropped.
   delay(BOOT_SETTLE_MS);
+#if defined(ESP32)
+  // A transmit ring buffer, so that a status reply or $$ is queued and sent by the UART driver
+  // while loop() goes on stepping. Without one, Serial.print waits for room in the 128-byte FIFO
+  // (about 11 ms for a full one at 115200), and the motors stutter or stall mid-move.
+  Serial.setTxBufferSize(512);
+#endif
   Serial.begin(SERIAL_BAUD);
   delay(50);
   while (Serial.available()) Serial.read();

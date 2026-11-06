@@ -71,10 +71,19 @@
 #define MAX_X_MM 470.0f
 #define MAX_Y_MM 420.0f
 
-// Chosen for the 13 N.cm motor and a light carriage; see README.md for the numbers behind them.
-#define MAX_SPEED_MM_S 120.0f     // G0 and the top of G1
+// Ceilings: no command can set more than these ($110 and $111 up to MAX_SPEED_MM_S, $120 up to
+// MAX_ACCEL_MM_S2). The 13 N.cm motor's belt pull at 180 rpm leaves about a 2x margin at both.
+#define MAX_SPEED_MM_S 120.0f
 #define MAX_ACCEL_MM_S2 800.0f
-#define HOMING_SPEED_MM_S 25.0f
+// What the sketch starts with at power-up; $110 (travel speed), $111 (carry speed) and $120
+// (acceleration) change them over serial until the next reset (RAM only, nothing is saved).
+// Half the ceilings: a stepper's torque falls with speed, and a 13 N.cm NEMA 17 on a supply that
+// sags (a battery pack) runs out of it well before 120 mm/s, which is a stall or a buzz on the
+// bench. The lower acceleration leaves margin for a stiff spot in the rails. See README.md
+// ("Stalls and buzzing").
+#define DEFAULT_SPEED_MM_S 60.0f      // G0, GOTO, CARRY's travel to the piece, the top of G1
+#define DEFAULT_ACCEL_MM_S2 400.0f    // every move
+#define HOMING_SPEED_MM_S 25.0f       // never above the travel speed ($110)
 #define HOMING_BUMP_MM 8.0f       // without switches, drive this far past the expected end so the stall is certain
 #define HOMING_PULL_OFF_MM 2.0f   // then back off and call that 0
 
@@ -108,7 +117,13 @@
 #define PARK_PITCH_MM 35.0f
 #define PARK_ROWS 12
 
-#define CARRY_SPEED_MM_S 60.0f    // with a piece under the magnet (G0/GOTO use MAX_SPEED_MM_S)
+// With a piece under the magnet (boot value of $111; its ceiling is MAX_SPEED_MM_S). Slower than a
+// travel, for the same torque reason. At 40 mm/s every straight carry fits inside MAGNET_MAX_ON_MS
+// (the longest, the a1-h8 diagonal, 495 mm, keeps the magnet on about 13 s). The longest carries the
+// board routes through the lanes do not: a1-h7 and the like (620 mm, 16 of the 4032 square-to-square
+// pairs) and 92 of the 1536 square-to-docking-slot pairs need more than 15 s and are refused before
+// they start (error:10). At $111=50 none of the square-to-square ones are, and 4 docking ones.
+#define CARRY_SPEED_MM_S 40.0f
 #define GRAB_MS 300               // after the magnet switches on, before moving
 #define RELEASE_MS 200            // after it switches off, before moving away
 // Longest sequence one command may queue: $T with the servo is 38 steps, a CARRY is 10 plus its
@@ -137,7 +152,7 @@
 
 // The servo arm and the pieces. With the arm extended the magnet is at the board top, so a travel
 // at full speed would drag whatever piece it passes under and could rip the arm: G0, GOTO, CARRY's
-// own travel and any G1 faster than CARRY_SPEED_MM_S are refused while the arm is up (M8 first).
+// own travel and any G1 faster than the carry speed ($111) are refused while the arm is up (M8 first).
 // The arm is retracted at boot, on any alarm, on hold, on $X, on host lost and after every M5.
 
 // The stepper motors and the DRV8825 drivers. A stepper that is enabled but not moving draws its
@@ -151,9 +166,14 @@
 // The step pulse rate. The DRV8825 needs at least 1.9 us high and 1.9 us low per step, and the
 // ESP32 loop issues one step per pass; MAX_STEP_HZ caps the dominant motor's step rate, which
 // caps every feed rate (at 40 steps/mm, 20 kHz is 500 mm/s, far above MAX_SPEED_MM_S: the cap
-// matters if someone sets 1/32 microstepping or a tiny pulley). Acceleration is capped at
-// MAX_ACCEL_MM_S2 by construction: no command can raise it.
+// matters if someone sets 1/32 microstepping, a tiny pulley or a large $100). It applies on top of
+// $110 and $111. $120 can lower the acceleration or raise it back up to MAX_ACCEL_MM_S2, never past it.
 #define MAX_STEP_HZ 20000.0f
+
+// $100 (steps per mm) is accepted in this range, for a driver whose microstep pins are not what
+// MICROSTEPS assumes: 40 at 1/8, 5 at full steps (pins floating), 80 at 1/16, 160 at 1/32.
+#define MIN_STEPS_PER_MM 1.0f
+#define MAX_STEPS_PER_MM 400.0f
 
 // A move that takes far longer than planned means the loop is starved or a program is stuck; the
 // motors would sit at full current in the meantime. Every move gets a time budget of
@@ -190,4 +210,4 @@
 #else
 #define SERIAL_LINE_MAX 192
 #endif
-#define FIRMWARE_VERSION "duen-gantry 0.2"
+#define FIRMWARE_VERSION "duen-gantry 0.4"
