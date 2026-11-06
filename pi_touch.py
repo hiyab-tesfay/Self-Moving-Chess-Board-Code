@@ -698,7 +698,7 @@ class TouchApp:
         self.calibration = None
         self.reference = None
         self.session: TouchSession | None = None
-        self.calibration_flow: CalibrationFlow | None = CalibrationFlow(setup_only=True)
+        self.calibration_flow: CalibrationFlow | None = CalibrationFlow()
         self.startup_calibration = True
         self.scan_photo: np.ndarray | None = None
         self.scan_corners: list[list[float]] = []
@@ -712,9 +712,9 @@ class TouchApp:
         self.level = "beginner"
         self.busy = False
         self.selected_square: str | None = None
-        self.message = "Photograph the starting position, or use a saved calibration."
+        self.message = "Take an empty-board photo to calibrate, or use a saved calibration."
         if (args.calibration / "calibration.json").is_file() and not self.saved_calibration_available():
-            self.message = "Saved calibration cannot be reused. Take a new setup photo."
+            self.message = "Take new empty-board and setup photos to calibrate."
         self.message_color = self.MUTED
         screen_width = 800 if args.windowed else root.winfo_screenwidth()
         screen_height = 480 if args.windowed else root.winfo_screenheight()
@@ -928,7 +928,6 @@ class TouchApp:
         if flow.stage == "setup_only":
             self.heading("Starting board", "Set up all 32 pieces. The preview will show which edge the camera treats as White's side.")
             self.button("Take Setup Photo", self.capture_starting, accent=True)
-            self.button("Calibrate With Empty Board", self.start_empty_calibration, short=True)
             if self.saved_calibration_available():
                 self.button("Use Saved Calibration", self.use_saved_calibration)
             if not self.startup_calibration:
@@ -936,7 +935,6 @@ class TouchApp:
         elif flow.stage == "empty":
             self.heading("1. Empty board", "Remove every piece and take one empty-board photo.")
             self.button("Take Empty Photo", self.capture_empty, accent=True)
-            self.button("Use Setup Photo Only", self.start_calibration, short=True)
             if self.saved_calibration_available():
                 self.button("Use Saved Calibration", self.use_saved_calibration)
             if not self.startup_calibration:
@@ -1030,6 +1028,12 @@ class TouchApp:
         if not ((directory / "calibration.json").is_file() and
                 (directory / "empty_warp.png").is_file()):
             return False
+        try:
+            scoring = json.loads((directory / "calibration.json").read_text()).get("scoring", "legacy")
+        except (OSError, ValueError, AttributeError):
+            return False
+        if scoring == "temporal_v1":
+            return False
         recorded = directory / "calibration_camera.json"
         if not recorded.exists():
             camera_matches = self.camera_settings == CameraSettings()
@@ -1051,16 +1055,6 @@ class TouchApp:
         if self.session is not None or self.busy:
             return
         self.generation += 1
-        self.calibration_flow = CalibrationFlow(setup_only=True)
-        self.preview_photo = None
-        self.preview_geometry = None
-        self.say("Set up the starting position, then take one setup photo.")
-        self.render()
-
-    def start_empty_calibration(self) -> None:
-        if self.session is not None or self.busy:
-            return
-        self.generation += 1
         self.calibration_flow = CalibrationFlow()
         self.preview_photo = None
         self.preview_geometry = None
@@ -1070,10 +1064,10 @@ class TouchApp:
     def cancel_calibration(self) -> None:
         self.generation += 1
         self.busy = False
-        self.calibration_flow = CalibrationFlow(setup_only=True) if self.startup_calibration else None
+        self.calibration_flow = CalibrationFlow() if self.startup_calibration else None
         self.preview_photo = None
         self.preview_geometry = None
-        self.say("Photograph the starting position, or use a saved calibration." if self.startup_calibration else
+        self.say("Take an empty-board photo, or use a saved calibration." if self.startup_calibration else
                  "Choose a difficulty or recalibrate the board.")
         self.render()
 
@@ -1248,7 +1242,7 @@ class TouchApp:
     def start_game(self) -> None:
         if not self.saved_calibration_available():
             self.start_calibration()
-            self.say("Saved calibration is missing. Take a setup photo.", self.GOLD)
+            self.say("Take empty-board and setup photos before starting.", self.GOLD)
             return
         self.photo_adjustments = (read_photo_adjustments(self.args.calibration / "photo_adjustments.json")
                                   or PhotoAdjustments())

@@ -13,6 +13,7 @@ import numpy as np
 from board_vision import (Calibration, Observation, TemporalObservation, VisionError, load_calibration,
                           observe, save_calibration)
 from move_observation import occupied_squares
+from pi_camera import CameraSettings
 from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp, TouchSession,
                       adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
                       reusable_corners, should_retry_scan, temporal_computer_move_feedback,
@@ -326,17 +327,32 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
-    def test_user_can_choose_empty_board_calibration(self):
+    def test_normal_calibration_starts_with_empty_board(self):
         app = TouchApp.__new__(TouchApp)
         app.session = None
         app.busy = False
         app.generation = 0
         app.say = Mock()
         app.render = Mock()
-        app.start_empty_calibration()
-        self.assertEqual(app.calibration_flow.stage, "empty")
         app.start_calibration()
-        self.assertEqual(app.calibration_flow.stage, "setup_only")
+        self.assertEqual(app.calibration_flow.stage, "empty")
+        app.startup_calibration = True
+        app.cancel_calibration()
+        self.assertEqual(app.calibration_flow.stage, "empty")
+
+    def test_previous_setup_only_calibration_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+            reference = np.zeros((800, 800, 3), dtype=np.uint8)
+            app = TouchApp.__new__(TouchApp)
+            app.args = SimpleNamespace(calibration=path)
+            app.camera_settings = CameraSettings()
+            save_calibration(path, Calibration(corners, (0, 0), (0, 0),
+                                               scoring="temporal_v1"), reference)
+            self.assertFalse(app.saved_calibration_available())
+            save_calibration(path, Calibration(corners, (20, 20), (1, 1)), reference)
+            self.assertTrue(app.saved_calibration_available())
 
     def test_no_clear_move_feedback_names_strongest_squares(self):
         scores = {square: 0.0 for square in chess.SQUARE_NAMES}
