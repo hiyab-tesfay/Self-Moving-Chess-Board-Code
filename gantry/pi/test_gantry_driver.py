@@ -102,6 +102,60 @@ class BoardMapTests(unittest.TestCase):
         self.assertEqual(gd.place_name([8, 0]), "b:0")
         with self.assertRaises(gd.GantryError):
             gd.place_name([-2, 0])
+        self.assertEqual(gd.place_name([7.75, -0.175]), "7.750,-0.175", "a midpoint keeps its millimetres")
+
+    def test_millimetres_and_squares_agree_with_the_firmware_off_the_board_too(self):
+        board = gd.BoardMap(REAL)
+        # The firmware's place_mm is linear past the last rank and between the h file and the lane.
+        self.assertEqual(board.point_mm(3, 7.25), (210.0, 397.5))
+        self.assertEqual(board.point_mm(3, -0.2), (210.0, 25.0))
+        for x, y in ((0, 0), (7.5, 7.5), (7.6, -0.3), (3.25, 4.75), (-0.5, 2.0)):
+            mm = board.point_mm(x, y)
+            back = board.units(*mm)
+            self.assertAlmostEqual(back[0], x)
+            self.assertAlmostEqual(back[1], y)
+            got = board.place_mm(gd.place_name(back))
+            self.assertAlmostEqual(got[0], mm[0], places=2)
+            self.assertAlmostEqual(got[1], mm[1], places=2)
+
+    def test_a_shortcut_the_firmware_would_reroute_gets_its_midpoint(self):
+        board = gd.BoardMap(REAL)
+        straight = job("x", ("N", "b1", "c3", [[1, 0], [2, 2]]))     # not a file, rank or diagonal
+        line, = texts(gd.plan_carry(straight, board, REAL))
+        self.assertEqual(line, "CARRY b1 c3 1.5,1.0")
+        diagonal = job("x", ("B", "c1", "f4", [[2, 0], [5, 3]]))
+        self.assertEqual(texts(gd.plan_carry(diagonal, board, REAL)), ["CARRY c1 f4"], "the firmware goes straight by itself")
+        into_lane = job("x", ("p", "h2", "b:1", [[7, 1], [8, 1]]))
+        line, = texts(gd.plan_carry(into_lane, board, REAL))
+        x, y = (float(v) for v in line.split()[-1].split(","))
+        self.assertEqual(board.point_mm(x, y), ((410 + 452.5) / 2, (85 + 52.5) / 2))
+        lane = job("x", ("p", "b:1", "b:2", [[8, 1], [8, 2]]))
+        self.assertEqual(texts(gd.plan_carry(lane, board, REAL)), ["CARRY b:1 b:2"], "along the lane: the firmware's own way")
+
+
+class RouteTests(unittest.TestCase):
+    def test_a_reset_carries_a_blocked_piece_after_the_others(self):
+        board = gd.BoardMap(REAL)
+        # The knight's home g8 is still taken by the bishop, which the next carry takes home to f8.
+        before = {"e5": "n", "g8": "b"}
+        steps = [{"op": "carry", "piece": "n", "from": "e5", "to": "g8", "path": [[4, 4], [6, 7]]},
+                 {"op": "carry", "piece": "b", "from": "g8", "to": "f8", "path": [[6, 7], [5, 7]]},
+                 {"op": "note", "message": "Put a white pawn on e2."}]
+        job = {"id": 1, "label": "reset", "before": sorted(before), "pieces": before, "steps": steps, "expect": []}
+        with self.assertRaises(gd.GantryError):
+            gd.route(job, board, REAL)                 # in the order given: g8 is not empty
+        routed = gd.route(dict(job, any_order=True), board, REAL)
+        moved = [(s["from"], s["to"]) for s in routed if s["op"] == "carry"]
+        self.assertEqual(moved, [("g8", "f8"), ("e5", "g8")])
+        self.assertEqual(routed[-1]["op"], "note", "notes after every carry")
+
+    def test_a_reset_that_cannot_finish_still_fails(self):
+        board = gd.BoardMap(REAL)
+        steps = [{"op": "carry", "piece": "Q", "from": "a8", "to": "b8", "path": [[0, 7], [1, 7]]}]
+        job = {"id": 1, "label": "reset", "before": ["a8", "b8"], "pieces": {"a8": "Q", "b8": "n"}, "steps": steps,
+               "expect": [], "any_order": True}
+        with self.assertRaises(gd.GantryError):
+            gd.route(job, board, REAL)                 # b8 stays taken: a pass that moves nothing ends it
 
 
 class CarryPlanTests(unittest.TestCase):

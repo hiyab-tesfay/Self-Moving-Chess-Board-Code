@@ -241,6 +241,30 @@ class DockTests(unittest.TestCase):
         steps = layout.plan_computer(board, chess.Move.from_uci("a7a8q"))
         self.assertEqual([s["op"] for s in steps], ["carry", "note"])
 
+    def test_a_promotion_can_leave_the_spare_in_the_lane(self):
+        board = chess.Board("4k3/P7/8/8/8/8/8/4K3 w - - 0 1")
+        layout = cp.Layout(board, captures="dock")
+        layout.pieces["b:3"] = "Q"
+        steps = layout.plan_computer(board, chess.Move.from_uci("a7a8q"), spare=False)
+        self.assertEqual([s["op"] for s in steps], ["carry", "note"], "the pawn goes to a8; a person swaps it")
+        self.assertEqual(layout.pieces["b:3"], "Q")
+        self.assertEqual(cp.FALLBACKS[0], {}, "the plan as made is always tried first")
+
+    def test_the_reset_puts_back_ranks_home_before_pawns_and_deep_strays_first(self):
+        layout = cp.Layout()
+        # A white queen wandered to c8; a black knight and a white pawn are off home in the middle.
+        layout.pieces.pop("d1")
+        layout.pieces.pop("c8")
+        layout.pieces["c8"] = "Q"
+        layout.pieces.pop("b8")
+        layout.pieces["e5"] = "n"
+        layout.pieces.pop("e2")
+        layout.pieces["e4"] = "P"
+        steps = [s for s in layout.plan_reset() if s["op"] == "carry"]
+        order = [(s["from"], s["to"]) for s in steps]
+        self.assertEqual(order[0], ("c8", "d1"), "the queen leaves the back rank before anything fills round it")
+        self.assertEqual(order[-1], ("e4", "e2"), "pawns last")
+
     def test_a_reset_brings_docked_pieces_home(self):
         board, layout, jobs = play_docked(["e2e4", "d7d5", "e4d5", "d8d5"])
         job = cp.job_for_reset(layout)

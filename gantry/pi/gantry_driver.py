@@ -129,6 +129,17 @@ class BoardMap:
             return x, self.park_rows[row]
         return x, self._interp(self.rows, py, "row")
 
+    def units(self, x_mm: float, y_mm: float) -> tuple[float, float]:
+        """A point in mm as square units (the inverse of point_mm on the board and the lanes beside it)."""
+        a1x, h = self.columns[0], self.columns[7]
+        if x_mm < a1x and -1 in self.columns:
+            x = -1 + (x_mm - self.columns[-1]) / (a1x - self.columns[-1])
+        elif x_mm > h and 8 in self.columns:
+            x = 7 + (x_mm - h) / (self.columns[8] - h)
+        else:
+            x = (x_mm - a1x) / self.square
+        return x, (y_mm - self.rows[0]) / self.square
+
     def place_mm(self, place: str) -> tuple[float, float]:
         """A firmware place: a square, a slot, or "x,y" in squares."""
         if "," in place:
@@ -139,11 +150,18 @@ class BoardMap:
     def geometry(self, config: dict):
         """The same numbers for board_paths."""
         sizes = {str(k).lower(): float(v) for k, v in (config.get("piece_sizes_mm") or board_paths.DEFAULT_PIECE_SIZES_MM).items()}
+        lanes = config.get("docking_lanes")       # ["b"]: only the right lane holds pieces
+        slot_columns = None if lanes is None else tuple(
+            c for c in self.columns if (c < 0 and "w" in lanes) or (c > 7 and "b" in lanes))
+        reach = config.get("reach_mm")            # [x_min, y_min, x_max, y_max] of the magnet
         return board_paths.Geometry(
             self.square, self.a1, {c: x for c, x in self.columns.items() if c < 0 or c > 7},
             [self.park_rows[i] for i in sorted(self.park_rows)],
             float(config.get("piece_mm", 27.0)), float(config.get("clearance_mm", 3.0)),
-            float(config.get("lane_clearance_mm", 1.0)), sizes)
+            float(config.get("lane_clearance_mm", 1.0)), sizes,
+            slot_columns=slot_columns, reach_mm=tuple(float(v) for v in reach) if reach else None,
+            smooth=bool(config.get("path_smoothing", False)), corner_lag_mm=float(config.get("corner_lag_mm", 0.0)),
+            turn_penalty_mm=float(config.get("turn_penalty_mm", 2.0)))
 
     def setup_line(self) -> str:
         """The $B= line that gives the firmware this board: square, a1, and the docking lanes when configured."""
@@ -155,7 +173,8 @@ class BoardMap:
         return "$B=" + ",".join(f"{v:g}" for v in parts)
 
     def _interp(self, table: dict, value: float, what: str, outer: dict | None = None) -> float:
-        """Whole numbers are configured centres; x.5 lies halfway between its neighbours, or half a square past the last one."""
+        """Whole numbers are configured centres; between two of them the place is in proportion, and past the last one
+        it goes on at the square pitch (x.5 is half a square out), the same as the firmware's place_mm."""
         lo, hi = math.floor(value), math.ceil(value)
         known = {**(outer or {}), **table}
         if lo == hi:
@@ -165,9 +184,9 @@ class BoardMap:
         if lo in known and hi in known:
             return known[lo] + (known[hi] - known[lo]) * (value - lo)
         if hi in known:
-            return known[hi] - self.square / 2
+            return known[hi] - self.square * (hi - value)
         if lo in known:
-            return known[lo] + self.square / 2
+            return known[lo] + self.square * (value - lo)
         raise GantryError(f"{what} {value:g} is not configured")
 
     def check(self, x: float, y: float, what: str) -> None:
@@ -188,7 +207,26 @@ def place_name(point) -> str:
         raise GantryError(f"the board has no second docking lane (column {int(x)})")
     if x == int(x) and y == int(y) and 0 <= x <= 7 and 0 <= y <= 7:
         return f"{FILES[int(x)]}{int(y) + 1}"
-    return f"{x:.1f},{y:.1f}"
+    return f"{_num(x)},{_num(y)}"
+
+
+def _num(v: float) -> str:
+    """One decimal when that is exact (lanes are x.5), else three: the firmware reads any decimal."""
+    return f"{v:.1f}" if abs(v * 10 - round(v * 10)) < 1e-6 else f"{v:.3f}"
+
+
+def firmware_keeps_line(path) -> bool:
+    """Does the firmware carry a two-point path along that straight line by itself? Only between two squares on one
+    file, rank or diagonal (protocol.h route()); anything else it takes round its own corner. A move along the lane
+    between two slots keeps the firmware's own way, as before."""
+    (x0, y0), (x1, y1) = (float(v) for v in path[0]), (float(v) for v in path[-1])
+    slot0, slot1 = x0 <= -1 or x0 >= 8, x1 <= -1 or x1 >= 8
+    if slot0 and slot1:
+        return True
+    if slot0 or slot1:
+        return False
+    dx, dy = abs(x1 - x0), abs(y1 - y0)
+    return dx < 1e-9 or dy < 1e-9 or abs(dx - dy) < 1e-9
 
 
 def piece_words(symbol: str | None) -> str:
@@ -222,29 +260,46 @@ def route(job: dict, board: BoardMap, config: dict) -> list[dict]:
     the paths in the job are used as they are. A "remove" step is passed through unchanged and
     empties its square for the carries after it: the person has taken that piece off (the caller
     checked with the camera before running the job), so nothing has to be carried round it.
+    A job with "any_order" (a reset) may carry a blocked piece later instead of failing: every
+    carry is tried in order, the blocked ones again after the others, until a pass moves nothing;
+    its notes ("Put a black pawn on e7.") come after all the carries.
     """
     if "before" not in job:
         return list(job.get("steps", []))
     world = board_paths.Board(board.geometry(config), job["before"], pieces=job.get("pieces"))
+    any_order = bool(job.get("any_order"))
     steps: list[dict] = []
-    for step in job.get("steps", []):
-        if step.get("op") == "remove":
-            world.occupied.discard(step["square"])
-            world.pieces.pop(step["square"], None)
-        if step.get("op") != "carry":
-            steps.append(step)
-            continue
-        if step.get("piece") and step["from"] in world.occupied:
-            world.pieces.setdefault(step["from"], step["piece"])
-        try:
-            carries = world.plan(step["from"], step["to"])
-        except board_paths.NoPath as exc:
-            raise GantryError(str(exc)) from None
-        for carry in carries:
-            piece = step.get("piece", "?") if carry.reason == "move" else world.pieces.get(carry.piece_from, "?")
-            steps.append({"op": "carry", "piece": piece, "from": carry.piece_from, "to": carry.piece_to, "path": carry.path, "reason": carry.reason})
-            world.apply(carry)
-    return steps
+    notes: list[dict] = []
+    pending = list(job.get("steps", []))
+    while pending:
+        blocked: list[tuple[dict, str]] = []
+        moved = False
+        for step in pending:
+            if step.get("op") == "remove":
+                world.occupied.discard(step["square"])
+                world.pieces.pop(step["square"], None)
+            if step.get("op") != "carry":
+                (notes if any_order and step.get("op") == "note" else steps).append(step)
+                continue
+            if step.get("piece") and step["from"] in world.occupied:
+                world.pieces.setdefault(step["from"], step["piece"])
+            try:
+                carries = world.plan(step["from"], step["to"])
+            except board_paths.NoPath as exc:
+                if not any_order:
+                    raise GantryError(str(exc)) from None
+                # A reset: each piece only has to get home, so a blocked one waits for the others and is tried again.
+                blocked.append((step, str(exc)))
+                continue
+            moved = True
+            for carry in carries:
+                piece = step.get("piece", "?") if carry.reason == "move" else world.pieces.get(carry.piece_from, "?")
+                steps.append({"op": "carry", "piece": piece, "from": carry.piece_from, "to": carry.piece_to, "path": carry.path, "reason": carry.reason})
+                world.apply(carry)
+        if blocked and not moved:
+            raise GantryError(blocked[0][1])
+        pending = [step for step, _ in blocked]
+    return steps + notes
 
 
 def carry_limit(config: dict) -> int:
@@ -332,8 +387,13 @@ def plan_carry(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]
             continue
         if step.get("op") != "carry":
             raise GantryError(f"unknown step {step.get('op')!r}")
-        checked_points(step, board)
+        points = checked_points(step, board)
         vias = [place_name(p) for p in step["path"][1:-1]]
+        if not vias and not firmware_keeps_line(step["path"]):
+            # A shortcut straight from one place to the other: the firmware would go round its own corner
+            # instead, so the middle of the line goes along as a via-point and it stays on the planned line.
+            (ax, ay), (bx, by) = points[0], points[-1]
+            vias = [place_name(board.units((ax + bx) / 2, (ay + by) / 2))]
         if len(vias) > MAX_VIA_POINTS:
             raise GantryError(f"the way from {step['from']} to {step['to']} has {len(vias)} turns; the board takes at most {MAX_VIA_POINTS}")
         line = " ".join(["CARRY", step["from"], step["to"], *vias])

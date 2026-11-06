@@ -12,6 +12,22 @@ knight between two 23 mm pawns has exactly that); everywhere else it keeps `clea
 the search move one blocking piece to a free tile, make the move, and put the blocker back:
 three carries instead of one, which the firmware and the camera check already handle.
 
+Options (all off by default, so old configs plan exactly as before; gantry_config.json turns
+them on, and gantry/sim/path_sim.py measures what each one does over many games):
+
+  * `slot_columns`: which docking lanes may hold pieces (the bench uses only the right one);
+  * `reach_mm`: the box the magnet can reach (x_min, y_min, x_max, y_max). Nodes outside it are
+    never used: on the bench the magnet sits on the right of the Y carriage, so the far left is
+    out of reach;
+  * `smooth`: after A*, replace runs of grid points by straight shortcuts that keep the open
+    clearance, so a carry has fewer corners (every corner is a stop on the real gantry);
+  * `corner_lag_mm`: a carried piece trails the magnet by a few millimetres (the MuJoCo model says
+    5-6), so at a corner it cuts inside. With this set, a corner is only used if the chord the
+    piece cuts also touches nothing. (On this grid the simulation found it changes nothing: when
+    both legs of a corner are clear, so is the short chord. The lag matters at the end of a carry,
+    which the console's overshoot handles.);
+  * `turn_penalty_mm`: what one corner costs in the search, in millimetres of path.
+
 Names: board squares "a1".."h8"; parking slots "w:0".. and "b:0".. down the lanes beside
 the board. Path points come out in the job's square units: a1 is (0, 0), x.5 are lanes,
 and a parking slot is (column, row) with column -1 or 8 and the row an index down the lane.
@@ -37,6 +53,20 @@ class Geometry:
     clearance_mm: float = 3.0                     # air between two pieces, out in the open
     lane_clearance_mm: float = 1.0                # air when sliding along a lane between two tiles
     piece_sizes_mm: dict = field(default_factory=lambda: dict(DEFAULT_PIECE_SIZES_MM))
+    slot_columns: tuple | None = None             # docking lanes in use (None: every one in park_columns_mm)
+    reach_mm: tuple | None = None                 # (x_min, y_min, x_max, y_max) of the magnet; None: no limit
+    smooth: bool = False                          # straight shortcuts over the grid path
+    corner_lag_mm: float = 0.0                    # how far the piece trails the magnet, checked at corners
+    turn_penalty_mm: float = 2.0                  # the search's price for a change of direction
+
+    def reachable(self, x_mm: float, y_mm: float) -> bool:
+        if self.reach_mm is None:
+            return True
+        x0, y0, x1, y1 = self.reach_mm
+        return x0 - 1e-6 <= x_mm <= x1 + 1e-6 and y0 - 1e-6 <= y_mm <= y1 + 1e-6
+
+    def slot_column_in_use(self, column: int) -> bool:
+        return column in self.park_columns_mm and (self.slot_columns is None or column in self.slot_columns)
 
     def board_mm(self, x: float, y: float) -> tuple[float, float]:
         """A board point in mm. The lanes beside the board (x between -1 and 0, or 7 and 8) run between
@@ -125,8 +155,16 @@ class Board:
         self.occupied: set[str] = set(occupied)
         self.pieces: dict[str, str] = {k: v for k, v in (pieces or {}).items() if k in self.occupied}
         self.slots_per_lane = slots_per_lane or len(geometry.park_rows_mm)
-        self.nodes = self._build_nodes()
-        self.edges = self._build_edges()
+        # The grid depends only on the geometry, never on the pieces: build it once and share it (the
+        # search for room to move a blocker builds hundreds of Boards).
+        cache = geometry.__dict__.setdefault("_grids", {})
+        key = (self.slots_per_lane, geometry.reach_mm, geometry.slot_columns, geometry.square_mm, tuple(geometry.a1_mm),
+               tuple(sorted(geometry.park_columns_mm.items())), tuple(geometry.park_rows_mm))
+        if key not in cache:
+            self.nodes = self._build_nodes()
+            self.edges = self._build_edges()
+            cache[key] = (self.nodes, self.edges, {n: geometry.node_mm(n) for n in self.nodes})
+        self.nodes, self.edges, self.mm = cache[key]
 
     def size_of(self, name: str) -> float:
         return self.g.size(self.pieces.get(name))
@@ -138,8 +176,8 @@ class Board:
             color, index = name[0], int(name[2:])
             lane = index // self.slots_per_lane
             column = -1 - lane if color == "w" else 8 + lane
-            if column not in self.g.park_columns_mm:
-                raise NoPath(f"no parking lane for {name}")
+            if not self.g.slot_column_in_use(column):
+                raise NoPath(f"no parking lane in use for {name}")
             return Slot(column, index % self.slots_per_lane)
         return square_node(name)
 
@@ -153,10 +191,15 @@ class Board:
         steps = [i / 2 for i in range(-1, 16)]           # -0.5 .. 7.5
         for x in steps:
             for y in steps:
-                nodes.append((x, y))
+                if self.g.reachable(*self.g.board_mm(x, y)):
+                    nodes.append((x, y))
         for column in self.g.park_columns_mm:
+            if not self.g.slot_column_in_use(column):
+                continue
             for row in range(min(self.slots_per_lane, len(self.g.park_rows_mm))):
-                nodes.append(Slot(column, row))
+                slot = Slot(column, row)
+                if self.g.reachable(*self.g.node_mm(slot)):
+                    nodes.append(slot)
         return nodes
 
     def _lane_beside(self, column: int) -> float:
@@ -198,8 +241,9 @@ class Board:
             y = round((y_mm - self.g.a1_mm[1]) / self.g.square_mm * 2) / 2
             y = max(-0.5, min(7.5, y))
             lane = (lane_x, y)
-            edges[slot].append(lane)
-            edges[lane].append(slot)
+            if lane in edges:
+                edges[slot].append(lane)
+                edges[lane].append(slot)
         return edges
 
     # ------------------------------------------------------------------ clearance
@@ -211,66 +255,134 @@ class Board:
             return False
         return (a[0] == b[0] and a[0] != int(a[0])) or (a[1] == b[1] and a[1] != int(a[1]))
 
-    def clear(self, a, b, ignore: set[str], carried_mm: float | None = None) -> bool:
-        """Can the carried piece slide from node a to node b without touching anything but `ignore`?"""
-        pa, pb = self.g.node_mm(a), self.g.node_mm(b)
-        carried = self.g.piece_mm if carried_mm is None else carried_mm
-        air = self.g.lane_clearance_mm if self._lane_run(a, b) else self.g.clearance_mm
+    def obstacles(self, ignore: set[str]) -> list[tuple[float, float, float]]:
+        """(x mm, y mm, base width) of every piece but those in `ignore`."""
+        out = []
         for name in self.occupied:
             if name in ignore:
                 continue
             try:
-                p = self.g.node_mm(self.node(name))
+                x, y = self.g.node_mm(self.node(name))
             except NoPath:
                 continue
-            needed = (carried + self.size_of(name)) / 2 + air
-            if _dist_point_segment(p, pa, pb) < needed - 1e-9:
+            out.append((x, y, self.size_of(name)))
+        return out
+
+    def clear(self, a, b, ignore: set[str], carried_mm: float | None = None, obstacles=None) -> bool:
+        """Can the carried piece slide from node a to node b without touching anything but `ignore`?"""
+        air = self.g.lane_clearance_mm if self._lane_run(a, b) else self.g.clearance_mm
+        return self.clear_mm(self.mm.get(a) or self.g.node_mm(a), self.mm.get(b) or self.g.node_mm(b), ignore,
+                             carried_mm, air, obstacles)
+
+    def clear_mm(self, pa, pb, ignore: set[str], carried_mm: float | None, air: float, obstacles=None) -> bool:
+        """The same for any two points in mm, with `air` between the carried piece and every other one.
+        `obstacles` is self.obstacles(ignore), passed in by a search that checks many segments."""
+        carried = self.g.piece_mm if carried_mm is None else carried_mm
+        if obstacles is None:
+            obstacles = self.obstacles(ignore)
+        ax, ay = pa
+        bx, by = pb
+        lo_x, hi_x, lo_y, hi_y = min(ax, bx), max(ax, bx), min(ay, by), max(ay, by)
+        for px, py, size in obstacles:
+            needed = (carried + size) / 2 + air - 1e-9
+            if px < lo_x - needed or px > hi_x + needed or py < lo_y - needed or py > hi_y + needed:
+                continue
+            if _dist_point_segment((px, py), pa, pb) < needed:
                 return False
         return True
 
     # ------------------------------------------------------------------ search
 
+    def corner_ok(self, before, here, there, ignore: set[str], carried_mm: float, obstacles=None) -> bool:
+        """With corner_lag_mm set: the chord a trailing piece cuts at the corner `here` touches nothing."""
+        lag = self.g.corner_lag_mm
+        if lag <= 0:
+            return True
+        pb, ph, pt = self.g.node_mm(before), self.g.node_mm(here), self.g.node_mm(there)
+        d1, d2 = math.dist(pb, ph), math.dist(ph, pt)
+        if d1 < 1e-9 or d2 < 1e-9:
+            return True
+        cross = (ph[0] - pb[0]) * (pt[1] - ph[1]) - (ph[1] - pb[1]) * (pt[0] - ph[0])
+        if abs(cross) < 1e-6:
+            return True
+        k1, k2 = min(lag, d1) / d1, min(lag, d2) / d2
+        a = (ph[0] - (ph[0] - pb[0]) * k1, ph[1] - (ph[1] - pb[1]) * k1)
+        b = (ph[0] + (pt[0] - ph[0]) * k2, ph[1] + (pt[1] - ph[1]) * k2)
+        return self.clear_mm(a, b, ignore, carried_mm, self.g.lane_clearance_mm, obstacles)
+
     def find_path(self, src: str, dst: str):
         """Nodes from src to dst, or None. The piece on src and the empty dst are not obstacles."""
         start, goal = self.node(src), self.node(dst)
+        if start not in self.edges or goal not in self.edges:
+            raise NoPath(f"{src if start not in self.edges else dst} is out of the magnet's reach")
         ignore = {src, dst}
         carried = self.size_of(src)
-        goal_mm = self.g.node_mm(goal)
+        obstacles = self.obstacles(ignore)
+        mm = self.mm
+        goal_mm = mm[goal]
         best = {start: 0.0}
         came: dict = {}
-        heap = [(0.0, 0, start, None)]
+        heap = [(0.0, 0, start, None, 0.0)]
         tick = 0
         while heap:
-            _, _, node, prev = heapq.heappop(heap)
+            _, _, node, prev, cost = heapq.heappop(heap)
+            if cost > best[node] + 1e-9:
+                continue                                   # a better way here was found after this one was queued
             if node == goal:
                 path = [node]
                 while node in came:
                     node = came[node]
                     path.append(node)
-                return list(reversed(path))
-            cost = best[node]
-            here = self.g.node_mm(node)
+                path.reverse()
+                return self.shortcut(path, ignore, carried, obstacles) if self.g.smooth else path
+            here = mm[node]
             for other in self.edges.get(node, []):
-                if not self.clear(node, other, ignore, carried):
+                if not self.clear(node, other, ignore, carried, obstacles):
                     continue
-                there = self.g.node_mm(other)
+                there = mm[other]
                 step = math.hypot(there[0] - here[0], there[1] - here[1])
-                # A small price for every change of direction keeps paths simple.
+                # A price for every change of direction keeps paths simple (each corner is a stop).
                 turn = 0.0
                 if prev is not None:
-                    before = self.g.node_mm(prev)
+                    before = mm[prev]
                     d1 = (here[0] - before[0], here[1] - before[1])
                     d2 = (there[0] - here[0], there[1] - here[1])
                     if abs(d1[0] * d2[1] - d1[1] * d2[0]) > 1e-6:
-                        turn = 2.0
+                        if not self.corner_ok(prev, node, other, ignore, carried, obstacles):
+                            continue
+                        turn = self.g.turn_penalty_mm
                 new = cost + step + turn
                 if new < best.get(other, float("inf")) - 1e-9:
                     best[other] = new
                     came[other] = node
                     tick += 1
                     h = math.hypot(goal_mm[0] - there[0], goal_mm[1] - there[1])
-                    heapq.heappush(heap, (new + h, tick, other, node))
+                    heapq.heappush(heap, (new + h, tick, other, node, new))
         return None
+
+    def shortcut(self, nodes, ignore: set[str], carried: float, obstacles=None):
+        """String-pulling: from each point, jump to the farthest later point that a straight slide reaches with
+        the open clearance (never the tight lane margin), corners checked as in the search. The points stay grid
+        nodes, so the firmware can be told them exactly."""
+        if obstacles is None:
+            obstacles = self.obstacles(ignore)
+        mm = self.mm
+        out = [nodes[0]]
+        i = 0
+        while i < len(nodes) - 1:
+            for j in range(len(nodes) - 1, i, -1):
+                if j == i + 1:
+                    break
+                if not self.clear_mm(mm[nodes[i]], mm[nodes[j]], ignore, carried, self.g.clearance_mm, obstacles):
+                    continue
+                if len(out) >= 2 and not self.corner_ok(out[-2], nodes[i], nodes[j], ignore, carried, obstacles):
+                    continue
+                if j + 1 < len(nodes) and not self.corner_ok(nodes[i], nodes[j], nodes[j + 1], ignore, carried, obstacles):
+                    continue
+                break
+            out.append(nodes[j])
+            i = j
+        return out
 
     @staticmethod
     def simplify(nodes):
@@ -313,19 +425,25 @@ class Board:
             raise NoPath(f"nothing on {src}")
         if dst in self.occupied:
             raise NoPath(f"{dst} is not empty")
+        for name in (src, dst):
+            if self.node(name) not in self.edges:
+                raise NoPath(f"{name} is out of the magnet's reach")
         try:
             return [self.carry(src, dst)]
         except NoPath:
             pass
         best: tuple[float, list[Carry]] | None = None
-        blockers = [name for name in self.occupied if name not in (src, dst) and ":" not in name]
+        blockers = sorted(name for name in self.occupied if name not in (src, dst) and ":" not in name)
+        direct = math.dist(self.g.node_mm(self.node(src)), self.g.node_mm(self.node(dst)))
         for blocker in blockers:
             trial = Board(self.g, self.occupied - {blocker}, self.slots_per_lane, self.pieces)
             if trial.find_path(src, dst) is None:
                 continue
-            for tile in self.free_board_tiles():
-                if tile == dst:
-                    continue
+            at = self.g.node_mm(self.node(blocker))
+            tiles = sorted((math.dist(at, self.g.node_mm(self.node(t))), t) for t in self.free_board_tiles() if t != dst)
+            for away, tile in tiles:
+                if best is not None and 2 * away + direct >= best[0]:
+                    break                                  # every later tile is farther: none can do better
                 try:
                     out = self.carry(blocker, tile, "make room")
                     during = Board(self.g, (self.occupied - {blocker}) | {tile}, self.slots_per_lane,
@@ -342,6 +460,21 @@ class Board:
         if best is None:
             raise NoPath(f"no way from {src} to {dst}, even after moving one piece aside")
         return best[1]
+
+    def best_slot(self, src: str, slots) -> str | None:
+        """Of the free slots `slots`, the one the piece on `src` reaches by the shortest clear way (no room made),
+        or None when none is reachable directly."""
+        best = None
+        for slot in slots:
+            try:
+                nodes = self.find_path(src, slot)
+            except NoPath:
+                continue
+            if nodes is not None:
+                cost = self.path_mm(nodes)
+                if best is None or cost < best[0]:
+                    best = (cost, slot)
+        return best[1] if best else None
 
     def _node_of(self, point):
         x, y = point

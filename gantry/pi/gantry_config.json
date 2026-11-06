@@ -22,6 +22,10 @@
   "servo": true,
   "servo_settle_s": 0.3,
   "protocol": "duen",
+  "docking_lanes": ["b"],
+  "reach_mm": [50.0, 0.0, 470.0, 420.0],
+  "_reach_comment": "The magnet sits on the right of the Y carriage, so the left lane (x 17.5) and the edge lane beside the a file (x 38.75) are out of reach; only the right lane holds pieces. x_min anywhere from 39 to 60 gives the same paths: confirm the magnet reaches the a-file centres (Go to a1, a8).",
+  "path_smoothing": true,
   "max_carries_per_job": 40,
   "home_on_start": false
 }

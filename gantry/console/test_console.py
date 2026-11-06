@@ -110,15 +110,34 @@ class ConsoleTests(unittest.TestCase):
             self.assertLessEqual(held, 6.0 - FAST["grab_settle"] + 1e-9)
         self.assertEqual(groups[-1][-1], (410.0, 35.0))
 
-    def test_the_scale_divides_what_is_sent(self):
-        self.c.settings["scale"] = 2.0
+    def test_each_axis_has_its_own_scale(self):
+        self.c.settings.update(scale_x=1.0, scale_y=8.0)            # the Y driver on full steps, X right
         self.c.goto("e4")
         wait(self.c)
         st = self.c.query_status()
-        self.assertAlmostEqual(st["x"], 260.0 / 2, places=2)
-        self.assertAlmostEqual(self.c.view(0)["status"]["x"], 260.0, places=1)
+        self.assertAlmostEqual(st["x"], 260.0, places=2)
+        self.assertAlmostEqual(st["y"], 185.0 / 8, places=2)
+        view = self.c.view(0)["status"]
+        self.assertAlmostEqual(view["x"], 260.0, places=1)
+        self.assertAlmostEqual(view["y"], 185.0, places=1)
         with self.assertRaises(cs.gd.GantryError):
-            self.c.home_bump()                           # the firmware's own homing distances are wrong at scale 2
+            self.c.home_bump()                           # the firmware's own homing distances are wrong at scale 8
+        self.c.settings.update(scale_y=1.0)
+
+    def test_a_diagonal_slows_so_no_axis_passes_its_cap(self):
+        self.c.settings.update(x_speed_cap=20.0, y_speed_cap=120.0)
+        self.assertAlmostEqual(self.c.leg_speed((0, 0), (100, 0), 60.0), 20.0)
+        self.assertAlmostEqual(self.c.leg_speed((0, 0), (0, 100), 60.0), 60.0)
+        self.assertAlmostEqual(self.c.leg_speed((0, 0), (100, 100), 60.0), 20.0 * 2 ** 0.5)
+        self.assertAlmostEqual(self.c.leg_speed((0, 0), (100, 0), 60.0, capped=False), 60.0)
+
+    def test_quick_jog_clicks_queue_up(self):
+        self.c.settings.update(travel_speed=20.0)
+        for _ in range(4):
+            self.c.jog(0, 10)
+        wait(self.c)
+        self.assertAlmostEqual(self.c.query_status()["y"], 40.0, places=2)
+        self.assertFalse(any("busy" in e["text"] for e in self.c.log))
 
     def test_the_distance_check_names_floating_microstep_pins(self):
         self.c.distance_check("x", 20)
@@ -126,6 +145,50 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.c.tests["distance"]["state"], "measure")
         self.assertAlmostEqual(self.c.distance_result(160.0), 8.0)
         self.assertIn("microstep", self.c.tests["distance"]["hint"])
+
+    def test_a_carry_goes_a_little_past_the_square_and_back(self):
+        moves = []
+        real = self.c.move_to
+        def record(x, y, *args, **kwargs):
+            moves.append((round(x, 2), round(y, 2), kwargs.get("carrying", False)))
+            return real(x, y, *args, **kwargs)
+        self.c.move_to = record
+        self.c.settings.update(overshoot=5.0)
+        self.play("e2e4")
+        carried = [(x, y) for x, y, carrying in moves if carrying]
+        self.assertEqual(carried[-2:], [(260.0, 190.0), (260.0, 185.0)], "5 mm past e4 along the push, then onto e4")
+        self.assertEqual(self.c.query_status()["state"], "Idle")
+        moves.clear()
+        self.c.settings.update(overshoot=0.0)
+        self.play("e7e5")
+        self.assertEqual([(x, y) for x, y, c in moves if c][-1], (260.0, 235.0))
+        self.assertNotIn((260.0, 230.0), [(x, y) for x, y, c in moves])
+        self.c.move_to = real
+
+    def test_no_overshoot_out_of_reach(self):
+        self.c.settings.update(overshoot=5.0)
+        self.assertEqual(self.c.geometry.reach_mm[0], 50.0, "gantry_config.json: the magnet reaches from x = 50 mm")
+        self.assertEqual(self.c.overshoot_point([(110.0, 35.0), (60.0, 35.0)]), (55.0, 35.0))
+        self.assertIsNone(self.c.overshoot_point([(110.0, 35.0), (52.0, 35.0)]), "47 mm is out of reach")
+        self.assertIsNone(self.c.overshoot_point([(452.5, 300.0), (452.5, 417.5)]), "past the top of the travel")
+
+    def test_a_capture_with_no_way_into_the_lane_is_taken_off_by_hand(self):
+        self.play("e2e4", "d7d5")
+        real = cs.gd.route
+        def no_lane(job, *args):
+            if any(s.get("reason") == "capture" for s in job["steps"]):
+                raise cs.gd.GantryError("no way from d5 to b:0, even after moving one piece aside")
+            return real(job, *args)
+        cs.gd.route = no_lane
+        try:
+            preview = self.c.plan_move("e4", "d5", None, "chess")
+        finally:
+            cs.gd.route = real
+        self.assertEqual([s["op"] for s in preview["steps"]], ["remove", "carry"])
+        self.assertIn("by hand", preview["warning"])
+        self.assertIn("by hand", self.c.view(0)["preview"]["warning"])
+        self.assertFalse(any(":" in k for k in preview["after"].pieces), "nothing docked")
+        self.c.preview = None
 
     def test_the_page_only_answers_its_own_origin(self):
         cs.Handler.console = self.c
@@ -140,6 +203,7 @@ class ConsoleTests(unittest.TestCase):
                     with urllib.request.urlopen(req) as r:
                         return r.status
                 except urllib.error.HTTPError as e:
+                    e.close()
                     return e.code
             self.assertEqual(post("/api/unlock", "http://evil.example"), 403)
             self.assertEqual(post("/api/unlock", f"http://127.0.0.1:{port}"), 200)
@@ -149,6 +213,7 @@ class ConsoleTests(unittest.TestCase):
             self.assertEqual(state["geometry"]["columns"]["8"], 452.5)
         finally:
             server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

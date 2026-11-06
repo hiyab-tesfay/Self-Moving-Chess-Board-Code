@@ -52,15 +52,22 @@ DEFAULTS = {
     "travel_speed": 40.0,     # mm/s, arm down, nothing carried
     "carry_speed": 25.0,      # mm/s with a piece on the magnet
     "accel": 400.0,           # mm/s^2; sent to the board only by firmware 0.4+ ($120); 0.3 always uses 800
-    "scale": 1.0,             # real mm per mm the board counts (1 when the microstep pins match MICROSTEPS)
+    "scale_x": 1.0,           # real mm per mm the board counts, per axis: 1 when that driver's microstep pins
+    "scale_y": 1.0,           # match MICROSTEPS, about 8 when they float (full steps)
+    "x_speed_cap": 120.0,     # mm/s the X axis itself may reach (the speed ladder finds it); a diagonal slows
+    "y_speed_cap": 120.0,     # down so neither axis goes past its own cap
     "servo_settle": 0.35,     # s for the arm to come up or go down
     "grab_settle": 0.3,       # s for the magnet to take hold
     "release_settle": 0.25,   # s for the piece to settle after the magnet lets go
     "magnet_budget": 12.0,    # s of magnet-on per hold; the firmware cuts it at 15 s, so longer carries rest
+    "overshoot": 5.0,         # mm past the last point and back: the carried piece trails the magnet (MuJoCo and
+                              # gantry/sim/path_sim.py: 5-6 mm), so without this it stops that far short of the square
     "auto_run": True,         # run a move on the gantry as soon as it is made on the page
 }
-LIMITS = {"travel_speed": (2, 120), "carry_speed": (2, 120), "accel": (50, 800), "scale": (0.05, 20),
-          "servo_settle": (0, 3), "grab_settle": (0, 3), "release_settle": (0, 3), "magnet_budget": (3, 14)}
+LIMITS = {"travel_speed": (2, 120), "carry_speed": (2, 120), "accel": (50, 800), "scale_x": (0.05, 20), "scale_y": (0.05, 20),
+          "x_speed_cap": (2, 1000), "y_speed_cap": (2, 1000),
+          "servo_settle": (0, 3), "grab_settle": (0, 3), "release_settle": (0, 3), "magnet_budget": (3, 14),
+          "overshoot": (0, 15)}
 FW03_CARRY_CAP = 60.0         # board mm/s: the arm-up speed limit of firmware 0.3 (CARRY_SPEED_MM_S)
 FW03_ACCEL = 800.0            # board mm/s^2 of firmware 0.3
 CEILING_SPEED, CEILING_ACCEL = 120.0, 800.0   # the firmware's hard limits (MAX_SPEED_MM_S, MAX_ACCEL_MM_S2)
@@ -102,6 +109,9 @@ def load_settings() -> dict:
     settings = dict(DEFAULTS)
     try:
         saved = json.loads(SETTINGS_FILE.read_text())
+        if "scale" in saved:                      # one scale for both axes, before 2026-11-05 evening
+            saved.setdefault("scale_x", saved["scale"])
+            saved.setdefault("scale_y", saved["scale"])
         settings.update({k: saved[k] for k in DEFAULTS if k in saved})
     except (OSError, ValueError):
         pass
@@ -146,6 +156,7 @@ class Console:
         self.game = chess.Board()
         self.layout = cp.Layout(captures="dock")
         self.history: list[dict] = []
+        self.jog_queue: list[tuple[float, float]] = []
         self.preview: dict | None = None
         self.pending: dict | None = None  # a job that stopped part-way
         self.tests: dict = {"distance": None, "ladder": None}
@@ -329,15 +340,23 @@ class Console:
         return self.board_settings.get("$120", FW03_ACCEL)
 
     def push_tuning(self) -> None:
-        """Firmware 0.4+: give the board this page's speeds and acceleration (in its own units, 1 at least)."""
-        s = self.settings["scale"]
-        wanted = {"$110": max(1.0, min(CEILING_SPEED, self.settings["travel_speed"] / s)),
-                  "$111": max(1.0, min(CEILING_SPEED, self.settings["carry_speed"] / s)),
-                  "$120": max(1.0, min(CEILING_ACCEL, self.settings["accel"] / s))}
-        for key, value in wanted.items():
-            if abs(self.board_settings.get(key, -1) - value) > 1e-3:
-                self.exchange(f"{key}={value:.2f}")
-                self.board_settings[key] = value
+        """Firmware 0.4+: give the board speed limits that cover a move in any direction (in its own units), and the
+        gentlest acceleration; each move then sets the acceleration for its own direction (move_to)."""
+        small, large = min(self.scales()), max(self.scales())
+        for key, value in (("$110", self.settings["travel_speed"] / small), ("$111", self.settings["carry_speed"] / small),
+                           ("$120", self.settings["accel"] / large)):
+            self.set_board(key, value, self.exchange)
+
+    def set_board(self, key: str, value: float, send=None) -> None:
+        """Firmware 0.4+: $110/$111/$120 to `value` (rounded up, within 1 and the ceiling) unless it is already there."""
+        ceiling = CEILING_ACCEL if key == "$120" else CEILING_SPEED
+        value = max(1.0, min(ceiling, math.ceil(value * 100) / 100 + (0.01 if key != "$120" else 0)))
+        if abs(self.board_settings.get(key, -1) - value) > max(0.005, 0.005 * value):
+            (send or self.cmd)(f"{key}={value:.2f}")
+            self.board_settings[key] = value
+
+    def scales(self) -> tuple[float, float]:
+        return self.settings["scale_x"], self.settings["scale_y"]
 
     # ------------------------------------------------------------------ tasks
 
@@ -460,27 +479,54 @@ class Console:
 
     # ------------------------------------------------------------------ motion in real mm
 
-    def real(self, board_mm: float) -> float:
-        return board_mm * self.settings["scale"]
+    def real_xy(self, bx: float, by: float) -> tuple[float, float]:
+        sx, sy = self.scales()
+        return bx * sx, by * sy
 
     def accel_real(self) -> float:
-        return (self.settings["accel"] if self.tunable else FW03_ACCEL * self.settings["scale"])
+        return self.settings["accel"] if self.tunable else FW03_ACCEL * min(self.scales())
 
     def carry_speed_real(self) -> float:
-        cap = self.board_carry_cap() * self.settings["scale"]
-        return min(self.settings["carry_speed"], cap)
+        if self.tunable:
+            return self.settings["carry_speed"]
+        return min(self.settings["carry_speed"], FW03_CARRY_CAP * min(self.scales()))
+
+    def leg_speed(self, a, b, speed: float, capped: bool = True) -> float:
+        """The speed along a -> b (real mm) that keeps each axis under its own cap."""
+        d = math.dist(a, b)
+        if not capped or d < 1e-9:
+            return speed
+        dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+        if dx > 1e-9:
+            speed = min(speed, self.settings["x_speed_cap"] * d / dx)
+        if dy > 1e-9:
+            speed = min(speed, self.settings["y_speed_cap"] * d / dy)
+        return speed
 
     def here(self) -> tuple[float, float]:
         st = self.status or {"x": 0.0, "y": 0.0}
-        return self.real(st["x"]), self.real(st["y"])
+        return self.real_xy(st["x"], st["y"])
 
-    def move_to(self, x: float, y: float, speed: float, what: str) -> None:
+    def move_to(self, x: float, y: float, speed: float, what: str, carrying: bool = False, capped: bool = True) -> None:
+        """G1 to a point in real mm at a real speed along the move, each axis under its cap; wait until there."""
         self.map.check(x, y, what)
-        s = self.settings["scale"]
-        hx, hy = self.here()
-        self.cmd(f"G1 X{x / s:.3f} Y{y / s:.3f} F{speed / s * 60:.0f}")
-        seconds = trapezoid_s(math.hypot(x - hx, y - hy), speed, self.accel_real())
-        self.wait_idle(5 + 3 * seconds, what)
+        sx, sy = self.scales()
+        here = self.here()
+        v = self.leg_speed(here, (x, y), speed, capped)
+        d = math.dist(here, (x, y))
+        board_d = math.hypot((x - here[0]) / sx, (y - here[1]) / sy)
+        feed = v * board_d / d if d > 1e-9 else v / max(sx, sy)      # board mm/s that gives v real
+        if self.tunable:
+            if feed > self.board_settings.get("$110", 0):
+                self.set_board("$110", feed)
+            if carrying and feed > self.board_settings.get("$111", 0):
+                self.set_board("$111", feed)
+            if d > 1e-9:
+                self.set_board("$120", self.settings["accel"] * board_d / d)
+        else:
+            feed = min(feed, CEILING_SPEED, FW03_CARRY_CAP if carrying else CEILING_SPEED)
+        self.cmd(f"G1 X{x / sx:.3f} Y{y / sy:.3f} F{feed * 60:.1f}")
+        self.wait_idle(5 + 3 * trapezoid_s(d, v, self.accel_real()), what)
 
     def arm_down(self) -> None:
         if (self.status or {}).get("servo") == "up":
@@ -511,12 +557,13 @@ class Console:
         """The carry legs grouped so the magnet is never on longer than the budget: a group ends with a rest
         (the piece set down where it is, on its clear path, and picked up again). A leg longer than the
         budget is cut into equal parts first."""
-        speed, accel = self.carry_speed_real(), self.accel_real()
+        accel = self.accel_real()
         budget = self.settings["magnet_budget"] - self.settings["grab_settle"]
         pts = [points[0]]
         for b in points[1:]:
             a = pts[-1]
             d = math.dist(a, b)
+            speed = self.leg_speed(a, b, self.carry_speed_real())
             parts = 1
             while trapezoid_s(d / parts, speed, accel) + POLL_LEG_S > budget * 0.9:
                 parts += 1
@@ -524,7 +571,7 @@ class Console:
                 pts.append((a[0] + (b[0] - a[0]) * k / parts, a[1] + (b[1] - a[1]) * k / parts))
         groups, current, used = [], [pts[0]], 0.0
         for a, b in zip(pts, pts[1:]):
-            leg = trapezoid_s(math.dist(a, b), speed, accel) + POLL_LEG_S
+            leg = trapezoid_s(math.dist(a, b), self.leg_speed(a, b, self.carry_speed_real()), accel) + POLL_LEG_S
             if used + leg > budget and len(current) > 1:
                 groups.append(current)
                 current, used = [a], 0.0
@@ -541,13 +588,29 @@ class Console:
         self.arm_down()
         self.move_to(*points[0], self.settings["travel_speed"], f"going to {step['from']}")
         groups = self.holds(points)
+        past = self.overshoot_point(points)
+        if past:
+            groups[-1] += [past, points[-1]]   # well under a second more, inside the firmware's 15 s
         for i, group in enumerate(groups):
             if i:
                 self.say("info", "Resting the magnet: setting the piece down on its path and picking it up again")
             self.grab()
             for x, y in group[1:]:
-                self.move_to(x, y, self.carry_speed_real(), label)
+                self.move_to(x, y, self.carry_speed_real(), label, carrying=True)
             self.release()
+
+    def overshoot_point(self, points: list[tuple[float, float]]) -> tuple[float, float] | None:
+        """Where the magnet goes past the last point, along the last leg, so the trailing piece is pulled onto the
+        square; None when the setting is 0 or that point is outside the travel or the magnet's reach."""
+        d = self.settings.get("overshoot", 0.0)
+        (ax, ay), (bx, by) = points[-2], points[-1]
+        leg = math.dist((ax, ay), (bx, by))
+        if d <= 0 or leg < 1e-6:
+            return None
+        x, y = bx + (bx - ax) / leg * d, by + (by - ay) / leg * d
+        if not (0 <= x <= self.map.travel[0] and 0 <= y <= self.map.travel[1]) or not self.geometry.reachable(x, y):
+            return None
+        return x, y
 
     # ------------------------------------------------------------------ planning
 
@@ -555,18 +618,12 @@ class Console:
         """The free right-lane slot with the shortest clear way from `square`, or None (the planner then takes the
         first free slot and the path finder makes room)."""
         world = bp.Board(self.geometry, set(layout.pieces), pieces=dict(layout.pieces))
-        best = None
-        for slot in layout.free_slots():
-            nodes = world.find_path(square, slot)
-            if nodes is not None:
-                cost = world.path_mm(nodes)
-                if best is None or cost < best[0]:
-                    best = (cost, slot)
-        return best[1] if best else None
+        return world.best_slot(square, layout.free_slots())
 
     def make_preview(self, kind: str, label: str, steps: list[dict], before: cp.Layout, after: cp.Layout,
                      game_after: chess.Board | None, extra: dict | None = None) -> dict:
         job = cp.job_for_steps(before, after, label, steps)
+        job["any_order"] = kind == "reset"          # a blocked piece goes home later in the reset instead of failing
         routed = gd.route(job, self.map, self.config)
         carries = [s for s in routed if s["op"] == "carry"]
         gd.check_carry_count(len(carries), self.config, label)
@@ -582,11 +639,14 @@ class Console:
                     self.map.check(x, y, f"point {p} of {step['from']}->{step['to']}")
                 item.update(piece=step.get("piece"), frm=step["from"], to=step["to"], reason=step.get("reason", "move"),
                             points=[[round(x, 2), round(y, 2)] for x, y in pts])
-                seconds += trapezoid_s(math.dist(here, pts[0]), travel, accel) + overhead
-                seconds += sum(trapezoid_s(math.dist(a, b), carry_v, accel) + POLL_LEG_S for a, b in zip(pts, pts[1:]))
+                seconds += trapezoid_s(math.dist(here, pts[0]), self.leg_speed(here, pts[0], travel), accel) + overhead
+                seconds += sum(trapezoid_s(math.dist(a, b), self.leg_speed(a, b, carry_v), accel) + POLL_LEG_S
+                               for a, b in zip(pts, pts[1:]))
                 groups = self.holds(pts)
                 rests += len(groups) - 1
                 seconds += (len(groups) - 1) * overhead
+                if self.overshoot_point(pts):
+                    seconds += 2 * (trapezoid_s(self.settings["overshoot"], carry_v, accel) + POLL_LEG_S)
                 here = pts[-1]
             elif step["op"] == "remove":
                 item.update(piece=step.get("piece"), square=step["square"])
@@ -649,10 +709,43 @@ class Console:
                 game_after.push(move)
                 label = move.uci()
                 extra = {"san": san, "uci": move.uci()}
-            preview = self.make_preview("free" if mode == "free" else "move", label, steps, before, after, game_after, extra)
-            preview["job_steps"] = steps
+            try:
+                preview = self.make_preview("free" if mode == "free" else "move", label, steps, before, after, game_after, extra)
+            except gd.GantryError as exc:
+                if mode == "free":
+                    raise
+                preview = self.fallback_preview(move, label, steps, before, game_after, extra, exc)
+            preview.setdefault("job_steps", steps)
             self.preview = preview
             return preview
+
+    def fallback_preview(self, move: chess.Move, label: str, steps: list[dict], before: cp.Layout,
+                         game_after: chess.Board, extra: dict, exc: Exception) -> dict:
+        """No clear way for the plan as made (a crowded corner, now that the left side is out of reach): the
+        promotion without the docked spare, then the captured piece taken off by hand too (cp.FALLBACKS)."""
+        docked = next((s for s in steps if s.get("op") == "carry" and s.get("reason") == "capture"), None)
+        spare = next((s for s in steps if s.get("op") == "carry" and s.get("reason") == "promotion" and ":" in s["from"]), None)
+        for options in cp.FALLBACKS[1:]:
+            if options.get("by_hand") and not docked:
+                continue
+            if not options.get("by_hand") and not spare:
+                continue
+            after = before.copy()
+            tried = after.plan_computer(self.game, move, **options)
+            try:
+                preview = self.make_preview("move", label, tried, before, after, game_after, dict(extra))
+            except gd.GantryError:
+                continue
+            why = []
+            if spare:
+                why.append(f"the docked piece on {spare['from']} has no clear way out, so the pawn goes to {move.uci()[2:4]}: swap it by hand")
+            if options.get("by_hand"):
+                why.append(f"no clear way from {docked['from']} to the docking lane: take that piece off by hand")
+            preview["warning"] = f"{'; '.join(why)} ({exc})."
+            preview["warning"] = preview["warning"][0].upper() + preview["warning"][1:]
+            preview["job_steps"] = tried
+            return preview
+        raise exc
 
     def plan_undo(self) -> dict:
         with self.lock:
@@ -827,8 +920,8 @@ class Console:
         self.say("info", "Home set: this spot is 0,0 (the bottom-left corner)")
 
     def home_bump(self) -> None:
-        if abs(self.settings["scale"] - 1) > 0.05:
-            raise gd.GantryError("Bump homing runs at the firmware's own speed and distance, which are wrong while the "
+        if any(abs(s - 1) > 0.05 for s in self.scales()):
+            raise gd.GantryError("Bump homing runs at the firmware's own speed and distance, which are wrong while a "
                                  "scale is not 1. Home by hand (Set home here) instead.")
         self.start("Bump homing", self._home_bump)
 
@@ -839,18 +932,31 @@ class Console:
         self.say("info", "Homed by bumping into the bottom-left corner")
 
     def jog(self, dx: float, dy: float) -> None:
+        with self.lock:
+            if self.task and self.task["name"] == "Jog":     # clicked again while it moves: do it next
+                self.jog_queue.append((dx, dy))
+                return
         self.start("Jog", self._jog, dx, dy)
 
     def _jog(self, dx: float, dy: float) -> None:
         st = self.require(homed=False)
         self.arm_down()
-        hx, hy = self.real(st["x"]), self.real(st["y"])
-        if not st["homed"]:
-            if dx < 0 or dy < 0:
-                raise gd.GantryError("Not homed: the board only jogs in +X and +Y until it is homed")
-            if st["state"] == "Alarm":
-                self.cmd("$X")
-        self.move_to(hx + dx, hy + dy, self.settings["travel_speed"], "jog")
+        todo = [(dx, dy)]
+        while todo:
+            dx, dy = todo.pop(0)
+            hx, hy = self.here()
+            if not st["homed"]:
+                if dx < 0 or dy < 0:
+                    raise gd.GantryError("Not homed: the board only jogs in +X and +Y until it is homed")
+                if st["state"] == "Alarm":
+                    self.cmd("$X")
+                    st = self.query_status()
+            self.move_to(hx + dx, hy + dy, self.settings["travel_speed"], "jog")
+            with self.lock:
+                todo += self.jog_queue
+                self.jog_queue.clear()
+                if not todo and self.task:
+                    self.task["name"] = "Jog (finishing)"   # a click from now on starts a new jog
 
     def goto(self, place: str) -> None:
         x, y = self.map.place_mm(place.strip().lower() if ":" not in place else place.strip())
@@ -900,9 +1006,8 @@ class Console:
             SETTINGS_FILE.write_text(json.dumps(new, indent=2) + "\n")
         if self.link is not None and self.tunable:
             self.push_tuning()
-        cap = self.board_carry_cap() * self.settings["scale"]
-        if self.settings["carry_speed"] > cap + 1e-6:
-            self.say("warn", f"The board limits arm-up moves to {cap:.0f} mm/s; carries run at that speed")
+        if self.settings["carry_speed"] > self.carry_speed_real() + 1e-6:
+            self.say("warn", f"This firmware limits arm-up moves to {self.carry_speed_real():.0f} mm/s; carries run at that speed")
         self.say("info", "Settings saved")
 
     # ------------------------------------------------------------------ stall checks
@@ -937,10 +1042,10 @@ class Console:
             if not 0.5 <= measured <= 2000:
                 raise gd.GantryError("enter the measured distance in mm")
             scale = measured / test["mm"]
-            test.update(measured=measured, scale=round(scale, 4), state="done")
+            test.update(measured=measured, scale=round(scale, 4), state="done", key=f"scale_{test['axis']}")
         if abs(scale - 8) < 0.8:
-            hint = ("About 8x: the X/Y driver's microstep pins are floating (full steps). Wire M0 and M1 to 3.3 V and M2 "
-                    "to GND for 1/8 steps, or keep this scale.")
+            hint = (f"About 8x: the {test['axis'].upper()} driver's microstep pins are floating (full steps). Wire M0 and M1 "
+                    "to 3.3 V and M2 to GND for 1/8 steps, or use this scale for that axis.")
         elif abs(scale - 0.5) < 0.05:
             hint = "About half: the driver is at 1/16 steps. Set M2 low (1/8) or keep this scale."
         elif abs(scale - 1) < 0.03:
@@ -954,7 +1059,8 @@ class Console:
     def ladder(self, axis: str, distance: float, speeds: list[float]) -> None:
         if axis not in ("x", "y"):
             raise gd.GantryError("choose X or Y")
-        speeds = sorted({float(v) for v in speeds if 1 <= float(v) <= CEILING_SPEED * self.settings["scale"]})
+        scale = self.settings["scale_x" if axis == "x" else "scale_y"]
+        speeds = sorted({float(v) for v in speeds if 1 <= float(v) <= CEILING_SPEED * scale})
         if not speeds:
             raise gd.GantryError("no speeds to try")
         self.start(f"Speed ladder {axis.upper()}", self._ladder, axis, float(distance), speeds)
@@ -962,7 +1068,7 @@ class Console:
     def _ladder(self, axis: str, distance: float, speeds: list[float]) -> None:
         st = self.require(homed=True)
         self.arm_down()
-        hx, hy = self.real(st["x"]), self.real(st["y"])
+        hx, hy = self.real_xy(st["x"], st["y"])
         out = (hx + distance, hy) if axis == "x" else (hx, hy + distance)
         self.map.check(*out, "the far end of the speed ladder")
         test = {"axis": axis, "distance": distance, "speeds": speeds, "at": None, "ok": [], "stalled": None, "done": False}
@@ -970,17 +1076,13 @@ class Console:
             self.tests["ladder"] = test
         raised = False
         try:
-            if self.tunable:           # let the ladder go past the page's travel speed
-                s = self.settings["scale"]
-                self.cmd(f"$110={min(CEILING_SPEED, max(speeds) / s):.2f}")
-                self.board_settings["$110"] = min(CEILING_SPEED, max(speeds) / s)
-                raised = True
+            raised = self.tunable      # move_to raises $110 as the ladder climbs; put it back after
             for v in speeds:
                 test["at"] = v
                 self.progress(f"Speed ladder {axis.upper()}: {v:g} mm/s out and back ({distance:g} mm). Press It stalled if it buzzes or skips.")
-                self.move_to(*out, v, f"ladder {v:g} mm/s out")
+                self.move_to(*out, v, f"ladder {v:g} mm/s out", capped=False)
                 self.sleep(0.4)
-                self.move_to(hx, hy, v, f"ladder {v:g} mm/s back")
+                self.move_to(hx, hy, v, f"ladder {v:g} mm/s back", capped=False)
                 self.sleep(0.8)
                 test["ok"].append(v)
             test["done"] = True
@@ -1000,8 +1102,8 @@ class Console:
                 raise gd.GantryError("no speed ladder is running")
             test["stalled"] = test["at"]
             good = test["ok"][-1] if test["ok"] else None
-            test["recommend"] = {"travel_speed": round(0.7 * good) if good else None,
-                                 "carry_speed": round(min(0.6 * good, 40)) if good else None}
+            test["recommend"] = {f"{test['axis']}_speed_cap": round(0.7 * good) if good else None,
+                                 "carry_speed": round(min(0.6 * good, self.settings["carry_speed"])) if good else None}
         self.stop()
         self.position_lost = True
         self.say("warn", f"Stall reported at {test['stalled']:g} mm/s on {test['axis'].upper()}. The carriage may have slipped: "
@@ -1012,18 +1114,19 @@ class Console:
 
     def view(self, since: int) -> dict:
         with self.lock:
-            s = self.settings["scale"]
             st = self.status
             status = None
             if st:
+                rx, ry = self.real_xy(st["x"], st["y"])
                 status = {k: st[k] for k in ("state", "reason", "magnet", "homed", "servo", "host_lost", "prog")}
-                status.update(x=round(st["x"] * s, 2), y=round(st["y"] * s, 2), raw=st["raw"])
+                status.update(x=round(rx, 2), y=round(ry, 2), raw=st["raw"])
             legal: dict[str, list[str]] = {}
             for move in self.game.legal_moves:
                 legal.setdefault(chess.square_name(move.from_square), []).append(chess.square_name(move.to_square))
             preview = None
             if self.preview:
                 preview = {k: self.preview[k] for k in ("kind", "label", "san", "steps", "carries", "seconds", "rests")}
+                preview["warning"] = self.preview.get("warning")
             pending = None
             if self.pending:
                 p = self.pending
@@ -1031,7 +1134,7 @@ class Console:
             outcome = self.game.outcome()
             return {
                 "connected": self.link is not None, "port": self.port, "firmware": self.firmware, "tunable": self.tunable,
-                "board_settings": self.board_settings, "carry_cap": round(self.board_carry_cap() * s, 1),
+                "board_settings": self.board_settings, "carry_cap": round(self.carry_speed_real(), 1),
                 "accel_now": round(self.accel_real(), 1), "status": status, "position_lost": self.position_lost,
                 "restarts": self.restarts,
                 "task": {"name": self.task["name"], "progress": self.task["progress"]} if self.task else None,
@@ -1043,7 +1146,8 @@ class Console:
                 "layout": self.layout.pieces,
                 "geometry": {"square": self.map.square, "a1": self.map.a1, "travel": self.map.travel,
                              "columns": {str(k): v for k, v in self.map.columns.items() if k < 0 or k > 7},
-                             "park_rows": [self.map.park_rows[i] for i in sorted(self.map.park_rows)]},
+                             "park_rows": [self.map.park_rows[i] for i in sorted(self.map.park_rows)],
+                             "reach": self.geometry.reach_mm, "lanes": self.config.get("docking_lanes")},
                 "log": [e for e in self.log if e["id"] > since], "log_id": self.log_id,
             }
 

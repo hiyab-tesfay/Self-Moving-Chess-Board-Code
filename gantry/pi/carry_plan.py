@@ -140,11 +140,15 @@ class Layout:
         """A person takes the piece on `square` off the board; it leaves the layout (the person keeps it)."""
         return {"op": "remove", "piece": self.pieces.pop(square), "square": square}
 
-    def plan_computer(self, board: chess.Board, move: chess.Move, dock_slot: str | None = None) -> list[dict]:
+    def plan_computer(self, board: chess.Board, move: chess.Move, dock_slot: str | None = None,
+                      by_hand: bool = False, spare: bool = True) -> list[dict]:
         """The steps for the gantry to play `move` on `board`. Updates the layout.
 
         A capture comes first: a `remove` step, or in dock mode a carry into `dock_slot` (or the first
-        free slot; a `remove` again when the lane is full). Then the carries of the move itself.
+        free slot; a `remove` again when the lane is full, or with `by_hand`, which the caller sets when
+        the path finder found no way into the lane). Then the carries of the move itself; a promotion
+        in dock mode brings a docked piece of the new kind out, unless `spare` is False (no way for it).
+        FALLBACKS lists what a caller tries, in order, when the path finder refuses a plan.
         """
         if move not in board.legal_moves:
             raise ValueError(f"illegal move {move.uci()}")
@@ -152,12 +156,12 @@ class Layout:
         steps: list[dict] = []
         taken = removal(board, move)
         if taken:
-            if self.captures == "dock" and self.free_slots():
+            if self.captures == "dock" and self.free_slots() and not by_hand:
                 steps.append(self.dock(taken[0], dock_slot))
             else:
                 steps.append(self.remove(taken[0]))
-        spare = None
-        if move.promotion and self.captures == "dock":
+        use_spare, spare = spare, None
+        if move.promotion and self.captures == "dock" and use_spare:
             spare = self.docked(chess.Piece(move.promotion, board.turn).symbol())
         if board.is_castling(move):
             rank = source[1]
@@ -226,7 +230,7 @@ class Layout:
                 name = spare
             parked.append(name)
         while goals:
-            ready = [name for name in sorted(goals) if goals[name] not in self.pieces]
+            ready = sorted((name for name in goals if goals[name] not in self.pieces), key=lambda n: _reset_order(n, goals[n]))
             if ready:
                 steps.append(self.carry(ready[0], goals.pop(ready[0])))
                 continue
@@ -251,16 +255,31 @@ class Layout:
         raise ValueError("no empty square to step aside to")
 
 
+# What to try when the path finder finds no way for a plan, in order: as planned; the promotion without the docked
+# spare (the pawn goes to the square, a note asks for the swap); and the captured piece taken off by the person too.
+FALLBACKS = ({}, {"spare": False}, {"spare": False, "by_hand": True})
+
+
+def _reset_order(source: str, goal: str) -> tuple:
+    """Which stray goes home first. The back ranks before the pawns: a queen or king (27 mm) cannot pass between two
+    pawns already home (it needs 26 mm of lane; there are 25), so it must be home before they are. And a stray standing
+    deep in the home ranks before one in the middle: the home ranks fill round it and wall it in (the path simulation
+    found a queen left on c8 that could no longer reach d1)."""
+    depth = {"1": 0, "8": 0, "2": 1, "7": 1}.get(source[1], 2) if ":" not in source else 3
+    return (goal[1] in "27", depth, source)
+
+
 def job_for_steps(layout_before: Layout, layout_after: Layout, label: str, steps: list[dict], job_id: int = 0) -> dict:
     """A job in the shape the gantry driver and the website's game server use."""
     return {"id": job_id, "label": label, "before": sorted(layout_before.pieces), "pieces": dict(layout_before.pieces),
             "steps": steps, "expect": layout_after.on_board()}
 
 
-def job_for_move(layout: Layout, board: chess.Board, move: chess.Move, job_id: int = 0, dock_slot: str | None = None) -> dict:
+def job_for_move(layout: Layout, board: chess.Board, move: chess.Move, job_id: int = 0, dock_slot: str | None = None,
+                 by_hand: bool = False, spare: bool = True) -> dict:
     """Plan `move` for the gantry; `layout` is updated to the position after it."""
     before = layout.copy()
-    steps = layout.plan_computer(board, move, dock_slot)
+    steps = layout.plan_computer(board, move, dock_slot, by_hand, spare)
     return job_for_steps(before, layout, move.uci(), steps, job_id)
 
 
@@ -269,6 +288,7 @@ def job_for_reset(layout: Layout, job_id: int = 0) -> dict:
     before = layout.copy()
     steps = layout.plan_reset()
     job = job_for_steps(before, layout, "reset", steps, job_id)
+    job["any_order"] = True      # the driver may carry a blocked piece later in the reset instead of failing
     job["expect"] = Layout().on_board()
     return job
 

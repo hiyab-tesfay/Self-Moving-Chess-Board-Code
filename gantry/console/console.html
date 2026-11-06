@@ -99,7 +99,7 @@
       <div id="boardlegend">
         <span>Click a piece, then where it goes.</span>
         <span><b style="color:var(--gold)">◯</b> right docking lane (captures go here)</span>
-        <span><b style="color:#aaa">◯</b> left lane: too tight, not used</span>
+        <span><b style="color:#aaa">▨</b> out of the magnet's reach (it sits on the right of the Y carriage)</span>
         <span><b style="color:var(--red)">⊕</b> the magnet carriage</span>
       </div>
       <div id="promo"><div class="box"><span class="muted">Promote to</span>
@@ -177,13 +177,17 @@
           <label class="field"><span>Travel speed<small>mm/s, arm down</small></span><input type="number" id="s_travel_speed" step="1"></label>
           <label class="field"><span>Carry speed<small>mm/s, piece on the magnet</small></span><input type="number" id="s_carry_speed" step="1"></label>
           <label class="field"><span>Acceleration<small id="accelnote">mm/s²</small></span><input type="number" id="s_accel" step="10"></label>
-          <label class="field"><span>Scale<small>real mm per mm counted</small></span><input type="number" id="s_scale" step="0.001"></label>
+          <label class="field"><span>X scale<small>real mm per mm counted</small></span><input type="number" id="s_scale_x" step="0.001"></label>
+          <label class="field"><span>Y scale<small>about 8 if its driver is on full steps</small></span><input type="number" id="s_scale_y" step="0.001"></label>
         </div>
         <div>
           <label class="field"><span>Arm settle<small>s</small></span><input type="number" id="s_servo_settle" step="0.05"></label>
           <label class="field"><span>Grab settle<small>s</small></span><input type="number" id="s_grab_settle" step="0.05"></label>
           <label class="field"><span>Release settle<small>s</small></span><input type="number" id="s_release_settle" step="0.05"></label>
           <label class="field"><span>Magnet per hold<small>s, the board cuts it at 15</small></span><input type="number" id="s_magnet_budget" step="0.5"></label>
+          <label class="field"><span>Overshoot<small>mm past the square and back, so the trailing piece lands on centre</small></span><input type="number" id="s_overshoot" step="0.5"></label>
+          <label class="field"><span>X axis top speed<small>mm/s; the ladder finds it</small></span><input type="number" id="s_x_speed_cap" step="1"></label>
+          <label class="field"><span>Y axis top speed<small>mm/s; diagonals slow to suit</small></span><input type="number" id="s_y_speed_cap" step="1"></label>
         </div>
       </div>
       <div class="row"><button class="btn primary" id="savesettings">Save speeds</button><button class="btn" id="revertsettings">Revert</button></div>
@@ -194,9 +198,9 @@
       <div class="note">A stepper buzzes without turning when it is asked for more than it can give at that speed, when it gets
         less current or voltage than it needs, or when the carriage binds. These checks tell which.</div>
       <details open><summary>1. Distance check (microstep pins)</summary>
-        <div class="note">Moves one axis a short way slowly, as the board counts it. Measure with a ruler how far it really went.
-          About 8× too far means the driver's M0/M1/M2 pins are floating (full steps): every move is 8× too far and 8× too fast,
-          which is the classic stall.</div>
+        <div class="note">Moves one axis a short way slowly, as the board counts it. Measure with a ruler how far it really went,
+          and do it for X and for Y: each driver has its own pins. About 8× too far means that driver's M0/M1/M2 pins are floating
+          (full steps): every move on that axis is 8× too far and 8× too fast, which is the classic stall.</div>
         <div class="row"><select id="d_axis"><option value="x">X</option><option value="y">Y</option></select>
           <input type="number" id="d_mm" value="20" min="1" max="60"><span class="muted">mm counted</span>
           <button class="btn" id="d_run">Run</button></div>
@@ -255,13 +259,31 @@ async function api(path, body) {
   } catch (e) { toast("The console server is not answering: is console.sh still running?", true); return null; }
 }
 
+let realPorts = [];
 async function loadPorts() {
+  // Called every few seconds: an ESP32 plugged in (or back after a flash) shows up without pressing the refresh button,
+  // and a real port is always chosen over the pretend board unless the person picks sim themselves.
   try {
     const j = await (await fetch("/api/ports")).json();
     const sel = $("#ports"), keep = sel.value;
-    sel.innerHTML = j.ports.map((p) => `<option value="${p}">${p === "sim" ? "sim (pretend board)" : p}</option>`).join("");
-    if (j.ports.includes(keep)) sel.value = keep;
+    const was = realPorts.join();
+    realPorts = j.ports.filter((p) => p !== "sim");
+    const html = j.ports.map((p) => `<option value="${p}">${p === "sim" ? "sim (pretend board: nothing on the bench moves)" : p}</option>`).join("");
+    if (sel.innerHTML !== html) sel.innerHTML = html;
+    if (keep && j.ports.includes(keep) && (keep !== "sim" || simChosen)) sel.value = keep;
+    else sel.value = realPorts[0] || "sim";
+    if (was !== realPorts.join() && S) render();
   } catch (e) { /* the poll shows the server is down */ }
+}
+let simChosen = false;
+
+async function switchToReal() {
+  const port = realPorts[0];
+  if (!port) return;
+  await api("/api/disconnect");
+  $("#ports").value = port;
+  simChosen = false;
+  await api("/api/connect", { port });
 }
 
 async function poll() {
@@ -306,7 +328,8 @@ function render() {
 
 function renderHeader() {
   $("#linkdot").className = "dot " + (S.connected ? "ok" : "");
-  $("#linktext").textContent = S.connected ? `${S.port === "sim" ? "Pretend board" : S.port}` : (S.task && S.task.name === "Connecting" ? "Connecting…" : "Not connected");
+  $("#linktext").textContent = S.connected ? `${S.port === "sim" ? "PRETEND BOARD (not the gantry)" : S.port}` : (S.task && S.task.name === "Connecting" ? "Connecting…" : "Not connected");
+  $("#linkdot").className = "dot " + (S.connected ? (S.port === "sim" ? "run" : "ok") : "");
   const st = S.status;
   if (!st) {
     $("#statetext").textContent = "—"; $("#statedot").className = "dot"; $("#pospill").textContent = "X — Y —"; $("#armpill").textContent = "arm —";
@@ -322,6 +345,15 @@ function renderHeader() {
 function renderBanners() {
   const out = [];
   if (offline) out.push(`<div class="banner bad">The console server is not running. Start it again with console.sh.</div>`);
+  if (!offline && S.connected && S.port === "sim") {
+    out.push(`<div class="banner warn"><b>Pretend board.</b> This page is driving the simulator, not the gantry: nothing on the bench moves.
+      ${realPorts.length ? `<div class="row"><button class="btn primary" onclick="switchToReal()">Switch to the real board (${esc(realPorts[0])})</button></div>`
+                         : " No ESP32 is on USB right now: plug it in with a data cable and a button to switch appears here."}</div>`);
+  }
+  if (!offline && !S.connected && !(S.task && S.task.name === "Connecting")) {
+    out.push(`<div class="banner info">${realPorts.length ? `The ESP32 is on <b>${esc(realPorts[0])}</b>: press Connect in Board link and homing.`
+                                                          : "No ESP32 on USB. Plug it in with a data cable (and the battery pack for the motors); it shows up here by itself."}</div>`);
+  }
   if (S.waiting) out.push(`<div class="banner warn">${esc(S.waiting)}<div class="row"><button class="btn gold" onclick="api('/api/done')">Done</button></div></div>`);
   if (S.pending) out.push(`<div class="banner bad"><b>${esc(S.pending.san)}</b> stopped after ${S.pending.next} of ${S.pending.total} steps.
       If a piece stopped part-way along its path, put it back on the square it started from before Retry.
@@ -353,6 +385,14 @@ function renderBoard() {
     parts.push(`<rect x="${x - half}" y="${sy(y) - half}" width="${g.square}" height="${g.square}" fill="${(f + r) % 2 ? "var(--light-sq)" : "var(--dark-sq)"}"/>`);
     if (r === 0) parts.push(`<text x="${x}" y="${sy(y) + half + 9}" text-anchor="middle" font-size="8" fill="#6d6080">${FILES[f]}</text>`);
     if (f === 0) parts.push(`<text x="${x - half - 5}" y="${sy(y) + 3}" text-anchor="middle" font-size="8" fill="#6d6080">${r + 1}</text>`);
+  }
+  if (g.reach) {
+    const [x0, y0, x1, y1] = g.reach;
+    parts.push(`<defs><pattern id="noreach" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="8" stroke="#c8c2b4" stroke-width="2"/></pattern></defs>`);
+    if (x0 > 0) parts.push(`<rect x="0" y="0" width="${x0}" height="${H}" fill="url(#noreach)" opacity=".7"><title>Out of the magnet's reach</title></rect>`);
+    if (x1 < W) parts.push(`<rect x="${x1}" y="0" width="${W - x1}" height="${H}" fill="url(#noreach)" opacity=".7"/>`);
+    if (y0 > 0) parts.push(`<rect x="0" y="${sy(y0)}" width="${W}" height="${y0}" fill="url(#noreach)" opacity=".7"/>`);
+    if (y1 < H) parts.push(`<rect x="0" y="0" width="${W}" height="${H - y1}" fill="url(#noreach)" opacity=".7"/>`);
   }
   for (const col of Object.keys(g.columns)) {
     const left = col === "-1";
@@ -450,6 +490,7 @@ function renderPlay() {
   if (!p) { setHTML($("#planbox"), ""); return; }
   const steps = p.steps.map((s) => `<li>${esc(s.text)}</li>`).join("");
   setHTML($("#planbox"), `<div class="banner info" style="margin-top:10px"><b>${esc(p.san)}</b> · ${p.carries} carr${p.carries === 1 ? "y" : "ies"} · about ${p.seconds} s${p.rests ? ` · ${p.rests} magnet rest${p.rests > 1 ? "s" : ""}` : ""}
+    ${p.warning ? `<div class="banner warn" style="margin:6px 0">${esc(p.warning)}</div>` : ""}
     <ol class="steps">${steps}</ol>
     <div class="row"><button class="btn primary" ${busy || !S.connected ? "disabled" : ""} onclick="api('/api/run')">Run on the gantry</button>
     <button class="btn" ${busy ? "disabled" : ""} onclick="api('/api/run',{by_hand:true})">I moved it by hand</button>
@@ -463,11 +504,12 @@ function renderControls() {
   for (const id of ["#motorsoff", "#homemanual", "#homebump", "#unlock", "#gobtn", "#servoup", "#servodown", "#magon", "#magoff", "#rawsend", "#p_off", "#d_run", "#l_run"])
     $(id).disabled = !c || busy;
   document.querySelectorAll("[data-j]").forEach((b) => (b.disabled = !c || busy));
-  $("#homebump").title = Math.abs(S.settings.scale - 1) > 0.05 ? "Not while the scale is not 1: home by hand" : "$H: drives slowly into the bottom-left corner until the motors stall, then backs off";
+  $("#homebump").title = Math.abs(S.settings.scale_x - 1) > 0.05 || Math.abs(S.settings.scale_y - 1) > 0.05 ? "Not while a scale is not 1: home by hand" : "$H: drives slowly into the bottom-left corner until the motors stall, then backs off";
   $("#fwline").textContent = c ? `${S.firmware}${S.tunable ? " · speeds and acceleration set from this page" : " · acceleration fixed at 800 mm/s² by this firmware; speeds set per move"}` : "Plug the ESP32 in by USB, pick its port (usbserial…), then Connect. Pick sim to try the page with the pretend board.";
 }
 
-const SETTING_KEYS = ["travel_speed", "carry_speed", "accel", "scale", "servo_settle", "grab_settle", "release_settle", "magnet_budget"];
+const SETTING_KEYS = ["travel_speed", "carry_speed", "accel", "scale_x", "scale_y", "servo_settle", "grab_settle", "release_settle",
+  "magnet_budget", "x_speed_cap", "y_speed_cap", "overshoot"];
 function renderSettings(force) {
   const s = S.settings;
   if (!settingsShown || force) {
@@ -489,7 +531,7 @@ function renderTests() {
     h = `<div class="row"><span>Real distance</span><input type="number" id="d_meas" step="0.5" value="${d.measured || ""}"><span class="muted">mm</span>
       <button class="btn" onclick="distanceResult()">Work out the scale</button></div>`;
     if (d.state === "done") h += `<div class="banner info">Scale <b>${d.scale}</b>. ${esc(d.hint || "")}
-      <div class="row"><button class="btn primary" onclick="useScale(${d.scale})">Use scale ${d.scale}</button></div></div>`;
+      <div class="row"><button class="btn primary" onclick="useSetting('${d.key}', ${d.scale})">Use ${d.axis.toUpperCase()} scale ${d.scale}</button></div></div>`;
   }
   setHTML($("#d_result"), h);
   const l = S.tests.ladder;
@@ -497,9 +539,10 @@ function renderTests() {
   if (l) {
     if (l.at !== null && !l.done && !l.stalled && S.task) lh += `<div class="row"><span class="muted">now</span><span class="ladder-now">${l.at} mm/s</span></div>`;
     lh += `<div class="note">Ran cleanly: ${l.ok.length ? l.ok.join(", ") + " mm/s" : "none yet"}${l.stalled ? ` · <b style="color:var(--red)">stalled at ${l.stalled} mm/s</b>` : ""}${l.done ? " · no stall reported" : ""}</div>`;
-    if (l.recommend && l.recommend.travel_speed)
-      lh += `<div class="banner info">Suggested: travel ${l.recommend.travel_speed} mm/s, carry ${l.recommend.carry_speed} mm/s (70% and 60% of the last clean speed).
-        <div class="row"><button class="btn primary" onclick="useSpeeds(${l.recommend.travel_speed},${l.recommend.carry_speed})">Use these speeds</button></div></div>`;
+    const capKey = l.axis + "_speed_cap";
+    if (l.recommend && l.recommend[capKey])
+      lh += `<div class="banner info">Suggested: ${l.axis.toUpperCase()} axis top speed ${l.recommend[capKey]} mm/s (70% of the last clean speed), carries at most ${l.recommend.carry_speed} mm/s.
+        <div class="row"><button class="btn primary" onclick='useSpeeds(${JSON.stringify(l.recommend)})'>Use these</button></div></div>`;
   }
   setHTML($("#l_result"), lh);
   $("#l_stall").disabled = !(l && S.task && l.at !== null && !l.done);
@@ -529,14 +572,14 @@ async function distanceResult() {
   if (!(v > 0)) { toast("Enter the measured distance in mm", true); return; }
   await api("/api/test/distance-result", { measured: v });
 }
-async function useScale(v) { if (await api("/api/settings", { scale: v })) { settingsShown = false; toast("Scale saved"); } }
-async function useSpeeds(t, c) { if (await api("/api/settings", { travel_speed: t, carry_speed: c })) { settingsShown = false; toast("Speeds saved"); } }
+async function useSetting(key, v) { if (await api("/api/settings", { [key]: v })) { settingsShown = false; toast("Saved"); } }
+async function useSpeeds(values) { if (await api("/api/settings", values)) { settingsShown = false; toast("Speeds saved"); } }
 
 // ----------------------------------------------------------------- buttons
 $("#stop").onclick = () => api("/api/stop");
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { api("/api/stop"); } });
 $("#refresh").onclick = loadPorts;
-$("#connect").onclick = () => api("/api/connect", { port: $("#ports").value });
+$("#connect").onclick = () => { simChosen = $("#ports").value === "sim"; api("/api/connect", { port: $("#ports").value }); };
 $("#disconnect").onclick = () => api("/api/disconnect");
 $("#motorsoff").onclick = $("#p_off").onclick = () => api("/api/motors-off");
 $("#homemanual").onclick = () => api("/api/home", { mode: "manual" });
@@ -576,6 +619,7 @@ $("#l_run").onclick = () => api("/api/test/ladder", { axis: $("#l_axis").value, 
 $("#l_stall").onclick = () => api("/api/test/stalled");
 
 loadPorts();
+setInterval(loadPorts, 3000);
 poll();
 </script>
 </body>

@@ -348,18 +348,30 @@ bash gantry/console/console.sh sim    # the pretend board
 - **Captures go to the right.** Unlike the touch screen and the website (where a person takes
   captured pieces off), the console runs the planner in dock mode (`Layout(captures="dock")`):
   the taken piece is carried into the docking lane beside the h file, into the free slot with
-  the shortest clear way (usually the one level with its rank). The left lane is not used: it
-  is too tight on this frame. A full lane falls back to asking the person. A promotion brings a
-  docked queen (or rook, bishop, knight) back out when there is one.
+  the shortest clear way (usually the one level with its rank). The left side is out of reach:
+  the magnet sits on the right of the Y carriage, so the left lane and the edge lane beside the
+  a file are never used (`docking_lanes`, `reach_mm` in the config; the board drawing hatches
+  what the magnet cannot reach). A promotion brings a docked queen (or rook, bishop, knight)
+  back out when there is one. When the path finder finds no way for that plan (a crowded
+  corner), the page says so and falls back: the promotion without the docked spare (the pawn
+  goes to the square, a note asks for the swap), then the captured piece taken off by the
+  person. A full lane also falls back to the person.
 - **Homing.** Always the bottom-left corner: Motors off, push the carriage into the corner,
   Set home here (`$HM`), or Bump home (`$H`).
 - **Moves are plain motion commands** (G1, M7, M3, M5, M8), not `CARRY`, so the page's travel
   and carry speeds work on firmware 0.3 too; 0.4 also takes the page's acceleration (`$120`). A
   carry that would keep the magnet on longer than the page's budget (12 s; the board cuts at
   15 s) sets the piece down on its clear path and picks it up again.
-- **Scale.** Real millimetres per millimetre the board counts. The distance check measures it:
-  about 8 means the DRV8825 microstep pins are floating (full steps). The page divides every
-  position and speed by it, so the board can be used before the pins are fixed.
+- **Scale, per axis.** Real millimetres per millimetre the board counts, for X and for Y. The
+  distance check measures each: about 8 means that DRV8825's microstep pins are floating (full
+  steps; on the bench the Y driver is, so Y hit the frame end after ~55 counted mm). The page
+  divides every position and speed by it, so the board can be used before the pins are fixed.
+  Each axis also has its own top speed (the X axis drags the heavy beam and stalls differently);
+  a diagonal slows down so neither axis passes its own.
+- **Overshoot.** A carried piece trails the magnet by 5–6 mm (the MuJoCo model; the path
+  simulation's leash model), so every carry would stop that far short of the square. The page
+  takes the magnet 5 mm past the last point along the last leg and back (`Overshoot`, 0 to
+  turn it off); never outside the travel or the magnet's reach.
 - **Stall checks:** the distance check, a speed ladder (out and back at rising speeds; press It
   stalled and the page suggests 70 % of the last clean speed for travel and 60 % for carries),
   a motors-off push test for binding, and a count of the board restarting by itself (supply
@@ -497,6 +509,57 @@ the blocker back, which becomes three `CARRY` lines in order. If a piece brushes
 at the frame, raise `lane_clearance_mm`; if the squares turn out bigger, nothing changes but
 `square_mm`.
 
+Options in `gantry_config.json`, each measured by the path simulation below:
+
+- `docking_lanes: ["b"]` and `reach_mm: [50, 0, 470, 420]`: only the right lane holds pieces, and
+  nothing left of x = 50 mm is used (the magnet sits on the right of the Y carriage). Any x_min
+  from 39 to 60 mm gives the same paths; the a-file centres (x = 60) must be reachable.
+- `path_smoothing: true`: after A*, straight shortcuts over the grid path wherever the open
+  clearance (3 mm) holds. About half the corners go (every corner is a stop on the gantry); a
+  shortcut that is one leg the firmware would take round its own corner gets its midpoint as a
+  via-point (`firmware_keeps_line`), so `CARRY` stays on the planned line.
+- `corner_lag_mm`, `turn_penalty_mm`: off and 2 mm. The trailing piece cuts inside a corner, but
+  when both legs of a corner are clear the short chord it cuts is too; the simulation found it
+  changes nothing.
+
+A reset puts the back ranks home before the pawns (a queen cannot pass between two pawns that
+are already home) and a stray standing deep in the home ranks before one in the middle; the
+driver also carries a blocked piece later in a reset instead of failing (`"any_order"` jobs).
+
+### The path simulation
+
+```sh
+python3 gantry/sim/path_sim.py                             # 100 seeded random games per setting
+python3 gantry/sim/path_sim.py --games 40 --engine         # Stockfish games (stockfish on PATH)
+```
+
+It plays many games through the same code the console uses (dock mode, `best_slot`,
+`gantry_driver.route`, the fallbacks), resets the board after each, and prints a table per
+setting: failed moves and resets, captures the person had to take, make-room carries, path
+length and corners, the time at the console's speeds, how often the magnet would be on past
+12 s (the console rests it), the planned and the trailing piece's clearance (the piece pulled
+along on a 5.5 mm leash), how far short it stops with and without the overshoot, the leftmost
+point used, and the planning time.
+
+What it found (2026-11-05; 200 random capture-heavy games, 15,692 moves, and 40 Stockfish
+games, 3,592 moves, each game reset afterwards):
+
+| | both lanes, old | right lane only | + shortcuts (chosen) |
+|---|---|---|---|
+| failed moves / resets | 0 / 0 | 0 / 0 | 0 / 0 |
+| captures the person takes (no way into the lane) | 5 + 1 | 6 + 1 | 6 + 1 |
+| corners per carry | 0.53 | 0.52 | 0.26 |
+| mean path, mm | 124.3 | 124.2 | 122.1 |
+| mean reset, s | 387 | 387 | 373 |
+| trailing piece's closest gap, mm | 0.95 | 0.95 | 0.93 |
+
+Losing the left side costs one capture in ~16,000 moves. Before the reset order and retry,
+2 of 200 resets (and 2 of 40 Stockfish ones) failed with a queen walled in on c8 or f8; before
+the speed-up the worst plan took 6 s on this Mac. The corner check and a higher corner cost
+change nothing. Every carry still stops 5.5 mm short without the overshoot; with it, 0. About
+16 % of carries keep the magnet on past 12 s at 25 mm/s and rest it once: a faster carry speed,
+once the axes are reliable, is what shortens those.
+
 The lanes beside the board (x = −0.5 and 7.5) run halfway between the edge file and the
 docking lane, the same rule in the path finder, the driver and the firmware (`place_mm`). With
 the docking lanes 42.5 mm from the edge files, that lane is 21.25 mm from each, so a piece
@@ -581,8 +644,8 @@ still works.
 
 ```sh
 make -C gantry/firmware/host test                                   # motion, protocol, servo, guard and settings checks: 281 of them
-cd gantry/pi && python3 -m unittest discover -s . -p 'test_*.py'    # paths 12, carry plan 24, driver 28
-cd gantry/console && python3 -m unittest test_console                  # the bench console, 7
+cd gantry/pi && python3 -m unittest discover -s . -p 'test_*.py'    # paths 19, carry plan 26, driver 32
+cd gantry/console && python3 -m unittest test_console                  # the bench console, 12
 cd ~/chess-board-pi-only && CHESS_GANTRY_PORT=sim CHESS_GANTRY_DIR=~/chess-gantry/gantry/pi .venv/bin/python -m unittest test.test_pi_gantry
 ```
 
