@@ -1,0 +1,4 @@
+virtual_gantry
+test_motion
+*.o
+*.dSYM/
