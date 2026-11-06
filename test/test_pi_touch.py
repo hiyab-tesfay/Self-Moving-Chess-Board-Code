@@ -9,11 +9,13 @@ import chess
 import cv2
 import numpy as np
 
-from board_vision import Observation, VisionError, load_calibration, observe, save_calibration
+from board_vision import (Calibration, Observation, TemporalObservation, VisionError, load_calibration,
+                          observe, save_calibration)
 from move_observation import occupied_squares
 from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp, TouchSession,
                       adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
-                      reusable_corners, should_retry_scan)
+                      reusable_corners, should_retry_scan, temporal_computer_move_feedback,
+                      photo_square_center)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -188,6 +190,32 @@ class TouchSessionTest(unittest.TestCase):
 
 
 class CalibrationFlowTest(unittest.TestCase):
+    def test_setup_only_flow_never_requires_empty_board(self):
+        flow = CalibrationFlow(setup_only=True)
+        self.assertEqual(flow.stage, "setup_only")
+        self.assertEqual(flow.rotation, "cw")
+        photo = np.zeros((800, 800, 3), dtype=np.uint8)
+        corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+        flow.accept_starting(photo, corners)
+        self.assertEqual(flow.stage, "ready")
+        self.assertIsNone(flow.empty_photo)
+        a1 = photo_square_center("a1", corners, flow.rotation)
+        h1 = photo_square_center("h1", corners, flow.rotation)
+        self.assertGreater(a1[0], 700)
+        self.assertGreater(h1[0], 700)
+        self.assertGreater(a1[1], h1[1])
+        flow.cycle_rotation()
+        self.assertEqual(flow.rotation, "180")
+        a1 = photo_square_center("a1", corners, flow.rotation)
+        h1 = photo_square_center("h1", corners, flow.rotation)
+        self.assertGreater(a1[0], 700)
+        self.assertGreater(h1[0], 0)
+        self.assertLess(h1[0], 100)
+        self.assertLess(a1[1], 100)
+        self.assertLess(h1[1], 100)
+        flow.retake_starting()
+        self.assertEqual(flow.stage, "setup_only")
+
     def test_manual_corners_and_saved_calibration(self):
         empty = np.zeros((800, 800, 3), dtype=np.uint8)
         for row in range(8):
@@ -273,6 +301,70 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_temporal_capture_feedback_does_not_call_destination_empty(self):
+        board = chess.Board("4k3/8/8/4p3/3P4/8/8/4K3 b - - 0 1")
+        expected = chess.Move.from_uci("e5d4")
+        scores = {square: 0.0 for square in chess.SQUARE_NAMES}
+        observed = TemporalObservation(("e5", "d4"), scores)
+        feedback = temporal_computer_move_feedback(board, expected, observed)
+        self.assertIn("Expected: Black pawn e5 → d4", feedback.detail)
+        self.assertIn("Camera sees changes on", feedback.detail)
+        self.assertNotIn("emptied squares", feedback.detail)
+
+    def test_setup_only_game_starts_with_whites_turn(self):
+        calibration = Calibration([[0, 0], [799, 0], [799, 799], [0, 799]],
+                                  (0.0, 0.0), (0.0, 0.0), scoring="temporal_v1")
+        app = TouchApp.__new__(TouchApp)
+        app.args = SimpleNamespace(calibration=Path("/unused"))
+        app.level = "beginner"
+        app.say = Mock()
+        app.handle_result("start", (calibration, np.zeros((800, 800, 3), dtype=np.uint8), Mock()))
+        self.assertEqual(app.session.phase, "human")
+
+    def test_verified_temporal_move_updates_reference(self):
+        board = chess.Board()
+        session = TouchSession("beginner")
+        session.phase = "human"
+        scores = {square: 0.0 for square in chess.SQUARE_NAMES}
+        scores["e2"] = scores["e4"] = 60.0
+        observed = TemporalObservation(("e2", "e4"), scores)
+        new_reference = np.ones((800, 800, 3), dtype=np.uint8)
+        app = TouchApp.__new__(TouchApp)
+        app.session = session
+        app.scan_corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+        app.last_scan_corners = None
+        app.reference = np.zeros_like(new_reference)
+        app.scan_corner_source = "saved"
+        app.scan_attempts = 1
+        app.clear_scan_photo = Mock()
+        app.say = Mock()
+        app.after_human_move = Mock()
+        app.handle_result("scan", (observed, new_reference))
+        self.assertIs(app.reference, new_reference)
+        self.assertEqual(session.phase, "thinking")
+
+    def test_verified_temporal_computer_move_updates_reference(self):
+        session = TouchSession("beginner")
+        session.phase = "human"
+        human_scores = {square: 0.0 for square in chess.SQUARE_NAMES}
+        human_scores["e2"] = human_scores["e4"] = 60.0
+        session.scan_human_temporal(TemporalObservation(("e2", "e4"), human_scores))
+        session.announce_computer(chess.Move.from_uci("e7e5"))
+        scores = {square: 0.0 for square in chess.SQUARE_NAMES}
+        scores["e7"] = scores["e5"] = 60.0
+        observed = TemporalObservation(("e5", "e7"), scores)
+        new_reference = np.ones((800, 800, 3), dtype=np.uint8)
+        app = TouchApp.__new__(TouchApp)
+        app.session = session
+        app.scan_corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+        app.last_scan_corners = None
+        app.reference = np.zeros_like(new_reference)
+        app.clear_scan_photo = Mock()
+        app.say = Mock()
+        app.handle_result("scan", (observed, new_reference))
+        self.assertIs(app.reference, new_reference)
+        self.assertEqual(session.phase, "human")
+
     def test_computer_mismatch_reaches_large_feedback_after_retries(self):
         session = TouchSession("beginner")
         session.verify_setup(occupied_squares(session.game.board))

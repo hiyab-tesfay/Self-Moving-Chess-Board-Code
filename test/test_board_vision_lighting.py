@@ -5,8 +5,9 @@ import cv2
 import numpy as np
 
 from board_vision import (Calibration, calibrate, legacy_square_scores, observe,
-                          square_scores)
+                          observe_temporal, square_scores)
 from move_observation import occupied_squares
+from pi_touch import PhotoAdjustments, TouchSession, calibrate_setup_photo, MoveRejected
 
 
 CORNERS = [[0, 0], [799, 0], [799, 799], [0, 799]]
@@ -41,6 +42,58 @@ def under_light(photo: np.ndarray, *, offset: float, slope: float,
 
 
 class LightingCorrectionTest(unittest.TestCase):
+    def test_white_home_row_on_photo_right_edge(self):
+        board = chess.Board()
+        setup = cv2.rotate(board_photo(board), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        calibration, reference = calibrate_setup_photo(
+            setup, CORNERS, PhotoAdjustments(), rotation="cw")
+        self.assertEqual(calibration.rotation, "cw")
+        session = TouchSession("beginner")
+        session.phase = "human"
+        board.push_uci("e2e4")
+        moved = cv2.rotate(board_photo(board), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        observation, _ = observe_temporal(reference, moved, calibration, CORNERS)
+        self.assertEqual(observation.changed, ("e2", "e4"))
+        self.assertEqual(session.scan_human_temporal(observation), "e4")
+
+    def test_setup_photo_alone_tracks_both_sides_from_verified_positions(self):
+        board = chess.Board()
+        setup = under_light(board_photo(board), offset=10, slope=8, gain=1.03)
+        calibration, reference = calibrate_setup_photo(setup, CORNERS, PhotoAdjustments())
+        self.assertEqual(calibration.scoring, "temporal_v1")
+
+        session = TouchSession("beginner")
+        session.phase = "human"  # The user confirmed the photographed starting position.
+        board.push_uci("e2e4")
+        human_photo = under_light(board_photo(board), offset=-10, slope=-7, gain=.97)
+        human_observation, current_reference = observe_temporal(
+            reference, human_photo, calibration, CORNERS)
+        self.assertEqual(human_observation.changed, ("e2", "e4"))
+        self.assertEqual(session.scan_human_temporal(human_observation), "e4")
+
+        move = chess.Move.from_uci("e7e5")
+        session.announce_computer(move)
+        board.push(move)
+        computer_photo = under_light(board_photo(board), offset=14, slope=6, gain=1.05)
+        computer_observation, _ = observe_temporal(
+            current_reference, computer_photo, calibration, CORNERS)
+        self.assertEqual(computer_observation.changed, ("e5", "e7"))
+        self.assertEqual(session.verify_computer_temporal(computer_observation), "e5")
+
+    def test_setup_only_rejects_multiple_moves(self):
+        board = chess.Board()
+        calibration, reference = calibrate_setup_photo(board_photo(board), CORNERS,
+                                                       PhotoAdjustments())
+        board.push_uci("e2e4")
+        board.push_uci("e7e5")
+        board.push_uci("d2d4")
+        observed, _ = observe_temporal(reference, board_photo(board), calibration, CORNERS)
+        session = TouchSession("beginner")
+        session.phase = "human"
+        with self.assertRaises(MoveRejected):
+            session.scan_human_temporal(observed)
+        self.assertEqual(session.game.board.fullmove_number, 1)
+
     def test_calibration_and_moves_survive_gradual_light_changes(self):
         empty = board_photo()
         starting_board = chess.Board()

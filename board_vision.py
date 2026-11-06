@@ -263,7 +263,7 @@ class Calibration:
         if rotation not in ("none", "cw", "ccw", "180"):
             raise VisionError(f"Invalid calibration rotation: {rotation}")
         scoring = data.get("scoring", "legacy")
-        if scoring not in ("legacy", "local_lighting_v1"):
+        if scoring not in ("legacy", "local_lighting_v1", "temporal_v1"):
             raise VisionError(f"Invalid calibration scoring method: {scoring}")
         return cls(data["corners"], tuple(data["thresholds"]), tuple(data["margins"]),
                    rotation, scoring)
@@ -301,8 +301,40 @@ class Observation:
     scores: dict[str, float]
 
 
+@dataclass(frozen=True)
+class TemporalObservation:
+    """Squares that visibly changed since the last verified board photo."""
+
+    changed: tuple[str, ...]
+    scores: dict[str, float]
+
+
+def temporal_changes(scores: dict[str, float]) -> TemporalObservation:
+    if set(scores) != set(chess.SQUARE_NAMES):
+        raise VisionError("Expected one change score for every chess square.")
+    ordered = sorted(scores.items(), key=lambda item: -item[1])
+    baseline = float(np.median(list(scores.values())))
+    gaps = [(ordered[index - 1][1] - ordered[index][1], index)
+            for index in range(1, min(9, len(ordered)))
+            if ordered[index - 1][1] >= max(12.0, baseline + 8.0) and
+            ordered[index - 1][1] - ordered[index][1] >= 8.0]
+    count = max(gaps)[1] if gaps else 0
+    return TemporalObservation(tuple(sorted(square for square, _ in ordered[:count])), scores)
+
+
+def observe_temporal(reference: np.ndarray, photo: np.ndarray, calibration: Calibration,
+                     corners: list[list[float]] | None = None) -> tuple[TemporalObservation, np.ndarray]:
+    if calibration.scoring != "temporal_v1":
+        raise VisionError("Temporal observation requires setup-only calibration.")
+    aligned = rotate_board(warp_board(photo, corners if corners is not None else calibration.corners),
+                           calibration.rotation)
+    return temporal_changes(square_scores(reference, aligned)), aligned
+
+
 def observe(reference: np.ndarray, photo: np.ndarray, calibration: Calibration,
             corners: list[list[float]] | None = None) -> tuple[Observation, np.ndarray]:
+    if calibration.scoring == "temporal_v1":
+        raise VisionError("Setup-only calibration needs the touchscreen's last verified photo.")
     aligned = rotate_board(warp_board(photo, corners if corners is not None else calibration.corners),
                            calibration.rotation)
     scoring = legacy_square_scores if calibration.scoring == "legacy" else square_scores
