@@ -16,7 +16,8 @@ from move_observation import occupied_squares
 from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp, TouchSession,
                       adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
                       reusable_corners, should_retry_scan, temporal_computer_move_feedback,
-                      photo_square_center, corners_from_rotated_preview)
+                      photo_square_center, corners_from_rotated_preview,
+                      corners_to_rotated_preview)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -234,6 +235,11 @@ class CalibrationFlowTest(unittest.TestCase):
         self.assertEqual(corners_from_rotated_preview(
             [[0, 0], [599, 0], [599, 899], [0, 899]], width, height, "cw"),
             [[0, 0], [899, 0], [899, 599], [0, 599]])
+        raw = [[89, 49], [819, 59], [809, 549], [79, 539]]
+        for rotation in ("none", "cw", "180", "ccw"):
+            shown = corners_to_rotated_preview(raw, width, height, rotation)
+            self.assertEqual(corners_from_rotated_preview(
+                shown, width, height, rotation), raw)
 
     def test_manual_corners_and_saved_calibration(self):
         empty = np.zeros((800, 800, 3), dtype=np.uint8)
@@ -320,6 +326,50 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_check_photo_uses_saved_orientation(self):
+        photo = np.zeros((800, 800, 3), dtype=np.uint8)
+        photo[:100, :100] = (0, 0, 255)
+        photo[-100:, -100:] = (0, 255, 0)
+        app = TouchApp.__new__(TouchApp)
+        app.calibration_flow = None
+        app.calibration = Calibration([[0, 0], [799, 0], [799, 799], [0, 799]],
+                                      (0.0, 0.0), (0.0, 0.0), rotation="180")
+        app.scan_photo = photo
+        app.scan_corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+        app.scan_feedback = None
+        app.photo_adjustments = PhotoAdjustments()
+        app.board_canvas = Mock()
+        app.board_canvas.winfo_width.return_value = 800
+        app.board_canvas.winfo_height.return_value = 800
+        with patch("pi_touch.tk.PhotoImage") as image_widget:
+            app.draw_photo_preview()
+        encoded = base64.b64decode(image_widget.call_args.kwargs["data"])
+        preview = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertGreater(int(preview[20, 20, 1]), 200)
+        self.assertLess(int(preview[20, 20, 2]), 50)
+        numbered = [call for call in app.board_canvas.create_text.call_args_list
+                    if call.kwargs.get("text") == "1"]
+        self.assertEqual(len(numbered), 1)
+        self.assertLess(numbered[0].args[0], 50)
+        self.assertLess(numbered[0].args[1], 50)
+
+    def test_check_photo_corner_taps_map_to_raw_camera(self):
+        app = TouchApp.__new__(TouchApp)
+        app.calibration = Calibration(None, (0.0, 0.0), (0.0, 0.0), rotation="180")
+        app.scan_photo = np.zeros((600, 900, 3), dtype=np.uint8)
+        app.scan_corners = []
+        app.preview_geometry = (0, 0, 1)
+        app.busy = False
+        app.say = Mock()
+        app.render = Mock()
+        app.process_scan_photo = Mock()
+        displayed = [[80, 60], [810, 50], [790, 540], [90, 550]]
+        for x, y in displayed:
+            app.tap_scan_corner(SimpleNamespace(x=x, y=y))
+        self.assertEqual(app.scan_corners,
+                         [[109, 59], [809, 49], [819, 539], [89, 549]])
+        app.process_scan_photo.assert_called_once()
+
     def test_corner_selection_shows_upright_rotated_setup_photo(self):
         photo = np.zeros((800, 800, 3), dtype=np.uint8)
         photo[:100, :100] = (0, 0, 255)

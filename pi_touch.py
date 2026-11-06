@@ -146,6 +146,33 @@ def corners_from_rotated_preview(points: list[list[float]], width: int, height: 
     return [raw[index] for index in order]
 
 
+def rotate_photo_point(x: float, y: float, width: int, height: int,
+                       rotation: str) -> tuple[float, float]:
+    """Map a raw camera pixel onto its rotated screen preview."""
+    if rotation == "none":
+        return x, y
+    if rotation == "cw":
+        return height - 1 - y, x
+    if rotation == "180":
+        return width - 1 - x, height - 1 - y
+    if rotation == "ccw":
+        return y, width - 1 - x
+    raise ValueError(f"Invalid photo rotation: {rotation}")
+
+
+def corners_to_rotated_preview(points: list[list[float]], width: int, height: int,
+                               rotation: str) -> list[list[float]]:
+    """Show raw board corners in top-left-first order on the rotated preview."""
+    if len(points) != 4:
+        raise ValueError("Four raw photo corners are required.")
+    order = {"none": (0, 1, 2, 3), "cw": (3, 0, 1, 2),
+             "180": (2, 3, 0, 1), "ccw": (1, 2, 3, 0)}.get(rotation)
+    if order is None:
+        raise ValueError(f"Invalid photo rotation: {rotation}")
+    return [list(rotate_photo_point(*points[index], width, height, rotation))
+            for index in order]
+
+
 def saved_scan_corners(directory: Path, calibration) -> list[list[float]] | None:
     if calibration.corners is not None:
         return [point.copy() for point in calibration.corners]
@@ -1647,13 +1674,18 @@ class TouchApp:
         if self.preview_geometry is None:
             return
         left, top, scale = self.preview_geometry
-        height, width = self.scan_photo.shape[:2]
+        raw_height, raw_width = self.scan_photo.shape[:2]
+        rotation = self.calibration.rotation if self.calibration is not None else "none"
+        shown_photo = rotate_board(self.scan_photo, rotation)
+        height, width = shown_photo.shape[:2]
         x = (event.x - left) / scale
         y = (event.y - top) / scale
         if not (0 <= x < width and 0 <= y < height):
             return
         self.scan_corners.append([x, y])
         if len(self.scan_corners) == 4:
+            self.scan_corners = corners_from_rotated_preview(
+                self.scan_corners, raw_width, raw_height, rotation)
             self.process_scan_photo()
         else:
             self.say(f"Tap the outer {CalibrationFlow.CORNER_NAMES[len(self.scan_corners)]} corner.")
@@ -1667,10 +1699,13 @@ class TouchApp:
             show_starting = flow.stage in ("starting_corners", "ready")
             photo = flow.starting_photo if show_starting else flow.empty_photo
             points = flow.starting_corners if show_starting else flow.empty_corners
+            raw_points = points
         else:
             photo = self.scan_photo
             points = self.scan_corners
+            raw_points = points
         assert photo is not None
+        raw_height, raw_width = photo.shape[:2]
         aligned_preview = None
         if flow is not None and flow.setup_only and flow.stage == "ready" and len(points) == 4:
             try:
@@ -1682,6 +1717,12 @@ class TouchApp:
             shown_photo = aligned_preview
         elif flow is not None and flow.setup_only and flow.stage == "starting_corners":
             shown_photo = rotate_board(photo, flow.rotation)
+        elif flow is None:
+            rotation = self.calibration.rotation if self.calibration is not None else "none"
+            shown_photo = rotate_board(photo, rotation)
+            if len(points) == 4:
+                points = corners_to_rotated_preview(
+                    points, raw_width, raw_height, rotation)
         else:
             shown_photo = photo
         height, width = shown_photo.shape[:2]
@@ -1737,7 +1778,8 @@ class TouchApp:
                 all_squares = (feedback.expected_sources + feedback.expected_destinations +
                                feedback.sources + feedback.destinations)
                 for square in all_squares:
-                    x, y = photo_square_center(square, points, rotation)
+                    x, y = photo_square_center(square, raw_points, rotation)
+                    x, y = rotate_photo_point(x, y, raw_width, raw_height, rotation)
                     centers[square] = (left + x * scale, top + y * scale)
                 for expected_source, expected_destination in zip(
                         feedback.expected_sources, feedback.expected_destinations):
