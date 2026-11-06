@@ -365,8 +365,10 @@ def carry_motions(line: str, board: BoardMap, config: dict) -> list[tuple]:
     return motions
 
 
-def predict(lines: list[tuple[str, str]], config: dict, steps_per_mm: float = 40.0, accel: float = 800.0, start=(0.0, 0.0), board: BoardMap | None = None) -> dict:
+def predict(lines: list[tuple[str, str]], config: dict, steps_per_mm: float = 40.0, accel: float | None = None, start=(0.0, 0.0), board: BoardMap | None = None) -> dict:
     """Steps and seconds the board will need, from the same trapezoid the firmware uses. Reads G-code and CARRY lines."""
+    if accel is None:
+        accel = float(config.get("accel_mm_s2", 800.0))   # the firmware's $120: 400 from 0.4 on, 800 before
     x, y = start
     total_s, motor_steps = 0.0, [0, 0]
 
@@ -697,8 +699,8 @@ class Gantry:
 def load_config(path: Path) -> dict:
     with open(path) as handle:
         config = json.load(handle)
-    config.setdefault("travel_speed_mm_s", 120.0)
-    config.setdefault("carry_speed_mm_s", 60.0)
+    config.setdefault("travel_speed_mm_s", 60.0)
+    config.setdefault("carry_speed_mm_s", 40.0)
     config.setdefault("grab_settle_s", 0.3)
     config.setdefault("release_settle_s", 0.2)
     config.setdefault("servo", True)

@@ -24,21 +24,29 @@ touch-screen app, the website relay) waits for the person and checks the square 
 before the carries run; the gantry driver itself treats a `remove` as already done. A removed
 piece leaves the layout entirely: the person keeps it.
 
+Dock mode (`Layout(captures="dock")`, used by the gantry console on the bench) lets the gantry
+take captured pieces off itself, into the docking lane on the RIGHT of the board ("b:0".."b:11",
+beside the h file): the left lane is too tight on this frame. Then:
+
+  * a capture (or the pawn passed en passant) is a carry into the free slot the caller names, or
+    the first free one, before the taker's carry; when the lane is full it falls back to `remove`;
+  * a promotion whose new piece waits in the lane brings that piece onto the promotion square and
+    parks the pawn in the slot it left; without one it is the plain carry and the note.
+
 For a move the person plays by hand, the layout just follows: a taken piece leaves the
 board (the person keeps it), a promoted piece appears from their hand.
 
 Every job carries "before" and "pieces" so the gantry driver can find paths with the real
 piece widths (board_paths.py). Steps also carry a plain straight "path" for a driver that
-does not re-plan. The docking lanes beside the board ("w:0", "b:0", ...) stay in the firmware
-and the driver for a later version; no plan here sends a piece to one. A layout typed with a
-piece still in a slot is understood (the reset carries it home).
+does not re-plan. Only dock mode sends a piece to a docking slot; a reset carries docked pieces home.
 """
 from __future__ import annotations
 
 import chess
 
 FILES = "abcdefgh"
-SLOTS_PER_LANE = 12   # only to read a slot name ("b:12" is the second lane) a hand-typed layout may still contain
+SLOTS_PER_LANE = 12   # slots down one docking lane; "b:12" would be a second lane
+DOCK_LANE = "b"       # captured pieces go to the right of the board, beside the h file
 
 
 def _xy(name: str) -> list[float]:
@@ -71,45 +79,95 @@ def removal(board: chess.Board, move: chess.Move) -> tuple[str, str] | None:
 
 
 class Layout:
-    """Where every physical piece is, keyed by square."""
+    """Where every physical piece is, keyed by square (and by slot, "b:3", for docked pieces).
 
-    def __init__(self, board: chess.Board | None = None) -> None:
+    `captures` is "remove" (a person takes captured pieces off: the touch screen and the website)
+    or "dock" (the gantry carries them into the right-hand docking lane: the bench console).
+    """
+
+    def __init__(self, board: chess.Board | None = None, captures: str = "remove", dock_slots: int = SLOTS_PER_LANE) -> None:
+        if captures not in ("remove", "dock"):
+            raise ValueError(f"captures must be 'remove' or 'dock', not {captures!r}")
         board = board or chess.Board()
+        self.captures, self.dock_slots = captures, dock_slots
         self.pieces: dict[str, str] = {chess.square_name(sq): piece.symbol() for sq, piece in board.piece_map().items()}
 
     def copy(self) -> "Layout":
         other = Layout.__new__(Layout)
+        other.captures, other.dock_slots = self.captures, self.dock_slots
         other.pieces = dict(self.pieces)
         return other
+
+    def free_slots(self) -> list[str]:
+        """Empty slots of the docking lane, nearest the bottom first."""
+        return [name for name in (f"{DOCK_LANE}:{i}" for i in range(self.dock_slots)) if name not in self.pieces]
+
+    def docked(self, symbol: str) -> str | None:
+        """The slot holding a docked piece of this kind ("Q"), if any."""
+        for i in range(self.dock_slots):
+            name = f"{DOCK_LANE}:{i}"
+            if self.pieces.get(name) == symbol:
+                return name
+        return None
 
     def on_board(self) -> list[str]:
         return sorted(name for name in self.pieces if ":" not in name)
 
     # ------------------------------------------------------------------ steps
 
-    def carry(self, source: str, target: str) -> dict:
+    def carry(self, source: str, target: str, reason: str | None = None) -> dict:
+        if target in self.pieces:
+            raise ValueError(f"{target} is not empty")
         piece = self.pieces.pop(source)
         self.pieces[target] = piece
-        return {"op": "carry", "piece": piece, "from": source, "to": target, "path": [_xy(source), _xy(target)]}
+        step = {"op": "carry", "piece": piece, "from": source, "to": target, "path": [_xy(source), _xy(target)]}
+        if reason:
+            step["reason"] = reason
+        return step
+
+    def dock(self, square: str, slot: str | None = None) -> dict:
+        """The gantry carries the piece on `square` into a docking slot (`slot`, or the first free one)."""
+        free = self.free_slots()
+        if not free:
+            raise ValueError("the docking lane is full")
+        if slot is None:
+            slot = free[0]
+        elif slot not in free:
+            raise ValueError(f"slot {slot} is not a free docking slot")
+        return self.carry(square, slot, "capture")
 
     def remove(self, square: str) -> dict:
         """A person takes the piece on `square` off the board; it leaves the layout (the person keeps it)."""
         return {"op": "remove", "piece": self.pieces.pop(square), "square": square}
 
-    def plan_computer(self, board: chess.Board, move: chess.Move) -> list[dict]:
-        """The steps for the gantry to play `move` on `board`: a `remove` first when it captures, then the carries. Updates the layout."""
+    def plan_computer(self, board: chess.Board, move: chess.Move, dock_slot: str | None = None) -> list[dict]:
+        """The steps for the gantry to play `move` on `board`. Updates the layout.
+
+        A capture comes first: a `remove` step, or in dock mode a carry into `dock_slot` (or the first
+        free slot; a `remove` again when the lane is full). Then the carries of the move itself.
+        """
         if move not in board.legal_moves:
             raise ValueError(f"illegal move {move.uci()}")
         source, target = chess.square_name(move.from_square), chess.square_name(move.to_square)
         steps: list[dict] = []
         taken = removal(board, move)
         if taken:
-            steps.append(self.remove(taken[0]))
+            if self.captures == "dock" and self.free_slots():
+                steps.append(self.dock(taken[0], dock_slot))
+            else:
+                steps.append(self.remove(taken[0]))
+        spare = None
+        if move.promotion and self.captures == "dock":
+            spare = self.docked(chess.Piece(move.promotion, board.turn).symbol())
         if board.is_castling(move):
             rank = source[1]
             rook_from, rook_to = ("h", "f") if board.is_kingside_castling(move) else ("a", "d")
             steps.append(self.carry(source, target))
             steps.append(self.carry(rook_from + rank, rook_to + rank))
+        elif spare:
+            # The new piece comes out of the lane onto the promotion square; the pawn takes its slot.
+            steps.append(self.carry(spare, target, "promotion"))
+            steps.append(self.carry(source, spare, "promotion"))
         elif move.promotion:
             steps.append(self.carry(source, target))
             steps.append({"op": "note", "message": f"The pawn on {target} now counts as a {chess.piece_name(move.promotion)}; "
@@ -199,10 +257,10 @@ def job_for_steps(layout_before: Layout, layout_after: Layout, label: str, steps
             "steps": steps, "expect": layout_after.on_board()}
 
 
-def job_for_move(layout: Layout, board: chess.Board, move: chess.Move, job_id: int = 0) -> dict:
+def job_for_move(layout: Layout, board: chess.Board, move: chess.Move, job_id: int = 0, dock_slot: str | None = None) -> dict:
     """Plan `move` for the gantry; `layout` is updated to the position after it."""
     before = layout.copy()
-    steps = layout.plan_computer(board, move)
+    steps = layout.plan_computer(board, move, dock_slot)
     return job_for_steps(before, layout, move.uci(), steps, job_id)
 
 
@@ -221,6 +279,10 @@ def describe(job: dict) -> list[str]:
     for step in job["steps"]:
         if step["op"] == "remove":
             lines.append(f"Take the {piece_words(step['piece'])} off {step['square']}, then press Check.")
+        elif step["op"] == "carry" and ":" in step["to"]:
+            lines.append(f"Take the {piece_words(step['piece'])} off {step['from']} to docking slot {step['to']}.")
+        elif step["op"] == "carry" and ":" in step["from"]:
+            lines.append(f"Bring the {piece_words(step['piece'])} from docking slot {step['from']} to {step['to']}.")
         elif step["op"] == "carry":
             lines.append(f"Move the {piece_words(step['piece'])} from {step['from']} to {step['to']}.")
         else:

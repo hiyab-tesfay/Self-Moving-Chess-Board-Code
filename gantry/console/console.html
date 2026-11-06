@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DUEN Gantry Console</title>
+<style>
+  :root {
+    --purple: #3b2063; --purple-2: #5b3c8f; --purple-soft: #e9e1f4;
+    --gold: #c9a227; --gold-soft: #f3e6b4; --cream: #f7f1e3; --panel: #fffcf4;
+    --ink: #24163a; --muted: #6d6080; --line: #dccfb0;
+    --red: #b3261e; --red-soft: #f8dcd8; --green: #2e7d32; --green-soft: #dcefdc;
+    --light-sq: #f1e4c3; --dark-sq: #8a6bb3;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--cream); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  button, input, select { font: inherit; }
+  header { position: sticky; top: 0; z-index: 10; background: var(--purple); color: var(--cream);
+           display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 16px; }
+  header h1 { margin: 0; font-size: 17px; letter-spacing: .04em; }
+  header h1 span { color: var(--gold); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 10px; font-size: 13px;
+          background: rgba(255,255,255,.12); white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #999; }
+  .dot.ok { background: #6fd17a; } .dot.run { background: var(--gold); } .dot.bad { background: #ff6b5e; }
+  #stop { margin-left: auto; background: var(--red); color: #fff; border: 2px solid #fff; border-radius: 10px;
+          font-weight: 800; font-size: 16px; padding: 8px 22px; cursor: pointer; letter-spacing: .06em; }
+  #stop:active { transform: translateY(1px); }
+  main { display: grid; grid-template-columns: minmax(320px, 600px) minmax(320px, 1fr); gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px 16px; } #stop { margin-left: 0; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
+  .panel h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--purple-2); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  .btn { border: 1px solid var(--purple-2); background: #fff; color: var(--purple); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  .btn:hover:not(:disabled) { background: var(--purple-soft); }
+  .btn.primary { background: var(--purple); color: var(--cream); border-color: var(--purple); }
+  .btn.primary:hover:not(:disabled) { background: var(--purple-2); }
+  .btn.gold { background: var(--gold); border-color: #a8851a; color: var(--ink); font-weight: 600; }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.big-red { background: var(--red); color: #fff; border-color: var(--red); font-weight: 800; font-size: 16px; padding: 10px 18px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .seg { display: inline-flex; border: 1px solid var(--purple-2); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; background: #fff; color: var(--purple); padding: 6px 12px; cursor: pointer; }
+  .seg button.on { background: var(--purple); color: var(--cream); }
+  input[type=number], input[type=text], select { border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; background: #fff; color: var(--ink); min-width: 0; }
+  input[type=number] { width: 84px; }
+  label.field { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 3px 0; }
+  label.field small { display: block; color: var(--muted); font-size: 12px; }
+  .muted { color: var(--muted); }
+  .note { font-size: 13px; color: var(--muted); margin: 6px 0; }
+  .banner { border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; font-weight: 500; }
+  .banner.warn { background: var(--gold-soft); border: 1px solid var(--gold); }
+  .banner.bad { background: var(--red-soft); border: 1px solid var(--red); }
+  .banner.info { background: var(--purple-soft); border: 1px solid var(--purple-2); }
+  .banner .row { margin-bottom: 0; }
+  #boardwrap { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+  #board { width: 100%; height: auto; display: block; user-select: none; }
+  #board .hit { cursor: pointer; }
+  #boardlegend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); padding: 6px 4px 0; }
+  .moves { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; max-height: 110px; overflow: auto;
+           background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  ol.steps { margin: 6px 0; padding-left: 20px; } ol.steps li { margin: 2px 0; }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; height: 240px; overflow: auto;
+         background: #1f1530; color: #e8e0f2; border-radius: 8px; padding: 8px; }
+  #log div { white-space: pre-wrap; word-break: break-word; }
+  #log .error { color: #ff9a8f; } #log .warn, #log .wait { color: #f3d36b; } #log .send { color: #9fc3ff; }
+  #log .board { color: #b8a9cf; } #log .step { color: #b6f0b9; }
+  .jog { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 36px); gap: 4px; }
+  .jog button { padding: 0; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 13px; }
+  .kv b { font-weight: 600; }
+  .ladder-now { font-size: 28px; font-weight: 800; color: var(--purple); }
+  #toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px));
+           background: var(--ink); color: var(--cream); padding: 10px 14px; border-radius: 10px; display: none; z-index: 20; }
+  #toast.bad { background: var(--red); }
+  #promo { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(36,22,58,.35); border-radius: 12px; }
+  #promo .box { background: var(--panel); border-radius: 12px; padding: 14px; display: flex; gap: 8px; align-items: center; }
+  #promo button { font-size: 30px; width: 54px; height: 54px; }
+  details summary { cursor: pointer; color: var(--purple-2); font-weight: 600; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>DUEN <span>Gantry Console</span></h1>
+  <span class="pill"><span class="dot" id="linkdot"></span><span id="linktext">Not connected</span></span>
+  <span class="pill" id="statepill"><span class="dot" id="statedot"></span><span id="statetext">—</span></span>
+  <span class="pill" id="pospill">X — Y —</span>
+  <span class="pill" id="armpill">arm —</span>
+  <button id="stop" title="Stop everything now (Esc)">STOP</button>
+</header>
+
+<main>
+  <section>
+    <div id="banners"></div>
+    <div id="boardwrap">
+      <svg id="board" viewBox="-12 -12 494 444" aria-label="The board as the gantry sees it, in millimetres"></svg>
+      <div id="boardlegend">
+        <span>Click a piece, then where it goes.</span>
+        <span><b style="color:var(--gold)">◯</b> right docking lane (captures go here)</span>
+        <span><b style="color:#aaa">◯</b> left lane: too tight, not used</span>
+        <span><b style="color:var(--red)">⊕</b> the magnet carriage</span>
+      </div>
+      <div id="promo"><div class="box"><span class="muted">Promote to</span>
+        <button class="btn" data-p="q">♛</button><button class="btn" data-p="r">♜</button>
+        <button class="btn" data-p="b">♝</button><button class="btn" data-p="n">♞</button>
+        <button class="btn" data-p="">✕</button></div></div>
+    </div>
+
+    <div class="panel" style="margin-top:14px">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="panel">
+      <h2>Play</h2>
+      <div class="row">
+        <div class="seg" id="modeseg"><button data-m="chess" class="on">Chess moves</button><button data-m="free">Free carry</button></div>
+        <label class="row" style="margin:0"><input type="checkbox" id="autorun"> Run on the gantry at once</label>
+      </div>
+      <div class="row"><span id="turn" class="muted"></span></div>
+      <div class="moves" id="moves">No moves yet.</div>
+      <div class="row">
+        <button class="btn" id="undo">Undo last move</button>
+        <button class="btn" id="resetboard">Reset board (gantry)</button>
+        <button class="btn" id="newgame" title="The pieces are already in the starting position and the lane is empty">New game (pieces set up)</button>
+      </div>
+      <div id="planbox"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Board link and homing</h2>
+      <div class="row">
+        <select id="ports"></select>
+        <button class="btn" id="refresh" title="Look for USB ports again">↻</button>
+        <button class="btn primary" id="connect">Connect</button>
+        <button class="btn" id="disconnect">Disconnect</button>
+      </div>
+      <div class="note" id="fwline"></div>
+      <div class="row">
+        <button class="btn" id="motorsoff" title="M18: the drivers let go so you can push the carriage">1. Motors off</button>
+        <span class="muted">2. push the carriage into the bottom-left corner</span>
+        <button class="btn gold" id="homemanual" title="$HM: this spot is 0,0">3. Set home here</button>
+      </div>
+      <div class="row">
+        <button class="btn" id="homebump" title="$H: drives slowly into the bottom-left corner until the motors stall, then backs off">Bump home</button>
+        <button class="btn" id="unlock" title="$X: clear a stop or an alarm">Unlock</button>
+      </div>
+      <div class="grid2">
+        <div>
+          <div class="row"><span class="muted">Jog</span>
+            <select id="jogstep"><option>1</option><option selected>10</option><option>50</option></select><span class="muted">mm</span></div>
+          <div class="jog">
+            <span></span><button class="btn" data-j="0,1">▲</button><span></span>
+            <button class="btn" data-j="-1,0">◀</button><span class="muted" style="text-align:center;align-self:center">XY</span><button class="btn" data-j="1,0">▶</button>
+            <span></span><button class="btn" data-j="0,-1">▼</button><span></span>
+          </div>
+        </div>
+        <div>
+          <div class="row"><input type="text" id="goto" placeholder="e4, b:3 or 7.5,2" size="12"><button class="btn" id="gobtn">Go to</button></div>
+          <div class="row"><button class="btn" id="servoup">Arm up</button><button class="btn" id="servodown">Arm down</button></div>
+          <div class="row"><button class="btn" id="magon">Magnet on</button><button class="btn" id="magoff">Magnet off</button></div>
+        </div>
+      </div>
+      <div class="row"><input type="text" id="raw" placeholder="any command: ?, $$, G1 X100 F1200, M7…" style="flex:1">
+        <button class="btn" id="rawsend">Send</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>Speeds</h2>
+      <div class="note" id="speednote"></div>
+      <div class="grid2">
+        <div>
+          <label class="field"><span>Travel speed<small>mm/s, arm down</small></span><input type="number" id="s_travel_speed" step="1"></label>
+          <label class="field"><span>Carry speed<small>mm/s, piece on the magnet</small></span><input type="number" id="s_carry_speed" step="1"></label>
+          <label class="field"><span>Acceleration<small id="accelnote">mm/s²</small></span><input type="number" id="s_accel" step="10"></label>
+          <label class="field"><span>Scale<small>real mm per mm counted</small></span><input type="number" id="s_scale" step="0.001"></label>
+        </div>
+        <div>
+          <label class="field"><span>Arm settle<small>s</small></span><input type="number" id="s_servo_settle" step="0.05"></label>
+          <label class="field"><span>Grab settle<small>s</small></span><input type="number" id="s_grab_settle" step="0.05"></label>
+          <label class="field"><span>Release settle<small>s</small></span><input type="number" id="s_release_settle" step="0.05"></label>
+          <label class="field"><span>Magnet per hold<small>s, the board cuts it at 15</small></span><input type="number" id="s_magnet_budget" step="0.5"></label>
+        </div>
+      </div>
+      <div class="row"><button class="btn primary" id="savesettings">Save speeds</button><button class="btn" id="revertsettings">Revert</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>Stalls and buzzing</h2>
+      <div class="note">A stepper buzzes without turning when it is asked for more than it can give at that speed, when it gets
+        less current or voltage than it needs, or when the carriage binds. These checks tell which.</div>
+      <details open><summary>1. Distance check (microstep pins)</summary>
+        <div class="note">Moves one axis a short way slowly, as the board counts it. Measure with a ruler how far it really went.
+          About 8× too far means the driver's M0/M1/M2 pins are floating (full steps): every move is 8× too far and 8× too fast,
+          which is the classic stall.</div>
+        <div class="row"><select id="d_axis"><option value="x">X</option><option value="y">Y</option></select>
+          <input type="number" id="d_mm" value="20" min="1" max="60"><span class="muted">mm counted</span>
+          <button class="btn" id="d_run">Run</button></div>
+        <div id="d_result"></div>
+      </details>
+      <details><summary>2. Speed ladder (how fast it can go)</summary>
+        <div class="note">Goes out and back at rising speeds. Watch and listen: press <b>It stalled</b> the moment it buzzes,
+          skips or stops. The page then suggests speeds with a margin. Home it first; a stall loses the position.</div>
+        <div class="row"><select id="l_axis"><option value="x">X</option><option value="y">Y</option></select>
+          <input type="number" id="l_dist" value="100" min="10" max="400"><span class="muted">mm</span>
+          <input type="text" id="l_speeds" value="20,30,40,50,60,80,100,120" size="22"><span class="muted">mm/s</span></div>
+        <div class="row"><button class="btn" id="l_run">Run ladder</button><button class="btn big-red" id="l_stall">It stalled</button></div>
+        <div id="l_result"></div>
+      </details>
+      <details><summary>3. Push test (binding)</summary>
+        <div class="note">Press Motors off, then push the carriage slowly along X across the whole board, then along Y.
+          It should glide with an even, light force. A tight spot is binding (a V-wheel too tight, the beam twisting
+          because only one side is driven, a belt rubbing): the motor will stall there at any speed.</div>
+        <div class="row"><button class="btn" id="p_off">Motors off</button></div>
+      </details>
+      <details><summary>4. Power and current</summary>
+        <div class="note" id="restarts"></div>
+        <ul class="note" style="padding-left:18px;margin:4px 0">
+          <li>Motor supply at the driver's VMOT must stay at 12 V or more while moving. The DRV8825 shuts off below 8.2 V; a
+            battery pack sags under load, which shows as stalls at speed and as the ESP32 restarting by itself.</li>
+          <li>Vref sets the current: current limit = 2 × Vref. For a 13 N·cm NEMA17 rated about 1 A, set Vref about 0.4 to 0.5 V.
+            Too low gives buzzing under load; too high makes the driver overheat and cut out in bursts (give it a heatsink).</li>
+          <li>A motor that only buzzes even at 5 mm/s has a loose or swapped coil wire: its two coil pairs must each go to
+            one driver output pair (1A/1B and 2A/2B).</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const FILES = "abcdefgh";
+const GLYPH = { p: "♟", n: "♞", b: "♝", r: "♜", q: "♛", k: "♚" };
+const SIZE = { p: 23, n: 25, b: 25, r: 25, q: 27, k: 27 };
+let S = null, since = 0, selected = null, mode = "chess", settingsShown = false, pendingPromo = null, offline = false;
+
+function toast(text, bad) {
+  const t = $("#toast");
+  t.textContent = text; t.className = bad ? "bad" : ""; t.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => (t.style.display = "none"), bad ? 6000 : 3000);
+}
+
+async function api(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(j.error || `error ${r.status}`, true); return null; }
+    return j;
+  } catch (e) { toast("The console server is not answering: is console.sh still running?", true); return null; }
+}
+
+async function loadPorts() {
+  try {
+    const j = await (await fetch("/api/ports")).json();
+    const sel = $("#ports"), keep = sel.value;
+    sel.innerHTML = j.ports.map((p) => `<option value="${p}">${p === "sim" ? "sim (pretend board)" : p}</option>`).join("");
+    if (j.ports.includes(keep)) sel.value = keep;
+  } catch (e) { /* the poll shows the server is down */ }
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state?since=" + since);
+    S = await r.json();
+    since = S.log_id;
+    offline = false;
+    render();
+  } catch (e) {
+    offline = true;
+    $("#linktext").textContent = "Console server stopped";
+    $("#linkdot").className = "dot bad";
+  } finally {
+    setTimeout(poll, 300);
+  }
+}
+
+// ----------------------------------------------------------------- geometry (mm, y up)
+function sqXY(name) {
+  const g = S.geometry, f = FILES.indexOf(name[0]), r = +name[1] - 1;
+  return [g.a1[0] + f * g.square, g.a1[1] + r * g.square];
+}
+function slotXY(name) {
+  const g = S.geometry, i = +name.slice(2), col = name[0] === "w" ? "-1" : "8";
+  return [g.columns[col], g.park_rows[i]];
+}
+function placeXY(name) { return name.includes(":") ? slotXY(name) : sqXY(name); }
+const TY = () => S.geometry.travel[1];
+const sy = (y) => TY() - y;
+
+function render() {
+  renderHeader();
+  renderBanners();
+  renderBoard();
+  renderPlay();
+  renderControls();
+  renderSettings();
+  renderTests();
+  renderLog();
+}
+
+function renderHeader() {
+  $("#linkdot").className = "dot " + (S.connected ? "ok" : "");
+  $("#linktext").textContent = S.connected ? `${S.port === "sim" ? "Pretend board" : S.port}` : (S.task && S.task.name === "Connecting" ? "Connecting…" : "Not connected");
+  const st = S.status;
+  if (!st) {
+    $("#statetext").textContent = "—"; $("#statedot").className = "dot"; $("#pospill").textContent = "X — Y —"; $("#armpill").textContent = "arm —";
+    return;
+  }
+  const busy = st.state === "Run" || st.state === "Home";
+  $("#statedot").className = "dot " + (st.state === "Idle" ? "ok" : busy ? "run" : "bad");
+  $("#statetext").textContent = st.state + (st.reason ? `: ${st.reason}` : "") + (st.homed ? " · homed" : " · not homed");
+  $("#pospill").textContent = `X ${st.x.toFixed(1)}  Y ${st.y.toFixed(1)} mm`;
+  $("#armpill").textContent = `arm ${st.servo || "—"} · magnet ${st.magnet ? "ON" : "off"}`;
+}
+
+function renderBanners() {
+  const out = [];
+  if (offline) out.push(`<div class="banner bad">The console server is not running. Start it again with console.sh.</div>`);
+  if (S.waiting) out.push(`<div class="banner warn">${esc(S.waiting)}<div class="row"><button class="btn gold" onclick="api('/api/done')">Done</button></div></div>`);
+  if (S.pending) out.push(`<div class="banner bad"><b>${esc(S.pending.san)}</b> stopped after ${S.pending.next} of ${S.pending.total} steps.
+      If a piece stopped part-way along its path, put it back on the square it started from before Retry.
+      <div class="row"><button class="btn primary" onclick="api('/api/resolve',{action:'retry'})">Retry the rest</button>
+      <button class="btn" onclick="api('/api/resolve',{action:'before'})">I put the pieces back as before</button>
+      <button class="btn" onclick="api('/api/resolve',{action:'after'})">I finished the move by hand</button></div></div>`);
+  if (S.connected && S.status && (!S.status.homed || S.position_lost) && !(S.task && /hom/i.test(S.task.name)))
+    out.push(`<div class="banner warn">${S.position_lost ? "Position lost" : "Not homed"}: press <b>Motors off</b>, push the carriage into the
+      bottom-left corner, then <b>Set home here</b>.</div>`);
+  if (S.status && S.status.state === "Hold") out.push(`<div class="banner bad">Stopped. Check the board, then press <b>Unlock</b>.</div>`);
+  if (S.status && S.status.state === "Alarm" && S.status.reason && S.status.reason !== "not homed")
+    out.push(`<div class="banner bad">Alarm: ${esc(S.status.reason)}. Check the board, press <b>Unlock</b>, then home it.</div>`);
+  if (S.task) out.push(`<div class="banner info"><b>${esc(S.task.name)}</b>${S.task.progress ? " · " + esc(S.task.progress) : ""}</div>`);
+  setHTML($("#banners"), out.join(""));
+}
+
+function pieceSVG(symbol, x, y, extra) {
+  const white = symbol === symbol.toUpperCase(), t = symbol.toLowerCase(), r = SIZE[t] / 2;
+  return `<g ${extra || ""}><circle cx="${x}" cy="${sy(y)}" r="${r}" fill="${white ? "#fffdf6" : "#2a1f3a"}" stroke="${white ? "#3b2063" : "#c9a227"}" stroke-width="1.6"/>
+    <text x="${x}" y="${sy(y) + 7.5}" text-anchor="middle" font-size="22" fill="${white ? "#3b2063" : "#f7f1e3"}">${GLYPH[t]}</text></g>`;
+}
+
+function renderBoard() {
+  const g = S.geometry, [W, H] = g.travel, half = g.square / 2, parts = [], badges = [];
+  parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="none" stroke="#b9a87e" stroke-dasharray="4 4"/>`);
+  const legal = mode === "chess" && selected && !selected.includes(":") ? (S.game.legal[selected] || []) : [];
+  for (let f = 0; f < 8; f++) for (let r = 0; r < 8; r++) {
+    const name = FILES[f] + (r + 1), [x, y] = sqXY(name);
+    parts.push(`<rect x="${x - half}" y="${sy(y) - half}" width="${g.square}" height="${g.square}" fill="${(f + r) % 2 ? "var(--light-sq)" : "var(--dark-sq)"}"/>`);
+    if (r === 0) parts.push(`<text x="${x}" y="${sy(y) + half + 9}" text-anchor="middle" font-size="8" fill="#6d6080">${FILES[f]}</text>`);
+    if (f === 0) parts.push(`<text x="${x - half - 5}" y="${sy(y) + 3}" text-anchor="middle" font-size="8" fill="#6d6080">${r + 1}</text>`);
+  }
+  for (const col of Object.keys(g.columns)) {
+    const left = col === "-1";
+    g.park_rows.forEach((py, i) => {
+      parts.push(`<circle cx="${g.columns[col]}" cy="${sy(py)}" r="13" fill="none" stroke="${left ? "#c8c2b4" : "var(--gold)"}" stroke-width="1.4" stroke-dasharray="${left ? "2 3" : "0"}"/>`);
+      if (!left) parts.push(`<text x="${g.columns[col] + 16}" y="${sy(py) + 3}" font-size="7" fill="#8d7a3a">b:${i}</text>`);
+    });
+  }
+  // preview paths
+  if (S.preview) {
+    S.preview.steps.forEach((st, k) => {
+      if (st.op !== "carry") return;
+      const pts = st.points.map(([x, y]) => `${x},${sy(y)}`).join(" ");
+      const colour = st.reason === "capture" ? "#b3261e" : st.reason === "make room" || st.reason === "put back" ? "#6d6080" : "#c9a227";
+      parts.push(`<polyline points="${pts}" fill="none" stroke="${colour}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" opacity=".9" ${st.reason === "make room" || st.reason === "put back" ? 'stroke-dasharray="6 4"' : ""}/>`);
+      const [x0, y0] = st.points[0], [x1, y1] = st.points[st.points.length - 1];
+      parts.push(`<circle cx="${x1}" cy="${sy(y1)}" r="4" fill="${colour}"/>`);
+      badges.push(`<circle cx="${x0 - 14}" cy="${sy(y0) - 14}" r="7" fill="#fff" stroke="${colour}" stroke-width="2"/><text x="${x0 - 14}" y="${sy(y0) - 11}" font-size="8" text-anchor="middle" fill="${colour}" font-weight="700">${k + 1}</text>`);
+    });
+  }
+  // pieces, then the step numbers on top
+  for (const [name, symbol] of Object.entries(S.layout)) {
+    const [x, y] = placeXY(name);
+    parts.push(pieceSVG(symbol, x, y));
+  }
+  parts.push(...badges);
+  // highlights and click targets
+  const free = mode === "free" && selected;
+  for (let f = 0; f < 8; f++) for (let r = 0; r < 8; r++) {
+    const name = FILES[f] + (r + 1), [x, y] = sqXY(name);
+    if (name === selected) parts.push(`<rect x="${x - half + 2}" y="${sy(y) - half + 2}" width="${g.square - 4}" height="${g.square - 4}" fill="none" stroke="#c9a227" stroke-width="4"/>`);
+    if (legal.includes(name) || (free && !S.layout[name])) parts.push(`<circle cx="${x}" cy="${sy(y)}" r="6" fill="#3b2063" opacity=".55"/>`);
+    parts.push(`<rect class="hit" data-place="${name}" x="${x - half}" y="${sy(y) - half}" width="${g.square}" height="${g.square}" fill="transparent"/>`);
+  }
+  g.park_rows.forEach((py, i) => {
+    const name = "b:" + i, x = g.columns["8"];
+    if (name === selected) parts.push(`<circle cx="${x}" cy="${sy(py)}" r="15" fill="none" stroke="#c9a227" stroke-width="4"/>`);
+    if (free && !S.layout[name]) parts.push(`<circle cx="${x}" cy="${sy(py)}" r="5" fill="#3b2063" opacity=".55"/>`);
+    parts.push(`<circle class="hit" data-place="${name}" cx="${x}" cy="${sy(py)}" r="16" fill="transparent"/>`);
+  });
+  // the carriage
+  if (S.status) {
+    const x = S.status.x, y = S.status.y, up = S.status.servo === "up";
+    parts.push(`<g pointer-events="none"><circle cx="${x}" cy="${sy(y)}" r="10" fill="${S.status.magnet ? "rgba(179,38,30,.35)" : "none"}" stroke="#b3261e" stroke-width="${up ? 3 : 1.6}"/>
+      <line x1="${x - 14}" y1="${sy(y)}" x2="${x + 14}" y2="${sy(y)}" stroke="#b3261e" stroke-width="1.2"/>
+      <line x1="${x}" y1="${sy(y) - 14}" x2="${x}" y2="${sy(y) + 14}" stroke="#b3261e" stroke-width="1.2"/></g>`);
+  }
+  parts.push(`<text x="2" y="${H + 10}" font-size="8" fill="#6d6080">home 0,0 (bottom-left)</text>`);
+  setHTML($("#board"), parts.join(""));
+}
+
+$("#board").addEventListener("click", (ev) => {
+  const t = ev.target.closest("[data-place]");
+  if (!t || !S) return;
+  const place = t.dataset.place;
+  if (selected && selected !== place) {
+    if (S.layout[place] && !(mode === "chess" && (S.game.legal[selected] || []).includes(place))) { selected = place; render(); return; }
+    const from = selected;
+    selected = null;
+    if (mode === "chess") {
+      const sym = S.layout[from] || "";
+      const lastRank = (sym === "P" && place[1] === "8") || (sym === "p" && place[1] === "1");
+      if (lastRank && (S.game.legal[from] || []).includes(place)) { pendingPromo = { from, to: place }; $("#promo").style.display = "flex"; return; }
+    }
+    plan(from, place, null);
+    return;
+  }
+  if (selected === place) { selected = null; render(); return; }
+  if (S.layout[place]) { selected = place; render(); }
+});
+
+document.querySelectorAll("#promo button").forEach((b) => b.addEventListener("click", () => {
+  $("#promo").style.display = "none";
+  const p = pendingPromo; pendingPromo = null;
+  if (p && b.dataset.p) plan(p.from, p.to, b.dataset.p);
+}));
+
+async function plan(from, to, promotion) {
+  const j = await api("/api/plan", { from, to, promotion, mode });
+  if (j) toast(j.ran ? `${j.san}: ${j.carries} carr${j.carries === 1 ? "y" : "ies"}, about ${j.seconds} s` : `${j.san} planned: check it, then Run`);
+}
+
+function renderPlay() {
+  document.querySelectorAll("#modeseg button").forEach((b) => b.classList.toggle("on", b.dataset.m === mode));
+  const gm = S.game;
+  $("#turn").innerHTML = mode === "free" ? "Free carry: any piece to any empty square or right-lane slot. The game follows."
+    : `${gm.over ? "Game over: " + gm.over : (gm.turn === "white" ? "White" : "Black") + " to move" + (gm.check ? " · check" : "")}${gm.valid ? "" : " · this position is not a legal chess position"}`;
+  const mv = gm.moves;
+  setHTML($("#moves"), mv.length ? mv.map((m, i) => (i % 2 === 0 ? `<b>${i / 2 + 1}.</b> ` : "") + esc(m)).join(" ") : "No moves yet.");
+  const busy = !!S.task;
+  $("#undo").disabled = busy || !mv.length || !!S.pending;
+  $("#resetboard").disabled = busy || !!S.pending;
+  $("#newgame").disabled = busy;
+  const p = S.preview;
+  if (!p) { setHTML($("#planbox"), ""); return; }
+  const steps = p.steps.map((s) => `<li>${esc(s.text)}</li>`).join("");
+  setHTML($("#planbox"), `<div class="banner info" style="margin-top:10px"><b>${esc(p.san)}</b> · ${p.carries} carr${p.carries === 1 ? "y" : "ies"} · about ${p.seconds} s${p.rests ? ` · ${p.rests} magnet rest${p.rests > 1 ? "s" : ""}` : ""}
+    <ol class="steps">${steps}</ol>
+    <div class="row"><button class="btn primary" ${busy || !S.connected ? "disabled" : ""} onclick="api('/api/run')">Run on the gantry</button>
+    <button class="btn" ${busy ? "disabled" : ""} onclick="api('/api/run',{by_hand:true})">I moved it by hand</button>
+    <button class="btn" ${busy ? "disabled" : ""} onclick="api('/api/cancel')">Cancel</button></div></div>`);
+}
+
+function renderControls() {
+  const busy = !!S.task, c = S.connected;
+  $("#connect").disabled = c || busy;
+  $("#disconnect").disabled = !c || busy;
+  for (const id of ["#motorsoff", "#homemanual", "#homebump", "#unlock", "#gobtn", "#servoup", "#servodown", "#magon", "#magoff", "#rawsend", "#p_off", "#d_run", "#l_run"])
+    $(id).disabled = !c || busy;
+  document.querySelectorAll("[data-j]").forEach((b) => (b.disabled = !c || busy));
+  $("#homebump").title = Math.abs(S.settings.scale - 1) > 0.05 ? "Not while the scale is not 1: home by hand" : "$H: drives slowly into the bottom-left corner until the motors stall, then backs off";
+  $("#fwline").textContent = c ? `${S.firmware}${S.tunable ? " · speeds and acceleration set from this page" : " · acceleration fixed at 800 mm/s² by this firmware; speeds set per move"}` : "Plug the ESP32 in by USB, pick its port (usbserial…), then Connect. Pick sim to try the page with the pretend board.";
+}
+
+const SETTING_KEYS = ["travel_speed", "carry_speed", "accel", "scale", "servo_settle", "grab_settle", "release_settle", "magnet_budget"];
+function renderSettings(force) {
+  const s = S.settings;
+  if (!settingsShown || force) {
+    for (const k of SETTING_KEYS) $("#s_" + k).value = s[k];
+    $("#autorun").checked = !!s.auto_run;
+    settingsShown = true;
+  }
+  $("#s_accel").disabled = S.connected && !S.tunable;
+  $("#accelnote").textContent = S.connected && !S.tunable ? `mm/s², fixed by the firmware: now ${S.accel_now}` : "mm/s²";
+  $("#speednote").textContent = `Carries run at most ${S.carry_cap} mm/s (the board's arm-up limit). Lower speeds give the motor more torque to spare.`;
+  $("#savesettings").disabled = !!S.task;
+}
+
+function renderTests() {
+  const d = S.tests.distance;
+  let h = "";
+  if (d && d.state === "running") h = `<div class="note">Moving… measure from where it started.</div>`;
+  if (d && (d.state === "measure" || d.state === "done")) {
+    h = `<div class="row"><span>Real distance</span><input type="number" id="d_meas" step="0.5" value="${d.measured || ""}"><span class="muted">mm</span>
+      <button class="btn" onclick="distanceResult()">Work out the scale</button></div>`;
+    if (d.state === "done") h += `<div class="banner info">Scale <b>${d.scale}</b>. ${esc(d.hint || "")}
+      <div class="row"><button class="btn primary" onclick="useScale(${d.scale})">Use scale ${d.scale}</button></div></div>`;
+  }
+  setHTML($("#d_result"), h);
+  const l = S.tests.ladder;
+  let lh = "";
+  if (l) {
+    if (l.at !== null && !l.done && !l.stalled && S.task) lh += `<div class="row"><span class="muted">now</span><span class="ladder-now">${l.at} mm/s</span></div>`;
+    lh += `<div class="note">Ran cleanly: ${l.ok.length ? l.ok.join(", ") + " mm/s" : "none yet"}${l.stalled ? ` · <b style="color:var(--red)">stalled at ${l.stalled} mm/s</b>` : ""}${l.done ? " · no stall reported" : ""}</div>`;
+    if (l.recommend && l.recommend.travel_speed)
+      lh += `<div class="banner info">Suggested: travel ${l.recommend.travel_speed} mm/s, carry ${l.recommend.carry_speed} mm/s (70% and 60% of the last clean speed).
+        <div class="row"><button class="btn primary" onclick="useSpeeds(${l.recommend.travel_speed},${l.recommend.carry_speed})">Use these speeds</button></div></div>`;
+  }
+  setHTML($("#l_result"), lh);
+  $("#l_stall").disabled = !(l && S.task && l.at !== null && !l.done);
+  setHTML($("#restarts"), `The board restarted by itself <b>${S.restarts}</b> time${S.restarts === 1 ? "" : "s"} since the console started.
+    ${S.restarts ? "That is the ESP32 losing power for a moment: give it its own USB power and check the motor supply's ground is shared." : ""}`);
+}
+
+function renderLog() {
+  if (!S.log.length) return;
+  const el = $("#log"), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  for (const e of S.log) {
+    const div = document.createElement("div");
+    div.className = e.kind;
+    div.textContent = `${e.t} ${e.kind.padEnd(5)} ${e.text}`;
+    el.appendChild(div);
+  }
+  while (el.childNodes.length > 600) el.removeChild(el.firstChild);
+  if (atEnd) el.scrollTop = el.scrollHeight;
+}
+
+// Redraw only what changed: replacing a button under the mouse would swallow the click.
+function setHTML(el, html) { if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; } }
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+async function distanceResult() {
+  const v = parseFloat($("#d_meas").value);
+  if (!(v > 0)) { toast("Enter the measured distance in mm", true); return; }
+  await api("/api/test/distance-result", { measured: v });
+}
+async function useScale(v) { if (await api("/api/settings", { scale: v })) { settingsShown = false; toast("Scale saved"); } }
+async function useSpeeds(t, c) { if (await api("/api/settings", { travel_speed: t, carry_speed: c })) { settingsShown = false; toast("Speeds saved"); } }
+
+// ----------------------------------------------------------------- buttons
+$("#stop").onclick = () => api("/api/stop");
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { api("/api/stop"); } });
+$("#refresh").onclick = loadPorts;
+$("#connect").onclick = () => api("/api/connect", { port: $("#ports").value });
+$("#disconnect").onclick = () => api("/api/disconnect");
+$("#motorsoff").onclick = $("#p_off").onclick = () => api("/api/motors-off");
+$("#homemanual").onclick = () => api("/api/home", { mode: "manual" });
+$("#homebump").onclick = () => { if (confirm("Bump homing drives into the bottom-left corner until the motors stall against the frame. Clear the way first. Go?")) api("/api/home", { mode: "bump" }); };
+$("#unlock").onclick = () => api("/api/unlock");
+document.querySelectorAll("[data-j]").forEach((b) => (b.onclick = () => {
+  const [dx, dy] = b.dataset.j.split(",").map(Number), step = +$("#jogstep").value;
+  api("/api/jog", { dx: dx * step, dy: dy * step });
+}));
+$("#gobtn").onclick = () => api("/api/goto", { place: $("#goto").value });
+$("#goto").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#gobtn").click(); });
+$("#servoup").onclick = () => api("/api/servo", { up: true });
+$("#servodown").onclick = () => api("/api/servo", { up: false });
+$("#magon").onclick = () => api("/api/magnet", { on: true });
+$("#magoff").onclick = () => api("/api/magnet", { on: false });
+$("#rawsend").onclick = async () => {
+  const line = $("#raw").value.trim();
+  if (!line) return;
+  const j = await api("/api/command", { line });
+  if (j) { $("#raw").value = ""; if (j.lines && j.lines.length) toast(j.lines.join("  ")); }
+};
+$("#raw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#rawsend").click(); });
+document.querySelectorAll("#modeseg button").forEach((b) => (b.onclick = () => { mode = b.dataset.m; selected = null; render(); }));
+$("#autorun").onchange = () => api("/api/settings", { auto_run: $("#autorun").checked });
+$("#undo").onclick = () => api("/api/undo");
+$("#resetboard").onclick = () => api("/api/reset-board");
+$("#newgame").onclick = () => { if (confirm("Start a new game with the pieces already in the starting position and the docking lane empty? (Nothing moves.)")) api("/api/new-game"); };
+$("#savesettings").onclick = async () => {
+  const body = {};
+  for (const k of SETTING_KEYS) body[k] = parseFloat($("#s_" + k).value);
+  if (await api("/api/settings", body)) toast("Speeds saved");
+};
+$("#revertsettings").onclick = () => renderSettings(true);
+$("#d_run").onclick = () => api("/api/test/distance", { axis: $("#d_axis").value, mm: +$("#d_mm").value });
+$("#l_run").onclick = () => api("/api/test/ladder", { axis: $("#l_axis").value, distance: +$("#l_dist").value,
+  speeds: $("#l_speeds").value.split(/[ ,]+/).map(Number).filter((v) => v > 0) });
+$("#l_stall").onclick = () => api("/api/test/stalled");
+
+loadPorts();
+poll();
+</script>
+</body>
+</html>

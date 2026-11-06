@@ -34,20 +34,28 @@ plotter design specifies (`GT2 20 Teeth pulley` in `2D Plotter V2.step`); `PULLE
 | steps per mm at 1/8 microstep | 200 × 8 / 40 | **40** |
 | steps per mm at 1/16 | 200 × 16 / 40 | 80 |
 | resolution at 1/8 | 1 / 40 | 0.025 mm |
-| top speed (`MAX_SPEED_MM_S`) | | 120 mm/s = 180 rpm = 4.8 kHz steps |
-| speed with a piece (`CARRY_SPEED_MM_S`) | | 60 mm/s |
-| acceleration (`MAX_ACCEL_MM_S2`) | | 800 mm/s² |
+| travel speed at power-up (`DEFAULT_SPEED_MM_S`, `$110`) | | 60 mm/s = 90 rpm = 2.4 kHz steps |
+| speed with a piece at power-up (`CARRY_SPEED_MM_S`, `$111`) | | 40 mm/s |
+| acceleration at power-up (`DEFAULT_ACCEL_MM_S2`, `$120`) | | 400 mm/s² |
+| ceiling for both speeds (`MAX_SPEED_MM_S`) | | 120 mm/s = 180 rpm = 4.8 kHz steps |
+| ceiling for acceleration (`MAX_ACCEL_MM_S2`) | | 800 mm/s² |
 | pulley pitch radius | 40 mm / 2π | 6.37 mm |
 | belt pull at standstill | 0.13 N·m / 6.37 mm | 20 N |
 | belt pull available at 180 rpm (about half) | | ~10 N |
 | needed: 1 kg beam at 800 mm/s² + wheel friction + dragging a piece | 0.8 + ~2 + ~3 | ~6 N |
 
-So the 13 N·cm motor has roughly a 2× margin at these settings. If a motor ever stalls or
-skips, halve `MAX_ACCEL_MM_S2` first; speed matters less than acceleration here. One square
-(50 mm) with a piece takes about 0.9 s; a full-board diagonal takes about 3 s; a pawn push
-from the moment the job arrives is about 5 s including the arm and the magnet settling, a
-knight through the lanes about 6.5 s, a capture about the same (the person has already taken
-the captured piece off, so it is one carry).
+So on paper the 13 N·cm motor has roughly a 2× margin even at the ceilings, but only on a
+stiff 12 V supply and free-running rails. The bench gantry stalled and buzzed there, so the
+firmware starts at half of both (60 mm/s, 400 mm/s², 40 mm/s with a piece), and the three
+numbers can be changed over serial (`$110`, `$111`, `$120`, see The protocol) without
+reflashing, never past the ceilings. If a motor stalls or skips, lower `$120` first, then the
+speeds; then work through Stalls and buzzing below. At the power-up values one square (50 mm)
+with a piece takes about 1.3 s; a full-board diagonal about 8.5 s empty and 12.5 s with a piece;
+a pawn push from the moment the job arrives (carriage on a1) is about 7.5 s including the arm
+and the magnet settling, a knight through the lanes about 9.5 s, a capture about the same (the
+person has already taken the captured piece off, so it is one carry). With 0.2's 120 mm/s,
+800 mm/s² and 60 mm/s with a piece, the square was 0.9 s, the empty diagonal 4.3 s, the pawn
+push 4.7 s and the knight 6 s.
 
 Why 1/8 microstepping: 4.8 kHz at full speed is comfortable for the step loop on an ESP32
 and still fine on an AVR; 1/16 doubles the step rate for no gain the belt can show.
@@ -66,8 +74,8 @@ with the same motor pins as `Prototype_Program/Prototype_Program.ino`:
 | --- | --- | --- |
 | X DIR / STEP / EN | 18 / 19 / 21 | motor 1 in the prototype |
 | Y DIR / STEP / EN | 22 / 25 / 26 | motor 2 in the prototype |
-| magnet | 27 | gate of a logic-level MOSFET (or a relay module) switching the 12 V electromagnet; flyback diode across the coil |
-| servo signal | 13 | the MG90's signal wire; its power comes from 5 V, not the ESP32. The prototype sketch has no servo pin, so 13 is a free choice (not a strapping pin, LEDC-capable); set `PIN_SERVO -1` without a servo |
+| magnet | 32 | gate of a logic-level MOSFET (or a relay module) switching the 12 V electromagnet; flyback diode across the coil |
+| servo signal | 12 | the MG90's signal wire; its power comes from 5 V, not the ESP32. The prototype sketch has no servo pin; 12 is the bench wiring of 2026-11-05 (LEDC-capable; it is a strapping pin, so the servo must not pull it high at power-up); set `PIN_SERVO -1` without a servo |
 | X / Y homing switch (optional) | 34 / 35 | to ground, with an external pull-up (34/35 have none); `-1` without switches |
 
 Define `GANTRY_CNC_SHIELD` for a CNC Shield v3 (X and Y driver sockets, spindle-enable pin for
@@ -122,11 +130,12 @@ on what each protects. The Pi side adds its own on top.
 | M3 preconditions | | a magnet that pulls nothing only heats | `M3` is refused while not homed (`error:8`), while moving (`error:3`), with the arm down (`error:12`) |
 | `IDLE_DISABLE_MS` | 30 000 | motors and DRV8825s (holding current is pure heat) | drivers disabled at boot and after this long with no motion; re-enabled for the next move |
 | `ENABLE_SETTLE_MS` | 5 | the DRV8825 charge pump | wait between enabling the drivers and the first step |
-| `MAX_STEP_HZ` | 20 000 | the DRV8825's 1.9 µs minimum pulse, the ESP32 loop | every feed is capped so no motor is asked for more steps per second; acceleration is capped at `MAX_ACCEL_MM_S2` by construction (no command can raise it) |
+| `MAX_STEP_HZ` | 20 000 | the DRV8825's 1.9 µs minimum pulse, the ESP32 loop | every feed is capped so no motor is asked for more steps per second, whatever `$110`, `$111` and `$100` say |
+| Speed and acceleration ceilings: `MAX_SPEED_MM_S`, `MAX_ACCEL_MM_S2` | 120, 800 | the motors' torque margin | `$110`, `$111` and `$120` can lower the speeds and the acceleration or raise them back, never past these (`error:13`); a reset brings back the power-up values (60, 40, 400) |
 | Move budget: `MOVE_BUDGET_FACTOR` × planned + `MOVE_BUDGET_MARGIN_MS` | 2 × + 1 000 | motors at full current while something is stuck | a move that runs past its budget stops, the magnet drops, the drivers switch off: alarm `move took too long`. Open-loop steppers cannot feel a jammed carriage; this catches a starved loop or a stuck sequence, and a stall shows up at the next camera check |
-| Bump homing | 25 mm/s, 8 mm | the motors (a switchless bump is the most current they ever draw) | homing keeps its own low speed and short bump; nothing can raise them |
+| Bump homing | 25 mm/s, 8 mm | the motors (a switchless bump is the most current they ever draw) | homing keeps its own low speed and short bump; nothing can raise them, and a `$110` below 25 lowers the homing speed with it |
 | `HOST_TIMEOUT_MS` | 20 000 | a piece left under a live magnet when the Pi crashes | with a sequence running and no line from the host for this long, the board **finishes the current `CARRY`** (no piece is dropped in a lane), then releases the magnet, lowers the arm, disables the drivers and reports `\|Host:lost` until `$X` or `$H`. Status polls (`?`) keep it alive and do not clear it |
-| Servo arm | | the pieces and the arm | rapid motion with the arm up is refused (`G0`, `GOTO`, `CARRY`, any `G1` faster than carry speed: `error:11`); the arm drops at boot, on alarm, on hold, on `$X`, on host lost and after every `M5` |
+| Servo arm | | the pieces and the arm | rapid motion with the arm up is refused (`G0`, `GOTO`, `CARRY`, any `G1` faster than the carry speed `$111`: `error:11`); the arm drops at boot, on alarm, on hold, on `$X`, on host lost and after every `M5` |
 | Motion needs a position | | the frame | `GOTO`, `CARRY`, `$T` and `M3` need `$H` first (`error:8`). `G0`/`G1` after `$X` are allowed in +X/+Y only (the soft limits at 0,0), so the first power-up checks work; the limit error then says `(not homed: $H first)` |
 | `BOOT_SETTLE_MS` | 500 | a half-initialised board | every output is put safe first (drivers disabled, magnet off, arm down), then the firmware waits this long before listening, and drops anything that arrived meanwhile |
 | Over-long line | | a truncated command acting as a different one | a serial line longer than the buffer (192 characters on the ESP32) is answered `error:1 line too long` and ignored |
@@ -157,7 +166,7 @@ Servo library on AVR).
   (`M8`) → settle. `$T` exercises the arm on e4 and in both of its carries. Status shows
   `|Servo:up` or `|Servo:down`.
 - Power: the MG90 takes **5 V** from the supply's 5 V rail (or a BEC off the 12 V), ground to
-  the common ground, and only its **signal wire** to GPIO 13. **Never power it from the ESP32's
+  the common ground, and only its **signal wire** to GPIO 12. **Never power it from the ESP32's
   3.3 V pin**: it stalls at several hundred milliamps and would brown the board out mid-carry.
 - `PIN_SERVO -1` means no servo: the sequence skips the arm steps, `M7`/`M8` answer `ok` and do
   nothing, and status has no `Servo` field. The pretend board follows `PIN_SERVO`, or
@@ -187,13 +196,14 @@ or open `firmware/gantry_firmware/gantry_firmware.ino` in the Arduino IDE (the `
 the folder come along), board **ESP32 Dev Module**, and upload. No library is needed on the
 ESP32 (the servo uses the core's LEDC). The sketch uses the plain Arduino API (`pinMode`,
 `digitalWrite`, `micros`, `Serial`) and the motion and protocol code is the same that runs in
-the laptop tests. Firmware 0.2 compiles to **288 KB of flash and 23 KB of RAM** on the ESP32
+the laptop tests. Firmware 0.4 compiles to **289 KB of flash and 23 KB of RAM** on the ESP32
 Dev Module. For a CNC shield it compiles for an **Arduino Mega 2560** (`arduino:avr:mega`,
-`-DGANTRY_CNC_SHIELD`, the `Servo` library installed: 29 KB flash, 2.9 KB RAM); an Uno's 2 KB
-of RAM no longer fits it.
+`-DGANTRY_CNC_SHIELD`, the `Servo` library installed: 31 KB flash, 3.0 KB RAM); an Uno's 2 KB
+of RAM no longer fits it. On the ESP32 the serial port gets a 512-byte transmit buffer, so a
+reply is queued and the step loop never waits for the UART.
 
 Open the serial monitor at **115200** with "Newline" line endings: half a second after reset it
-says `[duen-gantry 0.2 ready: $X to unlock, $H to home, $T to self-test, CARRY e2 e4 to move a
+says `[duen-gantry 0.4 ready: $X to unlock, $H to home, $T to self-test, CARRY e2 e4 to move a
 piece]`. `SELFTEST_AT_BOOT` (off by default) makes the sketch home itself five seconds after
 power-up and then run `$T`, with nothing attached to the USB port; use it for a bench test, not
 on a board with pieces on it.
@@ -206,7 +216,8 @@ no pieces on the board:
 1. **DRV8825 microstep pins.** Unconnected M0/M1/M2 mean full steps, and every move would
    be 8× too long. Tie **M0 and M1 to 3.3 V** (M2 low) for 1/8, or wire them to GPIOs and
    put those in `PIN_M0`…`PIN_M2` so the sketch sets them, or set `MICROSTEPS 1` to match
-   full steps. Then `$X` and `G0 X10` must move the carriage **10 mm**: measure it.
+   full steps (or, until the next reset, `$100=5`). Then `$X` and `G0 X10` must move the
+   carriage **10 mm**: measure it.
 2. **Current limit.** `Vref = I / 2` on the DRV8825's trimpot (0.45 V ≈ 0.9 A). Set it with the
    motor unplugged (see the electrical checklist).
 3. **Direction.** `$X`, then `G0 X10`: the carriage must move toward the far end of X, away
@@ -236,12 +247,41 @@ no pieces on the board:
 Then from the laptop or the Pi: `python3 gantry_driver.py --port … --calibrate` to find a1
 and the square size, and `--move e2e4` with a piece on e2 for the first real carry.
 
+### Stalls and buzzing
+
+A motor that stops and hums, buzzes without turning, or loses its place is short of torque for
+what it is asked. The motion settings change over serial (RAM only, see The protocol), so each
+check below needs no reflash.
+
+- **Slow it down first.** `$120=200`, `$110=30`, `$111=20`, and try the same move. If it runs,
+  raise them a step at a time until it stalls and settle well below that, then put the values
+  in `DEFAULT_SPEED_MM_S`, `CARRY_SPEED_MM_S` and `DEFAULT_ACCEL_MM_S2` in `config.h` (a reset
+  forgets `$1xx`). If it stalls even at 30 mm/s, the cause is one of the next four.
+- **Microstep pins.** For 1/8, M0 and M1 high (to 3.3 V) and M2 low on each DRV8825. Floating,
+  they read low: full steps, so every move goes 8× too far and 8× too fast (a 60 mm/s travel
+  turns the motor as if for 480 mm/s, far past where it has torque). Check it: `$X` just after
+  power-up, mark the carriage, `G0 X40` (one pulley turn), and measure with a ruler. 40 mm is
+  right; 320 mm, or a scream and a stall, is full steps: fix the pins, or `$100=5` until you
+  can. For any other distance d, `$100` = 40 × 40 / d. `$100` forgets the position (alarm
+  `not homed`), so `$HM` or `$H` after it.
+- **Motor supply at least 12 V under load.** Measure across the driver's VMOT and GND while a
+  move runs, not at rest. The DRV8825 shuts off below 8.2 V (the motor stops and buzzes as it
+  restarts), and the torque at speed falls with the voltage long before that. Battery packs sag
+  under the step current and as they empty; a 12 V 2 A bench supply rules this out.
+- **Vref on each driver.** Current limit = 2 × Vref, set per motor (0.45 V ≈ 0.9 A for these
+  motors, see the electrical checklist). Too low and the motor is weak; too high and the driver
+  overheats, cuts out for a moment and the motor stutters.
+- **Binding.** `M18` (drivers off), then push the carriage slowly by hand over the whole travel
+  on both axes. It must roll with the same light resistance everywhere. A tight spot (an
+  eccentric nut over-tightened on a V-wheel, a belt too tight, rails out of parallel) is where
+  the motor will stall.
+
 ## The protocol
 
 Two levels, one line per command, every command answered `ok` or `error:<code> <text>`
 (`protocol.h` has the full list and the reasons).
 
-**Board level**, firmware 0.2: the board knows the squares.
+**Board level**, firmware 0.4: the board knows the squares.
 
 | Command | Does |
 | --- | --- |
@@ -264,11 +304,72 @@ so the Pi polls `?` until `Idle` before the next.
 mid-program). `$H` home (magnet off, arm down first), `$X` unlock (magnet off, arm down),
 `G0 X.. Y..` rapid, `G1 X.. Y.. F..` at F mm/min, `G4 P..` dwell, `G92` set position,
 `M3`/`M5` magnet, `M7`/`M8` arm, `M17`/`M18` motors, `!` stop now (drops the program, the magnet
-and the arm), `$$` settings (`$B`, `$G` guards and `$S` servo included), `$I` version.
+and the arm), `$$` settings (the values in use now, `$B`, `$G` guards and `$S` servo included),
+`$I` version.
+
+**Motion settings**, firmware 0.4, for finding and curing a stall without reflashing:
+
+| Command | Sets | At power-up | Range |
+| --- | --- | ---: | ---: |
+| `$110=<mm/s>` | travel speed: `G0`, `GOTO`, a `CARRY`'s travel to the piece, the top of `G1` | 60 | 1–120 |
+| `$111=<mm/s>` | carry speed: a `CARRY`'s moves with the piece, and the fastest `G1` allowed with the arm up | 40 | 1–120 |
+| `$120=<mm/s²>` | acceleration of every move | 400 | 1–800 |
+| `$100=<steps/mm>` | steps per mm, for a driver whose microstep pins are not at 1/8 (5 at full steps). Forgets the position: alarm `not homed` until `$H` or `$HM` | 40 | 1–400 |
+
+Each answers `ok`; `error:3 busy` while anything moves or a program (a `GOTO`, `CARRY`, `$T` or
+`G4`) runs; `error:2 bad number`; or `error:13 $110 must be 1..120`, naming the range of the
+setting sent. They are kept in **RAM only**: a reset or power cycle brings back the `config.h`
+values (`DEFAULT_SPEED_MM_S`, `CARRY_SPEED_MM_S`, `DEFAULT_ACCEL_MM_S2`, `STEPS_PER_MM`), so
+put the numbers that work there. The upper ends are the compiled ceilings `MAX_SPEED_MM_S` and
+`MAX_ACCEL_MM_S2`; nothing goes past them. Homing keeps its own 25 mm/s (less if `$110` is
+lower), and `MAX_STEP_HZ` caps every feed on top (at `$100=400` that is 50 mm/s). A `CARRY`'s
+magnet check (`error:10`) plans with the `$111` and `$120` in use: at 40 mm/s every straight
+carry fits in the 15 s (a1–h8 keeps the magnet on about 13 s), but the longest routes through
+the lanes (a1 to h7 and the like, and the far docking slots) do not; at `$111=50` every
+square-to-square carry fits. The numbers follow GRBL's, the units and meanings do not: GRBL's
+`$110`/`$111` are X and Y rates in mm/min and are saved; here they are travel and carry speed in
+mm/s and are not.
 
 Error codes: 1 unknown command, 2 bad number, 3 busy, 4 outside the travel limits, 5 locked
 (`$X`/`$H`), 6 not a square, slot or x,y, 7 sequence too long, 8 not homed, 9 magnet cooling,
-10 magnet would be on too long, 11 servo arm up (`M8` first), 12 servo arm down (`M7` first).
+10 magnet would be on too long, 11 servo arm up (`M8` first), 12 servo arm down (`M7` first),
+13 setting out of range (`error:13 $110 must be 1..120`).
+
+## The bench console
+
+A page on the Mac that drives the gantry over USB, for the bench: make a chess move on the page
+and the gantry plays it on the real board.
+
+```sh
+bash gantry/console/console.sh        # opens http://127.0.0.1:8788; pick the ESP32's port, Connect
+bash gantry/console/console.sh sim    # the pretend board
+```
+
+- **Captures go to the right.** Unlike the touch screen and the website (where a person takes
+  captured pieces off), the console runs the planner in dock mode (`Layout(captures="dock")`):
+  the taken piece is carried into the docking lane beside the h file, into the free slot with
+  the shortest clear way (usually the one level with its rank). The left lane is not used: it
+  is too tight on this frame. A full lane falls back to asking the person. A promotion brings a
+  docked queen (or rook, bishop, knight) back out when there is one.
+- **Homing.** Always the bottom-left corner: Motors off, push the carriage into the corner,
+  Set home here (`$HM`), or Bump home (`$H`).
+- **Moves are plain motion commands** (G1, M7, M3, M5, M8), not `CARRY`, so the page's travel
+  and carry speeds work on firmware 0.3 too; 0.4 also takes the page's acceleration (`$120`). A
+  carry that would keep the magnet on longer than the page's budget (12 s; the board cuts at
+  15 s) sets the piece down on its clear path and picks it up again.
+- **Scale.** Real millimetres per millimetre the board counts. The distance check measures it:
+  about 8 means the DRV8825 microstep pins are floating (full steps). The page divides every
+  position and speed by it, so the board can be used before the pins are fixed.
+- **Stall checks:** the distance check, a speed ladder (out and back at rising speeds; press It
+  stalled and the page suggests 70 % of the last clean speed for travel and 60 % for carries),
+  a motors-off push test for binding, and a count of the board restarting by itself (supply
+  dips).
+- **Stop** (or Esc) writes `!` at once: motion stops, magnet off, arm down. A move stopped
+  part-way can be retried after Unlock, or marked as put back or finished by hand. Undo carries
+  the last move back; Reset board carries every piece home, docked ones included.
+
+Settings are saved in `console/console_settings.json` on this computer only. Tests:
+`python3 gantry/console/test_console.py` (against the pretend board).
 
 ## The Pi side
 
@@ -308,7 +409,7 @@ timeout that grows with the carry's predicted length.
 
 ### Captured pieces
 
-**The gantry does not take captured pieces off the board; a person does.** When the computer's
+**The gantry does not take captured pieces off the board; a person does.** (The bench console is the exception: it docks them in the right lane.) When the computer's
 move captures, the job starts with
 
 ```
@@ -479,8 +580,9 @@ still works.
 ## Testing without hardware
 
 ```sh
-make -C gantry/firmware/host test                                   # motion, protocol, servo and guard checks: 186 of them
-cd gantry/pi && python3 -m unittest discover -s . -p 'test_*.py'    # paths 12, carry plan 14, driver 28
+make -C gantry/firmware/host test                                   # motion, protocol, servo, guard and settings checks: 281 of them
+cd gantry/pi && python3 -m unittest discover -s . -p 'test_*.py'    # paths 12, carry plan 24, driver 28
+cd gantry/console && python3 -m unittest test_console                  # the bench console, 7
 cd ~/chess-board-pi-only && CHESS_GANTRY_PORT=sim CHESS_GANTRY_DIR=~/chess-gantry/gantry/pi .venv/bin/python -m unittest test.test_pi_gantry
 ```
 
@@ -488,8 +590,11 @@ The firmware checks run `motion.h` and `protocol.h` on this computer with a fake
 counts and the trapezoid, limits, hold, bump and switch homing, CoreXY, the board commands
 (`GOTO`, `CARRY` with and without via-points, `$B`, `$T`, `!`), the servo order for a carry
 (arm up → magnet on → move → magnet off → arm down) and the refusals with the arm up, the
-magnet limits, the move budget, idle disable with the enable settle, the step-rate cap, and a
-host that goes quiet during a carry.
+magnet limits, the move budget, idle disable with the enable settle, the step-rate cap, a
+host that goes quiet during a carry, and the motion settings: the power-up values, `$110`,
+`$111`, `$120` and `$100` accepted, out of range and busy, a move timed against the trapezoid
+the new numbers predict, the carry legs at `$111`, the magnet check at the current carry speed,
+and `$100=5` clearing the home so a 10 mm move is 50 steps.
 
 The Pi suite builds `firmware/host/virtual_gantry`, a pretend board that runs the same code with
 a simulated clock (`--speed` times faster than real time) and prints what it does as trace lines

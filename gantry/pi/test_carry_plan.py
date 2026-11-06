@@ -175,5 +175,90 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(cp.describe(jobs[0]), ["Move the white pawn from e2 to e4."])
 
 
+def play_docked(uci_moves, start=None, slots=None):
+    board = chess.Board(start) if start else chess.Board()
+    layout = cp.Layout(board, captures="dock", **({"dock_slots": slots} if slots else {}))
+    jobs = []
+    for uci in uci_moves:
+        move = chess.Move.from_uci(uci)
+        jobs.append(cp.job_for_move(layout, board, move))
+        board.push(move)
+    return board, layout, jobs
+
+
+class DockTests(unittest.TestCase):
+    """The bench console's mode: the gantry carries captured pieces into the right-hand lane itself."""
+
+    def test_a_capture_docks_the_taken_piece_on_the_right_then_carries_the_taker(self):
+        board, layout, jobs = play_docked(["e2e4", "d7d5", "e4d5"])
+        self.assertEqual(ops(jobs[2]), ["carry", "carry"])
+        self.assertEqual(moves(jobs[2]), [("p", "d5", "b:0"), ("P", "e4", "d5")])
+        self.assertEqual(jobs[2]["steps"][0]["reason"], "capture")
+        self.assertEqual(jobs[2]["steps"][0]["path"], [[3.0, 4.0], [8.0, 0.0]])
+        self.assertEqual(layout.pieces["b:0"], "p")
+        self.assertNotIn("b:0", jobs[2]["expect"])          # the camera sees only the board
+        self.assertEqual(len(jobs[2]["expect"]), 31)
+
+    def test_both_colours_share_the_right_lane_in_order(self):
+        board, layout, jobs = play_docked(["e2e4", "d7d5", "e4d5", "d8d5"])
+        self.assertEqual(moves(jobs[3])[0], ("P", "d5", "b:1"))
+        self.assertEqual(layout.free_slots()[0], "b:2")
+        self.assertFalse(any(name.startswith("w:") for name in layout.pieces))
+
+    def test_the_caller_may_name_the_slot(self):
+        board, layout = chess.Board(), cp.Layout(captures="dock")
+        for uci in ["e2e4", "d7d5"]:
+            layout.plan_computer(board, chess.Move.from_uci(uci))
+            board.push(chess.Move.from_uci(uci))
+        steps = layout.plan_computer(board, chess.Move.from_uci("e4d5"), dock_slot="b:5")
+        self.assertEqual(steps[0]["to"], "b:5")
+        with self.assertRaises(ValueError):
+            layout.dock("d5", "b:5")                     # taken now
+
+    def test_en_passant_docks_the_passed_pawn(self):
+        board, layout, jobs = play_docked(["e2e4", "a7a6", "e4e5", "d7d5", "e5d6"])
+        self.assertEqual(moves(jobs[4]), [("p", "d5", "b:0"), ("P", "e5", "d6")])
+
+    def test_a_full_lane_falls_back_to_a_person_removing_the_piece(self):
+        board, layout, jobs = play_docked(["e2e4", "d7d5", "e4d5", "d8d5"], slots=1)
+        self.assertEqual(ops(jobs[3]), ["remove", "carry"])
+        self.assertEqual(jobs[3]["steps"][0]["square"], "d5")
+
+    def test_promotion_brings_a_docked_queen_out_and_parks_the_pawn_in_its_slot(self):
+        start = "4k3/P7/8/8/8/8/8/4K3 w - - 0 1"
+        board = chess.Board(start)
+        layout = cp.Layout(board, captures="dock")
+        layout.pieces["b:3"] = "Q"                     # a white queen taken earlier waits in the lane
+        steps = layout.plan_computer(board, chess.Move.from_uci("a7a8q"))
+        self.assertEqual([(s["piece"], s["from"], s["to"]) for s in steps], [("Q", "b:3", "a8"), ("P", "a7", "b:3")])
+        self.assertEqual(layout.pieces["a8"], "Q")
+        self.assertEqual(layout.pieces["b:3"], "P")
+        self.assertFalse(any(s["op"] == "note" for s in steps))
+
+    def test_promotion_without_a_spare_is_the_carry_and_the_note(self):
+        board = chess.Board("4k3/P7/8/8/8/8/8/4K3 w - - 0 1")
+        layout = cp.Layout(board, captures="dock")
+        steps = layout.plan_computer(board, chess.Move.from_uci("a7a8q"))
+        self.assertEqual([s["op"] for s in steps], ["carry", "note"])
+
+    def test_a_reset_brings_docked_pieces_home(self):
+        board, layout, jobs = play_docked(["e2e4", "d7d5", "e4d5", "d8d5"])
+        job = cp.job_for_reset(layout)
+        self.assertEqual(ops(job), ["carry"] * len(job["steps"]))
+        sources = {s["from"] for s in job["steps"]}
+        self.assertTrue({"b:0", "b:1"} <= sources)
+        self.assertEqual(sorted(layout.pieces), sorted(cp.Layout().pieces))
+        self.assertEqual(layout.pieces, cp.Layout().pieces)
+
+    def test_describe_names_the_slot(self):
+        board, layout, jobs = play_docked(["e2e4", "d7d5", "e4d5"])
+        self.assertEqual(cp.describe(jobs[2])[0], "Take the black pawn off d5 to docking slot b:0.")
+
+    def test_remove_mode_is_still_the_default(self):
+        self.assertEqual(cp.Layout().captures, "remove")
+        with self.assertRaises(ValueError):
+            cp.Layout(captures="left")
+
+
 if __name__ == "__main__":
     unittest.main()
