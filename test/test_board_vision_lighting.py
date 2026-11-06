@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 from board_vision import (Calibration, calibrate, legacy_square_scores, observe,
-                          observe_temporal, square_scores)
+                          observe_temporal, square_scores, robust_square_scores, VisionError, warp_board)
 from move_observation import occupied_squares
 from pi_touch import (CalibrationFlow, PhotoAdjustments, TouchSession, calibrate_setup_photo,
                       calibrate_photos, suggest_setup_rotation, MoveRejected)
@@ -43,6 +43,71 @@ def under_light(photo: np.ndarray, *, offset: float, slope: float,
 
 
 class LightingCorrectionTest(unittest.TestCase):
+    def test_corrects_small_camera_shift_but_rejects_large_shift(self):
+        calibration, reference, _ = calibrate(board_photo(), board_photo(chess.Board()), CORNERS)
+        board = chess.Board()
+        board.push_uci("e2e4")
+        for dx, dy in ((3, -2), (7, 5)):
+            shifted = cv2.warpAffine(board_photo(board), np.float32([[1, 0, dx], [0, 1, dy]]),
+                                     (800, 800), borderMode=cv2.BORDER_REPLICATE)
+            observed, _ = observe(reference, shifted, calibration, CORNERS)
+            self.assertEqual(observed.occupied, occupied_squares(board))
+            self.assertFalse(observed.uncertain)
+        moved_camera = cv2.warpAffine(board_photo(board), np.float32([[1, 0, 25], [0, 1, 0]]),
+                                      (800, 800), borderMode=cv2.BORDER_REPLICATE)
+        with self.assertRaises(VisionError):
+            observe(reference, moved_camera, calibration, CORNERS)
+
+    def test_smooth_shadow_does_not_create_pieces(self):
+        calibration, reference, _ = calibrate(board_photo(), board_photo(chess.Board()), CORNERS)
+        board = chess.Board()
+        board.push_uci("e2e4")
+        yy, xx = np.mgrid[:800, :800]
+        shadow = 1 - .35 * np.exp(-((xx - 350) ** 2 / 330 ** 2 + (yy - 400) ** 2 / 600 ** 2))
+        photo = np.clip(board_photo(board).astype(float) * shadow[:, :, None] + 12, 0, 255).astype(np.uint8)
+        observed, _ = observe(reference, photo, calibration, CORNERS)
+        self.assertEqual(observed.occupied, occupied_squares(board))
+        self.assertFalse(observed.uncertain)
+
+    def test_small_low_contrast_piece_is_detected(self):
+        empty = board_photo()
+        def small_pieces(board):
+            photo = empty.copy()
+            for square, piece in board.piece_map().items():
+                x = chess.square_file(square) * 100 + 50
+                y = (7 - chess.square_rank(square)) * 100 + 50
+                color = tuple(int(np.clip(int(value) + (22 if piece.color else -24), 0, 255))
+                              for value in photo[y, x])
+                cv2.circle(photo, (x, y), 14, color, -1)
+            return photo
+        board = chess.Board()
+        calibration, reference, _ = calibrate(empty, small_pieces(board), CORNERS)
+        board.push_uci("e2e4")
+        observed, _ = observe(reference, small_pieces(board), calibration, CORNERS)
+        self.assertEqual(observed.occupied, occupied_squares(board))
+
+    def test_invalid_corner_order_is_rejected(self):
+        for corners in ([[0, 0], [799, 799], [799, 0], [0, 799]],
+                        [[0, 0], [0, 799], [799, 799], [799, 0]],
+                        [[0, 0], [799, 0], [float("nan"), 799], [0, 799]]):
+            with self.assertRaises(VisionError):
+                warp_board(board_photo(), corners)
+
+    def test_castling_and_en_passant_remain_verifiable(self):
+        calibration, reference, _ = calibrate(board_photo(), board_photo(chess.Board()), CORNERS)
+        for fen, uci in (("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+                         ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6")):
+            session = TouchSession("beginner")
+            session.game.board = chess.Board(fen)
+            session.phase = "human"
+            before = board_photo(session.game.board)
+            moved = session.game.board.copy()
+            moved.push_uci(uci)
+            photo = board_photo(moved)
+            observed, _ = observe(reference, photo, calibration, CORNERS)
+            session.scan_human(observed, change_scores=robust_square_scores(before, photo))
+            self.assertEqual(session.game.board.fen(), moved.fen())
+
     def test_optional_empty_board_calibration_supports_rotated_camera(self):
         empty = cv2.rotate(board_photo(), cv2.ROTATE_180)
         starting = cv2.rotate(board_photo(chess.Board()), cv2.ROTATE_180)
@@ -137,7 +202,7 @@ class LightingCorrectionTest(unittest.TestCase):
         starting_board = chess.Board()
         lit_starting = under_light(board_photo(starting_board), offset=30, slope=14, gain=1.08)
         calibration, reference, _ = calibrate(empty, lit_starting, CORNERS)
-        self.assertEqual(calibration.scoring, "local_lighting_v1")
+        self.assertEqual(calibration.scoring, "robust_occupancy_v2")
 
         starting_observation, _ = observe(reference, lit_starting, calibration, CORNERS)
         self.assertFalse(starting_observation.uncertain)

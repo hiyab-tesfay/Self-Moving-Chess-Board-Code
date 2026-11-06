@@ -18,7 +18,7 @@ from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp,
                       adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
                       reusable_corners, should_retry_scan, temporal_computer_move_feedback,
                       photo_square_center, corners_from_rotated_preview,
-                      corners_to_rotated_preview, temporal_move_feedback)
+                      corners_to_rotated_preview, temporal_move_feedback, consensus_observation)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -32,6 +32,44 @@ def unclear(occupied: frozenset[str], *squares: str) -> Observation:
 
 
 class TouchSessionTest(unittest.TestCase):
+    def test_capture_needs_visible_replacement_at_destination(self):
+        session = TouchSession("beginner")
+        session.game.board = chess.Board("4k3/8/8/3p4/3Q4/8/8/4K3 w - - 0 1")
+        session.phase = "human"
+        occupancy = occupied_squares(session.game.board) - {"d4"}
+        changes = {square: 0.0 for square in chess.SQUARE_NAMES}
+        changes["d4"] = 60
+        with self.assertRaisesRegex(MoveRejected, "Capture not verified"):
+            session.scan_human(occupancy, change_scores=changes)
+        self.assertEqual(session.phase, "human")
+        changes["d5"] = 60
+        self.assertEqual(session.scan_human(occupancy, change_scores=changes), "Qxd5")
+
+    def test_scan_consensus_rejects_disagreement_and_tolerates_one_bad_frame(self):
+        board = chess.Board()
+        moved = after(board, "e2e4")
+        correct = Observation(moved, (), {})
+        unchanged = Observation(occupied_squares(board), (), {})
+        disagreement = consensus_observation([correct, unchanged])
+        self.assertEqual(set(disagreement.uncertain), {"e2", "e4"})
+        session = TouchSession("beginner")
+        session.phase = "human"
+        with self.assertRaises(MoveRejected):
+            session.scan_human(disagreement)
+        stable = consensus_observation([correct, unchanged, correct])
+        self.assertEqual(session.scan_human(stable), "e4")
+
+    def test_extra_move_hidden_in_uncertainty_does_not_pass(self):
+        session = TouchSession("beginner")
+        session.phase = "human"
+        observation = Observation(after(session.game.board, "e2e4") - {"d2"}, ("d2", "d4"), {})
+        changes = {square: 0.0 for square in chess.SQUARE_NAMES}
+        for square in ("e2", "e4", "d2", "d4"):
+            changes[square] = 60.0
+        with self.assertRaises(MoveRejected):
+            session.scan_human(observation, change_scores=changes)
+        self.assertEqual(session.phase, "human")
+
     def test_multiple_piece_feedback_names_all_changed_sources(self):
         board = chess.Board()
         observed = Observation((occupied_squares(board) - {"d2", "e2"}) | {"d4", "e4"}, (), {})
@@ -295,7 +333,7 @@ class CalibrationFlowTest(unittest.TestCase):
             save_calibration(Path(directory), calibration, reference)
             loaded, loaded_reference = load_calibration(Path(directory))
             self.assertEqual(loaded.corners, flow.starting_corners)
-            self.assertEqual(loaded.scoring, "local_lighting_v1")
+            self.assertEqual(loaded.scoring, "robust_occupancy_v2")
             self.assertEqual(loaded_reference.shape, (800, 800, 3))
 
     def test_marker_flow_skips_manual_corners(self):
@@ -327,6 +365,39 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_welcome_opens_difficulty_before_calibration(self):
+        app = TouchApp.__new__(TouchApp)
+        app.welcome_screen = True
+        app.calibration_flow = None
+        app.say = Mock()
+        app.render = Mock()
+        app.begin_play()
+        self.assertFalse(app.welcome_screen)
+        self.assertIsNone(app.calibration_flow)
+
+    def test_single_legal_photo_does_not_commit_a_move(self):
+        app = TouchApp.__new__(TouchApp)
+        app.session = TouchSession("beginner")
+        app.session.phase = "human"
+        app.scan_samples = []
+        app.scan_aligned_samples = []
+        app.scan_confirmations_active = True
+        app.scan_attempts = 1
+        app.scan_corner_source = "saved"
+        app.scan_corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+        app.say = Mock()
+        app.after_human_move = Mock()
+        app._capture_scan_attempt = Mock()
+        observed = Observation(after(app.session.game.board, "e2e4"), (), {})
+        photo = np.zeros((800, 800, 3), dtype=np.uint8)
+        app.handle_result("scan", (observed, photo))
+        self.assertEqual(app.session.phase, "human")
+        app._capture_scan_attempt.assert_called_once()
+        app.scan_attempts = 2
+        app.handle_result("scan", (observed, photo))
+        self.assertEqual(app.session.phase, "thinking")
+        self.assertIs(app.position_reference, photo)
+
     def test_normal_calibration_starts_with_empty_board(self):
         app = TouchApp.__new__(TouchApp)
         app.session = None
@@ -351,18 +422,19 @@ class TouchWorkflowTest(unittest.TestCase):
             save_calibration(path, Calibration(corners, (0, 0), (0, 0),
                                                scoring="temporal_v1"), reference)
             self.assertFalse(app.saved_calibration_available())
-            save_calibration(path, Calibration(corners, (20, 20), (1, 1)), reference)
+            save_calibration(path, Calibration(corners, (20, 20), (1, 1),
+                                               scoring="robust_occupancy_v2"), reference)
             self.assertTrue(app.saved_calibration_available())
 
-    def test_no_clear_move_feedback_names_strongest_squares(self):
+    def test_no_clear_move_feedback_gives_an_action(self):
         scores = {square: 0.0 for square in chess.SQUARE_NAMES}
         scores["e2"] = 11.0
         scores["e4"] = 9.0
         feedback = temporal_move_feedback(
             chess.Board(), TemporalObservation((), scores), "No clear move detected.")
         self.assertEqual(feedback.title, "NO CLEAR MOVE")
-        self.assertIn("e2 (11)", feedback.detail)
-        self.assertIn("e4 (9)", feedback.detail)
+        self.assertIn("Center the piece", feedback.detail)
+        self.assertIn("hands away", feedback.detail)
 
     def test_check_photo_uses_saved_orientation(self):
         photo = np.zeros((800, 800, 3), dtype=np.uint8)
