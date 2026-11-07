@@ -205,6 +205,34 @@ def _checked_observation(value: Observation | frozenset[str]) -> Observation:
     return observation
 
 
+@dataclass(frozen=True)
+class CheckNotice:
+    king: str
+    attackers: tuple[str, ...]
+    title: str
+    detail: str
+
+
+def check_notice(board: chess.Board) -> CheckNotice | None:
+    """Describe the actual checking pieces, including discovered and double check."""
+    if not board.is_check() or board.is_checkmate():
+        return None
+    king = board.king(board.turn)
+    if king is None:
+        return None
+    color = "White" if board.turn else "Black"
+    opponent = "Black" if board.turn else "White"
+    attackers = tuple(chess.square_name(square) for square in board.checkers())
+    pieces = [f"{opponent} {chess.piece_name(board.piece_at(chess.parse_square(square)).piece_type)} on {square}"
+              for square in attackers]
+    king_name = chess.square_name(king)
+    title = "Your king is in check" if board.turn else "Black is in check"
+    if len(attackers) > 1:
+        title = "Double check" if board.turn else "Black is in double check"
+    return CheckNotice(king_name, attackers, title,
+                       f"{color} king on {king_name} is attacked by " + " and ".join(pieces) + ".")
+
+
 def consensus_observation(samples: list[Observation]) -> Observation:
     """Require two clear votes per square; a lone photo cannot verify a move."""
     if len(samples) < 2:
@@ -331,6 +359,9 @@ def rejected_move_feedback(board: chess.Board, observation: Observation,
                           f"It is {turn}'s turn." if piece.color != board.turn else
                           f"Camera sees {color} {name}: {source} → {destination}. "
                           "That move is not legal in this position.")
+                notice = check_notice(board)
+                if notice is not None and piece.color == board.turn:
+                    detail += f" Your king on {notice.king} must be protected. Restore the piece and choose a move that ends the check."
                 return ScanFeedback("ILLEGAL MOVE", detail, (source,), (destination,))
     return ScanFeedback("MOVE NOT VERIFIED", reason + " Check the board or adjust the photo corners.")
 
@@ -744,6 +775,16 @@ class TouchSession:
             self.result = "You ended the game. Stockfish wins."
             self.phase = "finished"
 
+    def winner_text(self) -> str:
+        outcome = self.game.board.outcome(claim_draw=True)
+        if outcome is None:
+            return "Stockfish wins · Black"
+        if outcome.winner is chess.WHITE:
+            return "You win! · White"
+        if outcome.winner is chess.BLACK:
+            return "Stockfish wins · Black"
+        return "Draw"
+
 
 class TouchApp:
     BG = "#0c1c1b"
@@ -776,6 +817,7 @@ class TouchApp:
         self.pending_game_start = False
         self.adjustments_open = False
         self.confirming_end = False
+        self.confirming_new_game = False
         self.calibration_error: str | None = None
         self.scan_photo: np.ndarray | None = None
         self.scan_corners: list[list[float]] = []
@@ -914,7 +956,14 @@ class TouchApp:
             self.button("Keep Playing", self.cancel_end_game, accent=True)
             self.button("End Game", self.end_game, short=True)
             return
+        if getattr(self, "confirming_new_game", False) and self.session is not None:
+            self.heading("Start a new game?", "This will end the current game and return to difficulty selection.")
+            self.button("Keep Playing", self.cancel_new_game, accent=True)
+            self.button("Start New Game", self.back_to_menu, short=True)
+            return
         if self.busy:
+            if self.session is not None and self.session.phase == "thinking":
+                self.render_check_notice()
             self.heading("Checking the board" if self.scan_photo is not None else "One moment…",
                          "Keep the board still and your hands away while the photos are checked." if
                          getattr(self, "scan_confirmations_active", False) else self.message)
@@ -956,9 +1005,18 @@ class TouchApp:
             self.button("Retake Photo", self.retry_setup_scan)
             self.button("Cancel Game", self.end_game)
         elif session.phase == "human":
-            self.heading("Your turn", "Move one White piece. Lift your hands away, then tap Scan Move. The app checks two photos automatically.")
+            in_check = self.render_check_notice()
+            if in_check:
+                if len(session.game.board.checkers()) > 1:
+                    self.heading("Move your king", "Move your king to a safe square to escape both attacks. Then tap Scan Move.")
+                else:
+                    self.heading("Protect your king", "Move the king, capture the attacker, or block the attack if legal. Then tap Scan Move.")
+            else:
+                self.heading("Your turn", "Move one White piece. Lift your hands away, then tap Scan Move. The app checks two photos automatically.")
             self.button("Scan Move", self.scan, accent=True)
             self.button("End Game", self.request_end_game, short=True)
+            if in_check:
+                self.button("New Game", self.request_new_game, short=True)
         elif session.phase == "choose":
             promotion = all(move.promotion for move in session.choices)
             self.heading("Choose promotion" if promotion else "Choose your move",
@@ -980,6 +1038,7 @@ class TouchApp:
             self.button("Retake Photo", self.retake)
             self.button("End Game", self.request_end_game, short=True)
         elif session.phase == "thinking":
+            self.render_check_notice()
             self.heading("Stockfish is thinking", "Leave the physical board as it is. Your next instruction will appear here.")
             self.button("Try Computer Move", self.request_computer_move, accent=True)
             self.button("End Game", self.request_end_game, short=True)
@@ -994,14 +1053,28 @@ class TouchApp:
                 extra.append("Move the rook too.")
             if move.promotion:
                 extra.append(f"Replace the pawn with a {chess.piece_name(move.promotion)}.")
+            self.render_check_notice()
             self.heading("Computer's move", "Move the Black piece as shown, then remove your hands. " + " ".join(extra))
             tk.Label(self.panel, text=f"{move.uci()[:2]}  →  {move.uci()[2:4]}", bg=self.PANEL,
                      fg=self.GOLD, font=("DejaVu Sans", 23 if self.compact else 30, "bold")).pack(fill="x", pady=(0, 12))
             self.button("Verify Computer Move", self.scan, accent=True)
             self.button("End Game", self.request_end_game, short=True)
         else:
-            self.heading("Game over", session.result or "Game finished.")
+            self.heading("Checkmate" if session.game.board.is_checkmate() else "Game over",
+                         session.winner_text())
             self.button("New Game", self.back_to_menu, accent=True)
+
+    def render_check_notice(self) -> bool:
+        notice = check_notice(self.session.game.board) if self.session is not None else None
+        if notice is None:
+            return False
+        tk.Label(self.panel, text=notice.title.upper(), bg="#8a2f32", fg=self.TEXT,
+                 font=("DejaVu Sans", 12 if self.compact else 16, "bold"),
+                 wraplength=self.panel_width - 48, pady=8).pack(fill="x", pady=(0, 8))
+        tk.Label(self.panel, text=notice.detail, bg=self.PANEL, fg=self.TEXT,
+                 font=("DejaVu Sans", 10 if self.compact else 12), justify="left",
+                 wraplength=self.panel_width - 48).pack(fill="x", pady=(0, 10))
+        return True
 
     def begin_play(self) -> None:
         self.welcome_screen = False
@@ -1030,6 +1103,14 @@ class TouchApp:
 
     def cancel_end_game(self) -> None:
         self.confirming_end = False
+        self.render()
+
+    def request_new_game(self) -> None:
+        self.confirming_new_game = True
+        self.render()
+
+    def cancel_new_game(self) -> None:
+        self.confirming_new_game = False
         self.render()
 
     def choose_level(self, level: str) -> None:
@@ -1467,7 +1548,7 @@ class TouchApp:
         self.submit("start", load)
 
     def scan(self) -> None:
-        if self.session is None or self.busy:
+        if self.session is None or self.busy or self.session.phase not in ("setup", "human", "computer"):
             return
         self.capture_error = None
         self.scan_attempts = 0
@@ -1829,6 +1910,11 @@ class TouchApp:
                          (self.session.result or "Your turn.") +
                          (" Unclear squares outside the move: " + ", ".join(observation.uncertain) + "."
                           if not temporal and observation.uncertain else ""), self.GREEN)
+                notice = check_notice(self.session.game.board)
+                if self.session.phase == "finished":
+                    self.say("Good game. " + self.session.winner_text() + ".", self.GREEN)
+                elif notice is not None:
+                    self.say(notice.detail + " Make a legal move to protect your king.", self.RED)
             self.last_scan_corners = used_corners
         elif tag == "engine":
             assert self.session is not None
@@ -1846,7 +1932,7 @@ class TouchApp:
         assert self.session is not None
         self.selected_square = None
         if self.session.phase == "finished":
-            self.say(self.session.result or "Game over.", self.GREEN)
+            self.say("Good game. " + self.session.winner_text() + ".", self.GREEN)
             return
         assert self.player is not None
         self.request_computer_move()
@@ -1931,6 +2017,7 @@ class TouchApp:
         self.welcome_screen = False
         self.pending_game_start = False
         self.confirming_end = False
+        self.confirming_new_game = False
         self.pending_reference = None
         self.clear_scan_photo()
         if self.player is not None:
@@ -2161,6 +2248,9 @@ class TouchApp:
         if getattr(self, "welcome_screen", False) and self.calibration_flow is None:
             self.draw_welcome()
             return
+        if self.session is not None and self.session.phase == "finished":
+            self.draw_game_over()
+            return
         if (self.scan_photo is not None or
                 (self.calibration_flow is not None and
                  self.calibration_flow.stage in ("empty_corners", "starting", "starting_corners", "ready") and
@@ -2178,6 +2268,7 @@ class TouchApp:
             highlights = self.session.game.legal_destinations(self.selected_square)
         last_move = self.session.game.last_move if self.session else None
         pending = self.session.computer_move if self.session else None
+        notice = check_notice(board)
         for row in range(8):
             for col in range(8):
                 square = chess.square(col, 7 - row)
@@ -2193,6 +2284,8 @@ class TouchApp:
                     fill = "#ff8c85"
                 if name == self.selected_square:
                     fill = "#ffe08a"
+                if notice is not None and name == notice.king:
+                    fill = "#d57570"
                 canvas.create_rectangle(left, top, left + step, top + step,
                                         fill=fill, outline=fill)
                 if name in highlights:
@@ -2211,12 +2304,30 @@ class TouchApp:
                     canvas.create_text(cx, cy, text=glyph,
                                        fill="#fff9e9" if piece.color else "#142c28",
                                        font=("DejaVu Sans", max(20, int(step * .75))))
+                if notice is not None and name in notice.attackers:
+                    canvas.create_rectangle(left + 3, top + 3, left + step - 3, top + step - 3,
+                                            outline="#8a2f32", width=3)
         for row in range(8):
             canvas.create_text(x - 12, y + (row + .5) * step, text=str(8 - row),
                                fill=self.MUTED, font=("DejaVu Sans", 9))
         for col, file in enumerate("abcdefgh"):
             canvas.create_text(x + (col + .5) * step, y + size + 10, text=file,
                                fill=self.MUTED, font=("DejaVu Sans", 9))
+
+    def draw_game_over(self) -> None:
+        canvas = self.board_canvas
+        canvas.delete("all")
+        self.preview_geometry = None
+        width, height = max(canvas.winfo_width(), 400), max(canvas.winfo_height(), 300)
+        canvas.create_text(width / 2, height * .36, text="Good game",
+                           fill=self.TEXT, font=("DejaVu Sans", 32 if self.compact else 52, "bold"))
+        canvas.create_text(width / 2, height * .55, text=self.session.winner_text(),
+                           fill=self.GREEN, font=("DejaVu Sans", 19 if self.compact else 28, "bold"),
+                           width=width - 40)
+        canvas.create_text(width / 2, height * .7,
+                           text="Checkmate" if self.session.game.board.is_checkmate() else self.session.result,
+                           fill=self.MUTED, font=("DejaVu Sans", 12 if self.compact else 17),
+                           width=width - 40)
 
     def close(self) -> None:
         self.closed = True

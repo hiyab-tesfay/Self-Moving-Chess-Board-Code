@@ -19,7 +19,7 @@ from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp,
                       reusable_corners, should_retry_scan, temporal_computer_move_feedback,
                       photo_square_center, corners_from_rotated_preview,
                       corners_to_rotated_preview, temporal_move_feedback, consensus_observation,
-                      starting_position_unchanged)
+                      starting_position_unchanged, check_notice)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -229,6 +229,44 @@ class TouchSessionTest(unittest.TestCase):
         self.assertEqual(session.scan_human(after(session.game.board, "f7f8")), "Qf8#")
         self.assertEqual(session.phase, "finished")
         self.assertEqual(session.result, "You win by checkmate!")
+        self.assertEqual(session.winner_text(), "You win! · White")
+        self.assertIsNone(check_notice(session.game.board))
+
+    def test_check_names_king_and_both_checking_pieces(self):
+        board = chess.Board("4r1k1/p7/8/8/1b6/8/8/4K3 w - - 0 1")
+        notice = check_notice(board)
+        self.assertEqual(notice.king, "e1")
+        self.assertEqual(set(notice.attackers), {"b4", "e8"})
+        self.assertIn("Black bishop on b4", notice.detail)
+        self.assertIn("Black rook on e8", notice.detail)
+        self.assertIsNone(check_notice(chess.Board()))
+
+    def test_check_can_be_resolved_by_blocking_with_another_piece(self):
+        session = TouchSession("beginner")
+        session.game.board.set_fen("4r1k1/p7/8/8/8/8/3B4/4K3 w - - 0 1")
+        session.phase = "human"
+        self.assertIsNotNone(check_notice(session.game.board))
+        illegal = (occupied_squares(session.game.board) - {"d2"}) | {"c3"}
+        with self.assertRaises(MoveRejected):
+            session.scan_human(illegal)
+        feedback = rejected_move_feedback(session.game.board, Observation(illegal, (), {}), "Illegal move")
+        self.assertIn("king on e1 must be protected", feedback.detail)
+        self.assertEqual(session.scan_human(after(session.game.board, "d2e3")), "Be3")
+        self.assertIsNone(check_notice(session.game.board))
+
+    def test_computer_checkmate_ends_game_after_physical_verification(self):
+        session = TouchSession("beginner")
+        session.verify_setup(occupied_squares(session.game.board))
+        session.scan_human(after(session.game.board, "f2f3"))
+        session.announce_computer(chess.Move.from_uci("e7e5"))
+        session.verify_computer(after(session.game.board, "e7e5"))
+        session.scan_human(after(session.game.board, "g2g4"))
+        self.assertEqual(session.announce_computer(chess.Move.from_uci("d8h4")), "Qh4#")
+        self.assertEqual(session.phase, "computer")
+        self.assertIsNone(session.result)
+        session.verify_computer(after(session.game.board, "d8h4"))
+        self.assertEqual(session.phase, "finished")
+        self.assertEqual(session.winner_text(), "Stockfish wins · Black")
 
 
 class CalibrationFlowTest(unittest.TestCase):
@@ -366,6 +404,40 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_new_game_clears_finished_session_and_closes_old_engine(self):
+        app = TouchApp.__new__(TouchApp)
+        app.session = TouchSession("beginner")
+        app.session.resign()
+        app.generation = 0
+        app.confirming_new_game = True
+        player = Mock()
+        app.player = player
+        app.executor = Mock()
+        app.say = Mock()
+        app.render = Mock()
+        app.back_to_menu()
+        self.assertIsNone(app.session)
+        self.assertIsNone(app.player)
+        self.assertFalse(app.confirming_new_game)
+        self.assertFalse(app.scan_confirmations_active)
+        app.executor.submit.assert_called_once_with(player.close)
+
+    def test_checkmate_stops_scanning_and_engine_requests(self):
+        app = TouchApp.__new__(TouchApp)
+        app.session = TouchSession("beginner")
+        app.session.game.board.set_fen("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1")
+        app.session.phase = "human"
+        app.session.scan_human(after(app.session.game.board, "f7f8"))
+        app.busy = False
+        app.say = Mock()
+        app.request_computer_move = Mock()
+        app._capture_scan_attempt = Mock()
+        app.after_human_move()
+        app.scan()
+        app.request_computer_move.assert_not_called()
+        app._capture_scan_attempt.assert_not_called()
+        self.assertIn("Good game", app.say.call_args.args[0])
+
     def test_scan_camera_failure_is_shown_without_more_captures(self):
         app = TouchApp.__new__(TouchApp)
         app.closed = False
@@ -770,7 +842,7 @@ class TouchWorkflowTest(unittest.TestCase):
         corners = [[100, 100], [900, 100], [900, 900], [100, 900]]
         with tempfile.TemporaryDirectory() as directory:
             app = TouchApp.__new__(TouchApp)
-            app.session = object()
+            app.session = TouchSession("beginner")
             app.busy = False
             app.scan_feedback = None
             app.last_scan_corners = corners
