@@ -13,12 +13,13 @@ import numpy as np
 from board_vision import (Calibration, Observation, TemporalObservation, VisionError, load_calibration,
                           observe, save_calibration)
 from move_observation import occupied_squares
-from pi_camera import CameraSettings
+from pi_camera import CameraError, CameraSettings
 from pi_touch import (CalibrationFlow, MoveRejected, PhotoAdjustments, TouchApp, TouchSession,
                       adjust_photo, calibrate_photos, computer_move_feedback, rejected_move_feedback,
                       reusable_corners, should_retry_scan, temporal_computer_move_feedback,
                       photo_square_center, corners_from_rotated_preview,
-                      corners_to_rotated_preview, temporal_move_feedback, consensus_observation)
+                      corners_to_rotated_preview, temporal_move_feedback, consensus_observation,
+                      starting_position_unchanged)
 
 
 def after(board: chess.Board, uci: str) -> frozenset[str]:
@@ -365,6 +366,26 @@ class CalibrationFlowTest(unittest.TestCase):
 
 
 class TouchWorkflowTest(unittest.TestCase):
+    def test_scan_camera_failure_is_shown_without_more_captures(self):
+        app = TouchApp.__new__(TouchApp)
+        app.closed = False
+        app.generation = 0
+        app.results = queue.SimpleQueue()
+        app.results.put((0, "scan_photo", None,
+                         CameraError("The camera did not save a new readable photo.")))
+        app.root = SimpleNamespace(after=Mock())
+        app.session = TouchSession("beginner")
+        app.scan_attempts = 1
+        app.busy = True
+        app.capture_error = None
+        app.say = Mock()
+        app.render = Mock()
+        app._capture_scan_attempt = Mock()
+        app.poll_results()
+        self.assertIn("readable photo", app.capture_error)
+        app._capture_scan_attempt.assert_not_called()
+        app.render.assert_called_once()
+
     def test_welcome_opens_difficulty_before_calibration(self):
         app = TouchApp.__new__(TouchApp)
         app.welcome_screen = True
@@ -374,6 +395,50 @@ class TouchWorkflowTest(unittest.TestCase):
         app.begin_play()
         self.assertFalse(app.welcome_screen)
         self.assertIsNone(app.calibration_flow)
+
+    def test_newly_calibrated_game_starts_from_verified_setup_photo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = TouchApp.__new__(TouchApp)
+            app.args = SimpleNamespace(calibration=Path(directory))
+            app.level = "beginner"
+            app.fresh_starting_reference = np.zeros((800, 800, 3), dtype=np.uint8)
+            app.say = Mock()
+            calibration = Calibration([[0, 0], [799, 0], [799, 799], [0, 799]],
+                                      (20, 20), (1, 1), scoring="robust_occupancy_v2")
+            app.handle_result("start", (calibration, np.zeros((800, 800, 3), dtype=np.uint8), Mock()))
+            self.assertEqual(app.session.phase, "human")
+            self.assertIsNotNone(app.position_reference)
+            self.assertIsNone(app.fresh_starting_reference)
+
+    def test_saved_setup_photo_can_verify_two_unclear_scans(self):
+        app = TouchApp.__new__(TouchApp)
+        app.session = TouchSession("beginner")
+        app.saved_starting_reference = np.zeros((800, 800, 3), dtype=np.uint8)
+        app.scan_samples = []
+        app.scan_aligned_samples = []
+        app.scan_confirmations_active = True
+        app.scan_corner_source = "saved"
+        app.scan_attempts = 1
+        app.scan_corners = [[0, 0], [799, 0], [799, 799], [0, 799]]
+        app.say = Mock()
+        app._capture_scan_attempt = Mock()
+        unclear_photo = Observation(frozenset(), tuple(chess.SQUARE_NAMES), {})
+        photo = np.zeros((800, 800, 3), dtype=np.uint8)
+        app.handle_result("scan", (unclear_photo, photo))
+        app.scan_attempts = 2
+        app.handle_result("scan", (unclear_photo, photo))
+        self.assertEqual(app.session.phase, "setup")
+        app.scan_attempts = 3
+        app.handle_result("scan", (unclear_photo, photo))
+        self.assertEqual(app.session.phase, "human")
+        self.assertIs(app.position_reference, photo)
+
+    def test_changed_starting_photo_is_not_accepted_as_unchanged(self):
+        reference = np.zeros((800, 800, 3), dtype=np.uint8)
+        moved = reference.copy()
+        cv2.circle(moved, (450, 650), 14, (24, 24, 24), -1)
+        self.assertTrue(starting_position_unchanged(reference, [reference, reference]))
+        self.assertFalse(starting_position_unchanged(reference, [reference, moved]))
 
     def test_single_legal_photo_does_not_commit_a_move(self):
         app = TouchApp.__new__(TouchApp)

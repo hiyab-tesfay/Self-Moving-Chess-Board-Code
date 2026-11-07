@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -90,18 +91,28 @@ class Camera:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Empty and setup photos reuse their filenames. Never accept an old
         # photo when a camera command fails to create a new one.
-        temporary = path.with_name(f".{path.stem}-{uuid4().hex}{path.suffix or '.jpg'}")
-        try:
-            self._capture_new(temporary)
-            if (not temporary.is_file() or
-                    cv2.imread(str(temporary), cv2.IMREAD_COLOR) is None):
-                raise CameraError("The camera did not save a new readable photo. Try again.")
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return path
+        last_error = None
+        for attempt in range(2 if self.kind == "pi" else 1):
+            temporary = path.with_name(f".{path.stem}-{uuid4().hex}{path.suffix or '.jpg'}")
+            try:
+                detail = self._capture_new(temporary, timeout_ms=2000 if attempt == 0 else 5000)
+                if (not temporary.is_file() or
+                        cv2.imread(str(temporary), cv2.IMREAD_COLOR) is None):
+                    message = "The camera did not save a new readable photo."
+                    if detail:
+                        message += " Camera output: " + detail.strip()[-300:]
+                    raise CameraError(message)
+                os.replace(temporary, path)
+                return path
+            except CameraError as exc:
+                last_error = exc
+            finally:
+                temporary.unlink(missing_ok=True)
+            if self.kind == "pi" and attempt == 0:
+                time.sleep(0.5)
+        raise CameraError(f"{last_error} Try again or check the camera connection.")
 
-    def _capture_new(self, path: Path) -> None:
+    def _capture_new(self, path: Path, *, timeout_ms: int = 2000) -> str | None:
         if self.kind == "pi":
             command = shutil.which("rpicam-still") or shutil.which("libcamera-still")
             if command is None:
@@ -109,9 +120,10 @@ class Camera:
             try:
                 settings = self.settings
                 result = subprocess.run(
-                    [command, "--nopreview", "--timeout", "2000", "--camera", str(self.device),
+                    [command, "--nopreview", "--timeout", str(timeout_ms), "--camera", str(self.device),
                      "--ev", str(settings.ev), "--awb", settings.awb,
-                     "--contrast", str(settings.contrast), "--output", str(path)],
+                     "--contrast", str(settings.contrast), "--encoding", "jpg",
+                     "--output", str(path)],
                     capture_output=True, text=True, timeout=30, check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
@@ -119,6 +131,7 @@ class Camera:
             if result.returncode:
                 detail = (result.stderr or result.stdout).strip()
                 raise CameraError(f"Camera capture failed: {detail or 'unknown rpicam error'}")
+            return getattr(result, "stderr", "") or getattr(result, "stdout", "")
         else:
             camera = cv2.VideoCapture(self.device)
             try:

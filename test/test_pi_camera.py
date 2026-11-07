@@ -39,11 +39,32 @@ class CameraSettingsTest(unittest.TestCase):
             cv2.imwrite(str(path), np.full((8, 8, 3), 100, dtype=np.uint8))
             previous = path.read_bytes()
             with patch("pi_camera.shutil.which", return_value="/usr/bin/rpicam-still"), \
+                    patch("pi_camera.time.sleep"), \
                     patch("pi_camera.subprocess.run", return_value=SimpleNamespace(returncode=0)):
                 with self.assertRaisesRegex(CameraError, "new readable photo"):
                     Camera().capture(path)
             self.assertEqual(path.read_bytes(), previous)
             self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    def test_pi_camera_retries_missing_photo_with_longer_warmup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "captures" / "latest.jpg"
+            commands = []
+            def occasionally_save(command, **_kwargs):
+                commands.append(command)
+                if len(commands) == 2:
+                    cv2.imwrite(command[command.index("--output") + 1],
+                                np.full((8, 8, 3), 90, dtype=np.uint8))
+                return SimpleNamespace(returncode=0, stderr="camera ready", stdout="")
+
+            with patch("pi_camera.shutil.which", return_value="/usr/bin/rpicam-still"), \
+                    patch("pi_camera.time.sleep"), \
+                    patch("pi_camera.subprocess.run", side_effect=occasionally_save):
+                Camera().capture(path)
+            self.assertTrue(path.is_file())
+            self.assertEqual([command[command.index("--timeout") + 1]
+                              for command in commands], ["2000", "5000"])
+            self.assertEqual([item.name for item in path.parent.iterdir()], ["latest.jpg"])
 
     def test_usb_capture_waits_for_settled_view_and_releases_camera(self):
         frame = detailed_frame()

@@ -10,7 +10,6 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from uuid import uuid4
 
 import chess
 import cv2
@@ -532,6 +531,18 @@ def calibrate_photos(empty: np.ndarray, starting: np.ndarray,
     return calibration, reference
 
 
+def starting_position_unchanged(reference: np.ndarray,
+                                photos: list[np.ndarray | None]) -> bool:
+    """Confirm a saved starting setup from its actual photo, including two scans."""
+    if len(photos) < 2 or any(photo is None for photo in photos):
+        return False
+    try:
+        return all(max(robust_square_scores(reference, photo).values()) < 8.0
+                   for photo in photos if photo is not None)
+    except VisionError:
+        return False
+
+
 def aligned_setup_photo(starting: np.ndarray, corners: list[list[float]],
                         adjustments: PhotoAdjustments, rotation: str) -> np.ndarray:
     """Show the same adjusted and oriented image that move detection will use."""
@@ -771,12 +782,15 @@ class TouchApp:
         self.last_scan_corners: list[list[float]] | None = None
         self.scan_corner_source = ""
         self.scan_feedback: ScanFeedback | None = None
+        self.capture_error: str | None = None
         self.scan_attempts = 0
         self.scan_samples: list[Observation] = []
         self.scan_aligned_samples: list[np.ndarray | None] = []
         self.scan_confirmations_active = False
         self.latest_observation: Observation | None = None
         self.position_reference: np.ndarray | None = None
+        self.fresh_starting_reference: np.ndarray | None = None
+        self.saved_starting_reference: np.ndarray | None = None
         self.pending_position_reference: np.ndarray | None = None
         self.pending_reference: np.ndarray | None = None
         self.preview_photo: tk.PhotoImage | None = None
@@ -891,10 +905,9 @@ class TouchApp:
             self.panel_canvas.yview_moveto(0)
         self.draw_board()
         if getattr(self, "welcome_screen", False) and self.calibration_flow is None:
-            self.heading("Welcome to the board", "A real board. A thoughtful opponent. You play White.")
-            self.button("Play Chess  →", self.begin_play, accent=True)
-            self.button("Board Setup", self.open_board_setup, short=True)
-            self.heading("How to play", "1. Choose your level.\n2. Set up the board.\n3. Move a piece, lift your hands, and tap Scan Move.")
+            self.heading("Ready to play?", "You play White on the physical board.")
+            self.button("Start Game", self.begin_play, accent=True)
+            self.button("Calibrate Board", self.open_board_setup, short=True)
             return
         if getattr(self, "confirming_end", False) and self.session is not None:
             self.heading("End this game?", "Ending the game counts as a resignation. Your board setup will stay saved.")
@@ -914,6 +927,14 @@ class TouchApp:
         session = self.session
         if self.scan_photo is not None:
             self.render_scan_review()
+            return
+        if session is not None and getattr(self, "capture_error", None):
+            self.heading("Camera photo failed")
+            tk.Label(self.panel, text=self.capture_error, bg="#8a2f32", fg=self.TEXT,
+                     font=("DejaVu Sans", 10 if self.compact else 12), justify="left",
+                     wraplength=self.panel_width - 48, padx=8, pady=12).pack(fill="x", pady=(0, 10))
+            self.button("Try Camera Again", self.scan, accent=True)
+            self.button("Cancel Game", self.end_game, short=True)
             return
         if session is None:
             self.heading("Choose your challenge", "You play White. Choose a level, then start your game.")
@@ -991,6 +1012,7 @@ class TouchApp:
     def go_home(self) -> None:
         self.welcome_screen = True
         self.pending_game_start = False
+        self.fresh_starting_reference = None
         self.calibration_flow = None
         self.say("Welcome. Tap Play Chess to begin.")
         self.render()
@@ -1206,6 +1228,8 @@ class TouchApp:
         self.welcome_screen = False
         self.adjustments_open = False
         self.calibration_error = None
+        self.fresh_starting_reference = None
+        self.saved_starting_reference = None
         self.calibration_flow = CalibrationFlow()
         self.preview_photo = None
         self.preview_geometry = None
@@ -1416,13 +1440,36 @@ class TouchApp:
 
         def load():
             calibration, reference = load_calibration(self.args.calibration)
-            return calibration, reference, StockfishPlayer()
+            starting_path = self.args.calibration / "starting_warp.png"
+            try:
+                starting_reference = read_image(starting_path) if starting_path.is_file() else None
+            except VisionError:
+                starting_reference = None
+            if starting_reference is not None and starting_reference.shape != reference.shape:
+                starting_reference = None
+            if starting_reference is None:
+                # Calibrations made before starting_warp.png was introduced
+                # still have the verified setup capture on disk.
+                try:
+                    adjustments = (read_photo_adjustments(
+                        self.args.calibration / "photo_adjustments.json") or PhotoAdjustments())
+                    setup = adjust_photo(read_image(self.args.calibration / "starting.jpg"),
+                                         adjustments)
+                    observed, aligned = observe(reference, setup, calibration,
+                                                calibration.corners)
+                    if (not observed.uncertain and
+                            observed.occupied == occupied_squares(chess.Board())):
+                        starting_reference = aligned
+                except VisionError:
+                    pass
+            return calibration, reference, StockfishPlayer(), starting_reference
 
         self.submit("start", load)
 
     def scan(self) -> None:
         if self.session is None or self.busy:
             return
+        self.capture_error = None
         self.scan_attempts = 0
         self.scan_samples = []
         self.scan_aligned_samples = []
@@ -1440,11 +1487,12 @@ class TouchApp:
         self.scan_photo = None
         self.scan_corners = []
         self.busy = True
-        self.say(f"Checking photo {self.scan_attempts} of {MAX_SCAN_ATTEMPTS}. Keep the board still and hands clear.")
+        task = "starting pieces" if getattr(self.session, "phase", None) == "setup" else "move"
+        self.say(f"Checking {task}: photo {self.scan_attempts} of {MAX_SCAN_ATTEMPTS}. Keep hands clear.")
         self.render()
 
         def take_photo():
-            path = self.args.calibration / "captures" / f"capture_{uuid4().hex}.jpg"
+            path = self.args.calibration / "captures" / "latest.jpg"
             self.camera.capture(path)
             photo = read_image(path)
             if self.args.corners:
@@ -1532,7 +1580,7 @@ class TouchApp:
                 self.busy = False
                 if error is not None:
                     if (((tag == "scan_photo" and
-                          isinstance(error, (CameraError, VisionError, cv2.error))) or
+                          isinstance(error, (VisionError, cv2.error))) or
                          (tag == "scan" and self.scan_corner_source != "manual" and
                           isinstance(error, (VisionError, cv2.error)))) and
                             self.scan_attempts < MAX_SCAN_ATTEMPTS):
@@ -1544,6 +1592,9 @@ class TouchApp:
                             "PHOTO UNCLEAR", f"Tried {self.scan_attempts} photos. "
                             "The board could not be read. Check lighting or adjust the photo corners.")
                         self.say("Check the message on the photo.", self.RED)
+                    elif tag == "scan_photo":
+                        self.capture_error = str(error)
+                        self.say("Camera photo failed. Tap Try Camera Again.", self.RED)
                     elif tag == "start" and isinstance(error, VisionError):
                         self.say("Calibration missing or unreadable. Tap Calibrate Board.", self.RED)
                     elif tag == "cal_finish" and isinstance(error, VisionError):
@@ -1647,6 +1698,13 @@ class TouchApp:
             flow = self.calibration_flow
             assert flow is not None
             calibration, reference = value
+            starting_reference = (aligned_setup_photo(
+                flow.starting_photo, flow.starting_corners, self.photo_adjustments,
+                flow.rotation) if flow.setup_only else observe(
+                    reference, adjust_photo(flow.starting_photo, self.photo_adjustments),
+                    calibration, flow.starting_corners)[1])
+            if not cv2.imwrite(str(self.args.calibration / "starting_warp.png"), starting_reference):
+                raise VisionError("Could not save the verified starting board photo.")
             save_calibration(self.args.calibration, calibration, reference)
             write_photo_adjustments(self.args.calibration / "photo_adjustments.json",
                                     self.photo_adjustments)
@@ -1654,10 +1712,14 @@ class TouchApp:
                                   self.camera_settings)
             self.calibration, self.reference = calibration, reference
             self.last_scan_corners = calibration.corners
+            # The setup photo was already checked by calibrate_photos. Reuse
+            # that verified position when the new game starts immediately.
+            self.fresh_starting_reference = starting_reference
             flow.stage = "done"
             self.say("Board setup saved. You're ready to play.", self.GREEN)
         elif tag == "start":
-            self.calibration, self.reference, self.player = value
+            self.calibration, self.reference, self.player = value[:3]
+            self.saved_starting_reference = value[3] if len(value) > 3 else None
             self.last_scan_corners = saved_scan_corners(self.args.calibration, self.calibration)
             self.session = TouchSession(self.level)
             self.pending_game_start = False
@@ -1665,8 +1727,14 @@ class TouchApp:
             if self.calibration.scoring == "temporal_v1":
                 self.session.phase = "human"
                 self.say("Starting position loaded. Move White, then tap Scan Move.", self.GREEN)
+            elif self.fresh_starting_reference is not None:
+                self.session.phase = "human"
+                self.position_reference = self.fresh_starting_reference
+                self.fresh_starting_reference = None
+                self.say("Starting board verified. Make your first White move, then tap Scan Move.",
+                         self.GREEN)
             else:
-                self.say("Place the pieces in their starting squares and scan the board.")
+                self.say("Place all 32 pieces in their starting squares, then tap Scan Starting Board.")
         elif tag == "scan_photo":
             photo, corners, self.scan_corner_source = value
             self.scan_photo = photo
@@ -1718,7 +1786,13 @@ class TouchApp:
                 return
             used_corners = [point.copy() for point in self.scan_corners]
             if self.session.phase == "setup":
-                self.session.verify_setup(observation)
+                if (not temporal and self.saved_starting_reference is not None and
+                        starting_position_unchanged(self.saved_starting_reference,
+                                                    self.scan_aligned_samples)):
+                    # The saved setup photo was verified during calibration.
+                    self.session.verify_setup(occupied_squares(self.session.game.board))
+                else:
+                    self.session.verify_setup(observation)
                 self.position_reference = aligned
                 self.clear_scan_photo()
                 if self.session.phase == "setup_confirm":
@@ -1827,6 +1901,7 @@ class TouchApp:
         self.scan_photo = None
         self.scan_corners = []
         self.scan_feedback = None
+        self.capture_error = None
         self.preview_photo = None
         self.preview_geometry = None
         self.scan_confirmations_active = False
@@ -2065,29 +2140,13 @@ class TouchApp:
         canvas.delete("all")
         width = max(canvas.winfo_width(), 400)
         height = max(canvas.winfo_height(), 300)
-        margin = 22 if self.compact else 40
-        canvas.create_text(margin, 24, text="A LITTLE STRATEGY. A REAL CONNECTION.",
-                           anchor="nw", fill=self.GOLD,
-                           font=("DejaVu Sans", 8 if self.compact else 11, "bold"))
-        canvas.create_text(margin, 55, text="Your next move\nstarts here.", anchor="nw",
-                           fill=self.TEXT, font=("DejaVu Sans", 29 if self.compact else 45, "bold"))
-        canvas.create_text(margin, 145 if self.compact else 182,
-                           text="Play on your physical chessboard.\nLet the screen guide the game.",
-                           anchor="nw", fill=self.MUTED,
-                           font=("DejaVu Sans", 11 if self.compact else 15))
-        tile = min((width - margin * 2) / 8, max(14, (height - 210) / 3))
-        board_width = tile * 8
-        left, top = margin, height - tile * 3 - 16
-        for row in range(3):
-            for col in range(8):
-                x, y = left + col * tile, top + row * tile
-                fill = "#d9ceb4" if (row + col) % 2 else "#5f8e78"
-                canvas.create_rectangle(x, y, x + tile, y + tile, fill=fill, outline=fill)
-        for col, glyph in ((1, "♞"), (4, "♚"), (6, "♜")):
-            canvas.create_text(left + (col + .5) * tile, top + 1.4 * tile,
-                               text=glyph, fill=self.TEXT, font=("DejaVu Sans", int(tile * 1.3)))
-        canvas.create_line(left, top + tile * 3 + 6, left + board_width, top + tile * 3 + 6,
-                           fill=self.GOLD, width=2)
+        center = width / 2
+        canvas.create_text(center, height * .42, text="CHESS",
+                           fill=self.TEXT, font=("DejaVu Sans", 38 if self.compact else 62, "bold"))
+        canvas.create_line(center - 64, height * .57, center + 64, height * .57,
+                           fill=self.GREEN, width=3)
+        canvas.create_text(center, height * .7, text="Play on your physical board",
+                           fill=self.MUTED, font=("DejaVu Sans", 12 if self.compact else 17))
 
     def board_geometry(self) -> tuple[float, float, float, float]:
         actual_width = self.board_canvas.winfo_width()
