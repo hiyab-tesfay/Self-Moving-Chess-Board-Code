@@ -21,9 +21,15 @@ have waited) and plans the carries that follow as if the square were already emp
 step is a message for the person. A "carry" is one piece carried.
 
 Path points are in squares: a1 is (0, 0), h8 is (7, 7), x.5 are the lanes between squares. The
-docking lanes beside the board at x = -1 (White's) and 8 (Black's), with the row an index down the
-lane and slots named "w:0", "w:1", ... and "b:0", ..., are still understood here and in the
-firmware for a later version; no planner sends a piece to one now.
+docking lanes beside the board at x = -1 (White's, the left) and 8 (Black's, the right), with the
+row an index down the lane and slots named "w:0", "w:1", ... and "b:0", ..., are understood here
+and in the firmware; the bench console docks captured pieces there (dock mode), the touch screen
+and the website have a person take them off.
+
+Millimetres are the magnet's own (board_layout.py): 0,0 is the magnet's centre at home, and the
+board, the lanes and the travel in gantry_config.json are what the console's board calibration
+measured by steering the magnet there. Before each job the driver tells the board its steps/mm
+($100, from mm_per_turn: 41 mm per turn on the bench) and its travel ($130, $131).
 
 When the job lists "before" (the squares and slots occupied as it starts) and "pieces", every
 carry's path is found here by board_paths.py so that the carried piece touches nothing, and a
@@ -72,6 +78,7 @@ import time
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import board_layout  # noqa: E402
 import board_paths  # noqa: E402
 
 DEFAULT_CONFIG = HERE / "gantry_config.json"
@@ -94,7 +101,8 @@ class BoardMap:
     """Where every square, lane and parking slot is, in mm from the homed corner."""
 
     def __init__(self, config: dict):
-        self.square = float(config["square_mm"])
+        config = board_layout.machine(config)    # the sketch's millimetres less the magnet's home: what the board counts
+        self.square, self.square_y = board_layout.square_xy(config)   # along X (files) and Y (ranks)
         self.a1 = tuple(float(v) for v in config["a1_center_mm"])
         park = config.get("park_columns_mm") or {}
         self.columns = {i: self.a1[0] + i * self.square for i in range(8)}
@@ -103,7 +111,7 @@ class BoardMap:
         for i, x in enumerate(park.get("b", [])):
             self.columns[8 + i] = float(x)
         rows = config.get("park_rows_mm")
-        self.rows = {i: self.a1[1] + i * self.square for i in range(8)}
+        self.rows = {i: self.a1[1] + i * self.square_y for i in range(8)}
         self.park_rows = {i: float(y) for i, y in enumerate(rows)} if rows else self.rows
         self.travel = tuple(float(v) for v in config["travel_mm"])
 
@@ -121,13 +129,13 @@ class BoardMap:
 
     def point_mm(self, px: float, py: float) -> tuple[float, float]:
         """A path point in square units, lanes (x.5) included. In a parking column, py is a slot index down the lane."""
-        x = self._interp(self.columns, px, "column")
+        x = self._interp(self.columns, px, "column", self.square)
         if px <= -1 or px >= 8:
             row = int(py)
             if row != py or row < 0 or row >= len(self.park_rows):
                 raise GantryError(f"parking row {py:g} is not configured")
             return x, self.park_rows[row]
-        return x, self._interp(self.rows, py, "row")
+        return x, self._interp(self.rows, py, "row", self.square_y)
 
     def units(self, x_mm: float, y_mm: float) -> tuple[float, float]:
         """A point in mm as square units (the inverse of point_mm on the board and the lanes beside it)."""
@@ -138,7 +146,7 @@ class BoardMap:
             x = 7 + (x_mm - h) / (self.columns[8] - h)
         else:
             x = (x_mm - a1x) / self.square
-        return x, (y_mm - self.rows[0]) / self.square
+        return x, (y_mm - self.rows[0]) / self.square_y
 
     def place_mm(self, place: str) -> tuple[float, float]:
         """A firmware place: a square, a slot, or "x,y" in squares."""
@@ -148,31 +156,35 @@ class BoardMap:
         return self.square_mm(place)
 
     def geometry(self, config: dict):
-        """The same numbers for board_paths."""
+        """The same numbers for board_paths (machine millimetres, like the rest of this map)."""
         sizes = {str(k).lower(): float(v) for k, v in (config.get("piece_sizes_mm") or board_paths.DEFAULT_PIECE_SIZES_MM).items()}
-        lanes = config.get("docking_lanes")       # ["b"]: only the right lane holds pieces
-        slot_columns = None if lanes is None else tuple(
-            c for c in self.columns if (c < 0 and "w" in lanes) or (c > 7 and "b" in lanes))
-        reach = config.get("reach_mm")            # [x_min, y_min, x_max, y_max] of the magnet
+        lanes = board_layout.usable_lanes(config)  # asked for in docking_lanes, configured, and within reach
+        slot_columns = tuple(c for c in self.columns if (c < 0 and "w" in lanes) or (c > 7 and "b" in lanes))
+        reach = board_layout.reach(config)         # [x_min, y_min, x_max, y_max] of the magnet: the travel by default
         return board_paths.Geometry(
             self.square, self.a1, {c: x for c, x in self.columns.items() if c < 0 or c > 7},
             [self.park_rows[i] for i in sorted(self.park_rows)],
             float(config.get("piece_mm", 27.0)), float(config.get("clearance_mm", 3.0)),
             float(config.get("lane_clearance_mm", 1.0)), sizes,
-            slot_columns=slot_columns, reach_mm=tuple(float(v) for v in reach) if reach else None,
+            slot_columns=slot_columns, reach_mm=reach,
             smooth=bool(config.get("path_smoothing", False)), corner_lag_mm=float(config.get("corner_lag_mm", 0.0)),
-            turn_penalty_mm=float(config.get("turn_penalty_mm", 2.0)))
+            turn_penalty_mm=float(config.get("turn_penalty_mm", 2.0)), square_y_mm=self.square_y)
 
     def setup_line(self) -> str:
-        """The $B= line that gives the firmware this board: square, a1, and the docking lanes when configured."""
+        """The $B= line that gives the firmware this board: square, a1, the docking lanes when configured, and the
+        square size along Y when it was measured apart from X (firmware 0.7+ reads that eighth number)."""
         parts = [self.square, self.a1[0], self.a1[1]]
-        if -1 in self.columns and 8 in self.columns:
+        two_sizes = abs(self.square_y - self.square) > 1e-3
+        if (-1 in self.columns and 8 in self.columns) or two_sizes:
             rows = [self.park_rows[i] for i in sorted(self.park_rows)]
-            pitch = rows[1] - rows[0] if len(rows) > 1 else self.square
-            parts += [self.columns[-1], self.columns[8], rows[0], pitch]
-        return "$B=" + ",".join(f"{v:g}" for v in parts)
+            pitch = rows[1] - rows[0] if len(rows) > 1 else self.square_y
+            parts += [self.columns.get(-1, self.a1[0] - self.square), self.columns.get(8, self.columns[7] + self.square),
+                      rows[0], pitch]
+        if two_sizes:
+            parts.append(self.square_y)
+        return "$B=" + ",".join(f"{round(v, 3):g}" for v in parts)
 
-    def _interp(self, table: dict, value: float, what: str, outer: dict | None = None) -> float:
+    def _interp(self, table: dict, value: float, what: str, step: float, outer: dict | None = None) -> float:
         """Whole numbers are configured centres; between two of them the place is in proportion, and past the last one
         it goes on at the square pitch (x.5 is half a square out), the same as the firmware's place_mm."""
         lo, hi = math.floor(value), math.ceil(value)
@@ -184,9 +196,9 @@ class BoardMap:
         if lo in known and hi in known:
             return known[lo] + (known[hi] - known[lo]) * (value - lo)
         if hi in known:
-            return known[hi] - self.square * (hi - value)
+            return known[hi] - step * (hi - value)
         if lo in known:
-            return known[lo] + self.square * (value - lo)
+            return known[lo] + step * (value - lo)
         raise GantryError(f"{what} {value:g} is not configured")
 
     def check(self, x: float, y: float, what: str) -> None:
@@ -425,8 +437,10 @@ def carry_motions(line: str, board: BoardMap, config: dict) -> list[tuple]:
     return motions
 
 
-def predict(lines: list[tuple[str, str]], config: dict, steps_per_mm: float = 40.0, accel: float | None = None, start=(0.0, 0.0), board: BoardMap | None = None) -> dict:
+def predict(lines: list[tuple[str, str]], config: dict, steps_per_mm: float | None = None, accel: float | None = None, start=(0.0, 0.0), board: BoardMap | None = None) -> dict:
     """Steps and seconds the board will need, from the same trapezoid the firmware uses. Reads G-code and CARRY lines."""
+    if steps_per_mm is None:
+        steps_per_mm = board_layout.steps_per_mm(config)
     if accel is None:
         accel = float(config.get("accel_mm_s2", 800.0))   # the firmware's $120: 400 from 0.4 on, 800 before
     x, y = start
@@ -725,6 +739,33 @@ class Gantry:
         """Give the firmware this board's geometry, so its idea of e4 is the Pi's."""
         self.command(BoardMap(config).setup_line())
 
+    def set_motion(self, config: dict) -> None:
+        """Firmware 0.7: steps/mm ($100, from mm_per_turn) and the travel ($130, $131) from the config. $100 to the
+        value the board already has changes nothing; a different one forgets the position (home again). Older
+        firmware has no $130/$131 and keeps its compiled travel: that refusal is ignored."""
+        for line in board_layout.motion_lines(config):
+            try:
+                self.command(line)
+            except GantryError as exc:
+                if line.startswith("$100") or "unknown" not in str(exc):
+                    raise
+                self.log.info("the firmware has no %s (before 0.7): it keeps its own travel", line.split("=")[0])
+
+    def set_step_pulse(self, config: dict) -> None:
+        """Firmware 0.5+: the STEP pulse length ($0) from config["step_pulse_us"], when set. The firmware boots with
+        1500 us, which caps the step rate at 333/s: 8 mm/s at 1/8 steps, too slow for long carries under the
+        magnet's time limit. A board wired for 1/8 steps wants a shorter pulse here (the shortest its wiring passes).
+        Older firmware has no $0 and keeps its own 3 us; that refusal is ignored."""
+        value = config.get("step_pulse_us")
+        if not value:
+            return
+        try:
+            self.command(f"$0={int(value)}")
+        except GantryError as exc:
+            if "unknown" not in str(exc):
+                raise
+            self.log.info("the firmware has no $0 (before 0.5): it keeps its own step pulse")
+
     def perform(self, lines: list[tuple[str, str]], config: dict, progress=None) -> None:
         """Run planned commands, waiting for each to finish before the next. progress(text) is told about every carry.
 
@@ -811,7 +852,9 @@ def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry")
     lines = plan_job(job, config)
     gantry = Gantry(link, log)
     gantry.check_safe()
+    gantry.set_motion(config)            # GRBL reads $100 / $130 / $131 the same way
     if not uses_gcode(config):
+        gantry.set_step_pulse(config)
         gantry.set_board(config)
     gantry.ensure_homed(may_bump_home(config, link))
     log.info("JOB %s: %d commands", job.get("label", "?"), len(lines))
@@ -874,14 +917,18 @@ def reset_jobs(layout, config: dict) -> list[dict]:
 
 
 def calibrate(gantry: Gantry, config: dict, config_path: Path, read=input, write=print) -> dict:
-    """Measure the board at the frame: steer the magnet under a1, then h1, and save the result.
+    """Measure the board at the frame: steer the magnet under a1, h1 and h8, and save the layout.
 
-    Moves are typed as x+10, y-0.5 and so on (millimetres); 'ok' records the spot. a1 gives
-    the origin of the squares, and a1 to h1 is seven squares, which gives their size.
+    Moves are typed as x+10, y-0.5 and so on (millimetres); 'ok' records the spot. a1 gives the
+    origin of the squares, a1 to h1 the square size along X, h1 to h8 along Y; the docking lanes
+    follow 42.5 mm out from the edge files (board_layout.from_points). The console's Board
+    calibration panel does the same with buttons, and can also measure the lanes and the travel.
     """
     board = BoardMap(config)
+    gantry.set_motion(config)
     gantry.ensure_homed(may_bump_home(config, gantry.link))
-    pos = [0.0, 0.0]
+    st = gantry.status()
+    pos = [st["x"], st["y"]]
 
     def goto(x: float, y: float) -> None:
         board.check(x, y, "that move")
@@ -912,17 +959,19 @@ def calibrate(gantry: Gantry, config: dict, config_path: Path, read=input, write
                 continue
             write(f"  at X={pos[0]:.1f} Y={pos[1]:.1f}")
 
-    a1 = steer("Step 1 of 2: put the magnet under the centre of a1.")
-    h1 = steer("Step 2 of 2: now under the centre of h1, on the same rank.")
-    square = (h1[0] - a1[0]) / 7
-    if square < 10:
-        raise GantryError(f"h1 at X={h1[0]:.1f} is not seven squares to the right of a1 at X={a1[0]:.1f}")
-    config["a1_center_mm"] = [round(a1[0], 2), round(a1[1], 2)]
-    config["square_mm"] = round(square, 2)
-    Path(config_path).write_text(json.dumps(config, indent=2) + "\n")
-    write(f"Saved to {config_path}: a1 centre ({a1[0]:.1f}, {a1[1]:.1f}) mm, squares {square:.2f} mm.")
-    far = BoardMap(config).square_mm("h8")
-    write(f"h8 works out at ({far[0]:.1f}, {far[1]:.1f}) mm; the travel is {board.travel[0]:.0f} x {board.travel[1]:.0f}.")
+    a1 = steer("Step 1 of 3: put the magnet under the centre of a1.")
+    h1 = steer("Step 2 of 3: now under the centre of h1, on the same rank.")
+    h8 = steer("Step 3 of 3: now under the centre of h8.")
+    try:
+        new, report = board_layout.from_points(config, a1, h1, h8)
+    except ValueError as exc:
+        raise GantryError(str(exc)) from None
+    Path(config_path).write_text(json.dumps(new, indent=2) + "\n")
+    config.clear()
+    config.update(new)
+    write(f"Saved to {config_path}:")
+    for line in report:
+        write(f"  {line}")
     return config
 
 
@@ -956,7 +1005,7 @@ def main(argv=None) -> int:
     parser.add_argument("--unlock", action="store_true", help="after a person has checked the board: $X, then home")
     parser.add_argument("--goto", nargs=2, type=float, metavar=("X", "Y"), help="move the empty magnet to X Y mm")
     parser.add_argument("--status", action="store_true")
-    parser.add_argument("--calibrate", action="store_true", help="steer the magnet under a1 and h1, then save the square positions to the config")
+    parser.add_argument("--calibrate", action="store_true", help="steer the magnet under a1, h1 and h8, then save the board's layout to the config")
     parser.add_argument("--gcode", action="store_true", help="speak G-code (GRBL, firmware 0.1) instead of CARRY commands")
     parser.add_argument("--dry-run", action="store_true", help="print the commands and the prediction; send nothing")
     parser.add_argument("--quiet", action="store_true")

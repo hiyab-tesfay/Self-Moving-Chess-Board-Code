@@ -3,28 +3,33 @@
 #pragma once
 
 // ----------------------------------------------------------------------------- pins
-// Default: ESP32 Dev Module, the same pins as Prototype_Program.ino (motor 1 = X, motor 2 = Y).
+// Default: ESP32 Dev Module, motor 1 = X and motor 2 = Y as in Prototype_Program.ino. Firmware 0.5 tried
+// Zain's swapped mapping (his commit 16d7e82: motor 2 = X, X direction inverted); on the bench of
+// 2026-11-06 the axes came out the wrong way round with it, so 0.6 is back to this one, which is also
+// the mapping the direction check and the board tour of 2026-11-05 passed with.
 // Build with -DGANTRY_CNC_SHIELD (or uncomment the define) for an Arduino Uno/Nano on a CNC
 // Shield v3, which is what the GRBL kit in the Drive folder expects.
 // #define GANTRY_CNC_SHIELD
 
 #ifndef GANTRY_CNC_SHIELD
-#define PIN_X_DIR 18
+#define PIN_X_DIR 18    // motor 1: one turn (200 full steps, M0-M2 floating) moves it 41 mm, measured 2026-11-06
 #define PIN_X_STEP 19
 #define PIN_X_EN 21
-#define PIN_Y_DIR 22    // bench wiring of 2026-11-05, second pass (it sat on 27 for an hour; Zain's prototype also used 22)
+#define PIN_Y_DIR 22    // motor 2 (it sat on 27 for an hour on 2026-11-05; Zain's prototype also used 22)
 #define PIN_Y_STEP 25
 #define PIN_Y_EN 26
-#define PIN_MAGNET 32   // gate of the MOSFET (or relay input) that switches the 12 V electromagnet (was 27 until the
-                        // bench wiring of 2026-11-05 put a direction wire there)
+#define PIN_MAGNET -1   // -1: no electromagnet. This build lifts a PERMANENT magnet with the servo (the user,
+                        // 2026-11-06), so "magnet on" (M3) only means "holding a piece" and no pin is driven.
+                        // Until 0.7.1 this was 32 and M3/M5 switched it; with an electromagnet wired, set it
+                        // again (gate of its MOSFET) and the coil limits below.
 #define PIN_SERVO 12    // signal wire of the MG90 that pushes the magnet up to the board and pulls it back, as wired on
                         // the bench on 2026-11-05. GPIO 12 is a strapping pin (MTDI): the servo's signal input does not
                         // pull it, so boot is unaffected, but never tie it high. -1 = no servo: the magnet stays at the board top.
 #define PIN_X_MIN -1    // homing switches at the X=0 and Y=0 ends; -1 when there are none (bump homing). The bench of
 #define PIN_Y_MIN -1    // 2026-11-05 has none. With switches, use GPIO 34/35 (input-only: they need external pull-ups).
-// DRV8825 microstep inputs M0 M1 M2. Left unconnected they read LOW = full steps, and the
-// motion would be 8x too long for MICROSTEPS 8. Either tie them to 3.3 V by hand for 1/8
-// (M0 and M1 high, M2 low) or wire them to GPIOs here and the sketch sets them.
+// DRV8825 microstep inputs M0 M1 M2. Left unconnected they read LOW = full steps, which is how the
+// bench runs (MICROSTEPS 1 below). To use 1/8 steps instead, tie M0 and M1 to 3.3 V (M2 low) or
+// wire them to GPIOs here, and set MICROSTEPS 8.
 #define PIN_M0 -1
 #define PIN_M1 -1
 #define PIN_M2 -1
@@ -45,29 +50,43 @@
 #endif
 
 #define ENDSTOP_PRESSED_LEVEL 0   // switches wired to ground with a pull-up read 0 when pressed
-#define STEP_PULSE_US 3           // the DRV8825 wants at least 1.9 us high and 1.9 us low
+// How long each STEP pulse stays high, in us. The DRV8825 itself needs only 1.9 us, but on the bench
+// the 3 us pulses of firmware 0.4 never reached the drivers (both motors hummed and did not turn,
+// even at 4 steps/s), while Zain's sketch, with 1500 us high and 1500 us low, moves both. So the
+// default is his 1500. The step rate is capped so that the low time is at least as long as the
+// high time: 1500 us allows 333 steps/s, 68 mm/s with the drivers on full steps (4.88 steps/mm). $0
+// changes it at run time (STEP_PULSE_MIN_US..STEP_PULSE_MAX_US) to find the shortest that works.
+#define STEP_PULSE_US 1500
+#define STEP_PULSE_MIN_US 2
+#define STEP_PULSE_MAX_US 5000
 
 // ----------------------------------------------------------------------------- mechanics
 // Motor: 1.8 degree NEMA 17 (200 full steps per turn), 13 N.cm / 18.4 oz.in short body.
 // Driver: DRV8825. Microstep jumpers M0 M1 M2: 1/8 = on on off, 1/16 = off off on, 1/32 = on on on.
-// Belt: GT2, 2 mm pitch, on the 20-tooth pulley from the 2D Plotter V2 design, so one turn
-// moves the carriage 40 mm.
-//   steps per mm = 200 * MICROSTEPS / (PULLEY_TEETH * 2 mm) = 40 at 1/8, 80 at 1/16.
+// Belt: GT2, 2 mm pitch, on the 20-tooth pulley from the 2D Plotter V2 design: 40 mm per turn on
+// paper. Measured on the bench on 2026-11-06 with the console's one-turn buttons: one turn moves
+// the carriage 41 mm on both X and Y (the belt rides a little outside the pitch line).
+// MICROSTEPS 1: the DRV8825's M0-M2 pins are not connected on the bench, so the drivers take full steps.
+//   steps per mm = 200 * MICROSTEPS / MM_PER_TURN = 4.878 (one step is 0.205 mm).
+// $100 changes it at run time; the Pi and the console send the config's value (gantry_config.json
+// "mm_per_turn") on every connection, so a better measurement needs no reflash.
 #define MOTOR_FULL_STEPS_PER_REV 200
-#define MICROSTEPS 8
+#define MICROSTEPS 1
 #define PULLEY_TEETH 20
 #define BELT_PITCH_MM 2.0f
-#define STEPS_PER_MM ((float)MOTOR_FULL_STEPS_PER_REV * MICROSTEPS / (PULLEY_TEETH * BELT_PITCH_MM))
+#define MM_PER_TURN 41.0f
+#define STEPS_PER_MM ((float)MOTOR_FULL_STEPS_PER_REV * MICROSTEPS / MM_PER_TURN)
 
 #define INVERT_X_DIR false        // flip if +X moves the wrong way
 #define INVERT_Y_DIR false
 #define COREXY false              // false: each motor drives its own axis (the 2D Plotter V2 layout)
 
 // ----------------------------------------------------------------------------- travel and speed
-// Soft limits in mm from the homed corner: how far the centre of the magnet can travel.
-// From sketch 5 of the Fusion design (Chess Board Design), which traces the magnet's centre
-// around the edge of where it can move: 470 x 420 mm, origin at its bottom-left corner.
-// Confirm by homing and jogging to the far corner once the frame is built.
+// Soft limits in mm from the homed corner: how far the centre of the magnet can travel. 0,0 is
+// where the magnet sits with both carriages pushed into the bottom-left corner. Sketch 5 of the
+// Fusion design traces exactly this: the 470 x 420 mm the magnet's centre can travel, its bottom-left
+// corner being home (the magnet's 60 mm offset from the Y gantry's left edge is already in the sketch).
+// $130 / $131 change them at run time; the Pi and the console send them on every connection.
 #define MAX_X_MM 470.0f
 #define MAX_Y_MM 420.0f
 
@@ -91,38 +110,51 @@
 
 // ----------------------------------------------------------------------------- magnet and servo
 #define MAGNET_ACTIVE_HIGH true
-// The MG90 arm that carries the electromagnet: extended = magnet touching the underside of the
-// board top, retracted = dropped clear of it so the carriage can travel without dragging pieces.
+// The MG90 arm that carries the magnet: extended = magnet just under the board top (1-2 mm short of
+// touching it, so the servo never presses into the board and has less to pull off a piece), retracted
+// = dropped clear of it so the carriage can travel without dragging pieces, and short of the frame.
 // 90 / 0 are placeholders: set them on the real arm with M7 (extend) and M8 (retract) while
-// watching it, so that extended just touches the board and retracted clears the thickest piece's
-// pull. The servo takes 5 V from the supply's 5 V rail (or a BEC), never from the ESP32's 3.3 V pin.
+// watching it. A servo held against a stop stalls at most of an amp: the likeliest cause of the
+// ESP32 dying on 2026-11-06. The servo takes 5 V from the supply's 5 V rail (or a BEC), never from the ESP32's 3.3 V pin.
+// `$S=up,down[,settle]` changes them at run time (0.7.2), so they can be found on the arm itself;
+// a reset goes back to these.
 #define SERVO_EXTEND_DEG 90
 #define SERVO_RETRACT_DEG 0
-#define SERVO_SETTLE_MS 300       // time for the arm to arrive before the magnet switches or the carriage moves
+#define SERVO_SETTLE_MS 400       // time for the arm to arrive before the magnet switches or the carriage moves
 #define SERVO_MIN_PULSE_US 500    // MG90: 500 us = 0 deg, 2500 us = 180 deg at 50 Hz
 #define SERVO_MAX_PULSE_US 2500
+// How the arm is driven (0.7.2, servo_arm.h): the pulse sweeps to a new angle at SERVO_SWEEP_DEG_PER_S
+// (90 deg in 0.25 s, inside SERVO_SETTLE_MS) instead of jumping (0 jumps). The magnet is a PERMANENT
+// magnet that the arm lifts (no electromagnet on this build), so the arm is held down too
+// (SERVO_RELEASE_DOWN_MS 0): a limp arm could be pulled up toward the pieces. A positive value stops
+// the pulses that long after the arm is down, only for an arm that cannot be pulled up. What keeps the
+// MG90 from stalling is the two angles: up stops just short of the board, down short of the frame
+// ($S=up,down while watching the arm).
+#define SERVO_SWEEP_DEG_PER_S 360
+#define SERVO_RELEASE_DOWN_MS 0
 
 // ----------------------------------------------------------------------------- the board, as the firmware knows it
 // So that the Pi can say "CARRY g1 f3" and the board works out the millimetres itself. These are
-// the defaults; the Pi sends its calibrated values with $B=square,a1x,a1y,parkWx,parkBx,parkRow0,parkPitch.
+// the defaults; the Pi sends its calibrated values with $B=square,a1x,a1y,parkWx,parkBx,parkRow0,parkPitch[,squareY].
 // Squares: a1's centre is at (A1_X_MM, A1_Y_MM) and each square is SQUARE_MM; x.5 are the lanes
-// between squares. Captured pieces dock in a lane each side of the board (sketch 5: 12 circles
-// at a 35 mm pitch), White's at x = PARK_W_X_MM, Black's at x = PARK_B_X_MM.
-#define SQUARE_MM 50.0f
-#define A1_X_MM 60.0f
-#define A1_Y_MM 35.0f
-#define PARK_W_X_MM 17.5f
-#define PARK_B_X_MM 452.5f
-#define PARK_ROW0_MM 17.5f
-#define PARK_PITCH_MM 35.0f
-#define PARK_ROWS 12
+// between squares. Sketch 5 (measured 2026-11-06): 52.5 mm squares filling the 420 mm height,
+// centred across the 470 mm (25 mm each side), so a1's centre is at 51.25, 26.25. Captured pieces
+// dock in a column of circles on each side edge of the travel, White's at x = PARK_W_X_MM (0),
+// Black's at x = PARK_B_X_MM (470): 17 circles 24.7 mm apart, of which every other one is a slot
+// (the widest piece is 27 mm), 9 a side from y 12.35.
+#define SQUARE_MM 52.5f
+#define A1_X_MM 51.25f
+#define A1_Y_MM 26.25f
+#define PARK_W_X_MM 0.0f
+#define PARK_B_X_MM 470.0f
+#define PARK_ROW0_MM 12.35f
+#define PARK_PITCH_MM 49.4125f
+#define PARK_ROWS 9
 
 // With a piece under the magnet (boot value of $111; its ceiling is MAX_SPEED_MM_S). Slower than a
-// travel, for the same torque reason. At 40 mm/s every straight carry fits inside MAGNET_MAX_ON_MS
-// (the longest, the a1-h8 diagonal, 495 mm, keeps the magnet on about 13 s). The longest carries the
-// board routes through the lanes do not: a1-h7 and the like (620 mm, 16 of the 4032 square-to-square
-// pairs) and 92 of the 1536 square-to-docking-slot pairs need more than 15 s and are refused before
-// they start (error:10). At $111=50 none of the square-to-square ones are, and 4 docking ones.
+// travel, for the same torque reason. With an electromagnet (MAGNET_MAX_ON_MS 15 s) the longest
+// carries through the lanes (a1-h7 and the like, 620 mm) took longer than that at 40 mm/s and were
+// refused (error:10); a permanent magnet has no such limit.
 #define CARRY_SPEED_MM_S 40.0f
 #define GRAB_MS 300               // after the magnet switches on, before moving
 #define RELEASE_MS 200            // after it switches off, before moving away
@@ -138,17 +170,22 @@
 // Each of these protects a part that can be destroyed by software alone. The firmware enforces
 // them whatever the Pi sends; README.md ("Safety policies") lists them in plain words.
 //
-// The electromagnet coil. A 12 V electromagnet held on heats up; a carry is a few seconds, so
-// anything longer is a fault (a crashed Pi, a stuck program). After MAGNET_MAX_ON_MS the firmware
-// switches it off, stops and raises the alarm "magnet on too long"; M3 within MAGNET_MIN_OFF_MS of
-// the last release is refused (a sequence waits instead), so the coil never sits at duty 1.
-// A CARRY whose planned magnet-on time would exceed MAGNET_MAX_ON_MS is refused before it starts,
-// so the policy never drops a piece in a lane. The magnet is off at boot, on any alarm, on hold
-// (!), on $X, and after a program ends with the host lost. M3 is also refused while not homed,
-// while moving, and (with a servo) while the arm is retracted: a magnet that is not at the board
-// pulls nothing and only heats.
+// The electromagnet coil, when there is one (PIN_MAGNET >= 0). A 12 V electromagnet held on heats up;
+// a carry is a few seconds, so anything longer is a fault (a crashed Pi, a stuck program). After
+// MAGNET_MAX_ON_MS the firmware switches it off, stops and raises the alarm "magnet on too long"; M3
+// within MAGNET_MIN_OFF_MS of the last release is refused (a sequence waits instead), so the coil never
+// sits at duty 1. A CARRY whose planned magnet-on time would exceed MAGNET_MAX_ON_MS is refused before
+// it starts, so the policy never drops a piece in a lane. A permanent magnet has no coil to protect:
+// both are 0 (off), so no carry is cut short or refused for its length. Either way "the magnet" is
+// off at boot, on any alarm, on hold (!), on $X, and after a program ends with the host lost, and
+// M3 is refused while not homed, while moving, and (with a servo) while the arm is retracted.
+#if PIN_MAGNET >= 0
 #define MAGNET_MAX_ON_MS 15000
 #define MAGNET_MIN_OFF_MS 500
+#else
+#define MAGNET_MAX_ON_MS 0
+#define MAGNET_MIN_OFF_MS 0
+#endif
 
 // The servo arm and the pieces. With the arm extended the magnet is at the board top, so a travel
 // at full speed would drag whatever piece it passes under and could rip the arm: G0, GOTO, CARRY's
@@ -168,12 +205,16 @@
 // caps every feed rate (at 40 steps/mm, 20 kHz is 500 mm/s, far above MAX_SPEED_MM_S: the cap
 // matters if someone sets 1/32 microstepping, a tiny pulley or a large $100). It applies on top of
 // $110 and $111. $120 can lower the acceleration or raise it back up to MAX_ACCEL_MM_S2, never past it.
+// The step pulse ($0, STEP_PULSE_US) lowers the cap further, to 1e6 / (2 x pulse) steps/s.
 #define MAX_STEP_HZ 20000.0f
 
-// $100 (steps per mm) is accepted in this range, for a driver whose microstep pins are not what
-// MICROSTEPS assumes: 40 at 1/8, 5 at full steps (pins floating), 80 at 1/16, 160 at 1/32.
+// $100 (steps per mm) is accepted in this range: 4.88 at full steps (pins floating, 41 mm per
+// turn), 39 at 1/8, 78 at 1/16, 156 at 1/32. $130 / $131 (travel) are accepted from MIN_TRAVEL_MM
+// to MAX_TRAVEL_MM.
 #define MIN_STEPS_PER_MM 1.0f
 #define MAX_STEPS_PER_MM 400.0f
+#define MIN_TRAVEL_MM 10.0f
+#define MAX_TRAVEL_MM 1000.0f
 
 // A move that takes far longer than planned means the loop is starved or a program is stuck; the
 // motors would sit at full current in the meantime. Every move gets a time budget of
@@ -210,4 +251,4 @@
 #else
 #define SERIAL_LINE_MAX 192
 #endif
-#define FIRMWARE_VERSION "duen-gantry 0.4"
+#define FIRMWARE_VERSION "duen-gantry 0.7.2"

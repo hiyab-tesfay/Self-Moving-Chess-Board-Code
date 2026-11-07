@@ -1,6 +1,7 @@
 # Gantry: moving the pieces
 
-The board moves pieces with an electromagnet under the top, carried by an XY gantry built from
+The board moves pieces with a **permanent magnet** under the top (no electromagnet on this build:
+the servo lifting the magnet to the board is what grabs a piece), carried by an XY gantry built from
 the "2D Plotter V2" design in the team Drive (2020 rails, a 2040 beam that carries the magnet,
 GT2 belts, V-wheels, two NEMA 17s on DRV8825 drivers) and an MG90 servo arm that lifts the
 magnet to the board for a carry and drops it clear afterwards. This folder is the software for
@@ -26,14 +27,31 @@ Motor: 1.8° NEMA 17, 200 full steps per turn, 13 N·cm (18.4 oz·in) short body
 phase (the Drive parts list; the Amazon listing was not readable, so confirm the current on the
 motor's label). Driver: DRV8825. Belt: GT2, 2 mm pitch, on the **20-tooth pulley** that the
 plotter design specifies (`GT2 20 Teeth pulley` in `2D Plotter V2.step`); `PULLEY_TEETH` in
-`config.h` if a different one is fitted.
+`config.h` if a different one is fitted. On the bench one turn moves the carriage 41 mm, not
+40, so `config.h` and `gantry_config.json` count from the measured `MM_PER_TURN` / `mm_per_turn`.
+With the 1500 µs step pulse the top speed on full steps is 1e6 / 3000 / 4.878 = **68 mm/s**.
+
+**Where the board is (Sketch 5, measured 2026-11-06).** Sketch 5 of the Fusion design is the
+470 × 420 mm rectangle the magnet's centre can travel ("Sketch 5 traces the center of the magnet
+around the perimeter of where the magnet can move"), so its bottom-left corner is home and its
+millimetres are what the board counts. Measured from the photo of the sketch: the 8 ranks fill
+the full 420 mm height, so the squares are **52.5 mm**; the files are centred across with 25 mm
+each side, so **a1's centre is at (51.25, 26.25)** and h8's at (418.75, 393.75); a docking column
+of 17 circles (24.7 mm apart) sits on each side edge, **x 0 and x 470**, of which every other
+circle is a slot (the widest piece is 27 mm), 9 a side from y 12.35. The magnet sits 60 mm right
+of the Y gantry's left edge, but Sketch 5 already traces the magnet, so that offset is not added
+again (`magnet_home_mm: [0, 0]`; adding it put every square more than a square to the left).
+Both docking columns are in reach. If the board check shows every square off by the same
+amount, the console's "a1 is here" moves `magnet_home_mm` and nothing else; if the far squares
+drift, it is mm per turn or the square size (`square_mm` takes [x, y]).
 
 | Quantity | Formula | Value |
 | --- | ---: | ---: |
-| mm per motor turn | teeth × pitch = 20 × 2 | 40 mm |
-| steps per mm at 1/8 microstep | 200 × 8 / 40 | **40** |
-| steps per mm at 1/16 | 200 × 16 / 40 | 80 |
-| resolution at 1/8 | 1 / 40 | 0.025 mm |
+| mm per motor turn, on paper | teeth × pitch = 20 × 2 | 40 mm |
+| mm per motor turn, **measured on the bench** (2026-11-06, X and Y) | | **41 mm** |
+| steps per mm on full steps (the bench: M0–M2 not wired) | 200 × 1 / 41 | **4.878** (`$100`, firmware 0.7's default) |
+| steps per mm at 1/8 microstep, once the pins are wired | 200 × 8 / 41 | 39.02 |
+| resolution on full steps | 41 / 200 | 0.205 mm |
 | travel speed at power-up (`DEFAULT_SPEED_MM_S`, `$110`) | | 60 mm/s = 90 rpm = 2.4 kHz steps |
 | speed with a piece at power-up (`CARRY_SPEED_MM_S`, `$111`) | | 40 mm/s |
 | acceleration at power-up (`DEFAULT_ACCEL_MM_S2`, `$120`) | | 400 mm/s² |
@@ -62,19 +80,21 @@ and still fine on an AVR; 1/16 doubles the step rate for no gain the belt can sh
 
 DRV8825 setup: current limit `Vref = I / 2`, so **0.45 V** for a 0.9 A setting (0.35 V for
 0.7 A); measure the motor's rated current off its label first. Microstep jumpers M0 M1 M2:
-1/8 = on on off, 1/16 = off off on, 1/32 = on on on. The 12 V 2 A supply covers both motors
-plus the electromagnet; the servo takes 5 V (see Servo).
+1/8 = on on off, 1/16 = off off on, 1/32 = on on on. The 12 V 2 A supply covers both motors;
+the servo takes 5 V of its own (see Servo).
 
 ## Wiring
 
 Pins are in `firmware/gantry_firmware/config.h`. The default block is the ESP32 Dev Module
-with the same motor pins as `Prototype_Program/Prototype_Program.ino`:
+with the same motor pins as `Prototype_Program/Prototype_Program.ino` (firmware 0.5 had them
+swapped, after Zain's 16d7e82; on the bench that put the axes the wrong way round, so 0.6 is back
+to this):
 
 | Signal | ESP32 pin | Notes |
 | --- | --- | --- |
-| X DIR / STEP / EN | 18 / 19 / 21 | motor 1 in the prototype |
+| X DIR / STEP / EN | 18 / 19 / 21 | motor 1 in the prototype; one turn = 40 mm |
 | Y DIR / STEP / EN | 22 / 25 / 26 | motor 2 in the prototype |
-| magnet | 32 | gate of a logic-level MOSFET (or a relay module) switching the 12 V electromagnet; flyback diode across the coil |
+| magnet | none (`PIN_MAGNET -1`) | a permanent magnet lifted by the servo; 0.7.1 and earlier switched GPIO 32 for an electromagnet (gate of a MOSFET, flyback diode across the coil) |
 | servo signal | 12 | the MG90's signal wire; its power comes from 5 V, not the ESP32. The prototype sketch has no servo pin; 12 is the bench wiring of 2026-11-05 (LEDC-capable; it is a strapping pin, so the servo must not pull it high at power-up); set `PIN_SERVO -1` without a servo |
 | X / Y homing switch (optional) | 34 / 35 | to ground, with an external pull-up (34/35 have none); `-1` without switches |
 
@@ -100,23 +120,25 @@ the bench, not from this file.
   spot; this is the most common way to lose one. Logic off, motor supply off, then move wires.
 - **Heat sinks on both drivers**, stuck on the chip, with air around them. At 0.9 A they run
   warm; at 1 A without a sink they thermal-cycle and skip steps.
-- **The electromagnet is switched by a logic-level MOSFET** (gate to the ESP32 pin through
-  about 100 Ω, a 10 kΩ pull-down so it is off while the ESP32 boots) **with a flyback diode**
-  across the coil, cathode to +12 V. It is never driven straight from a GPIO: the coil draws
-  far more than a pin can give and its kick-back on switch-off would destroy the pin.
+- **If an electromagnet is ever fitted** (`PIN_MAGNET` set again), it is switched by a
+  logic-level MOSFET (gate to the ESP32 pin through about 100 Ω, a 10 kΩ pull-down so it is off
+  while the ESP32 boots) with a flyback diode across the coil, cathode to +12 V, never straight
+  from a GPIO. This build has none: a permanent magnet, lifted by the servo.
 - **ESP32 GPIO is 3.3 V only.** Nothing at 5 V goes into a pin: not a 5 V endstop board, not a
   servo's feedback, not a 5 V logic signal. The DRV8825 and MG90 inputs accept 3.3 V signals.
 - **One common ground.** The 12 V supply's ground, the 5 V rail's ground, the ESP32's GND and
   the drivers' logic GND are tied together; a floating ground is what makes steppers hum and
   pins read noise.
 - **A fuse on the motor rail**, 12 V (or 24 V if the supply changes): 3 A fast-blow for two
-  motors at 0.9 A plus the magnet (*measure* the magnet's current: a 12 V electromagnet of this
-  size draws 0.3–1 A).
+  motors at 0.9 A.
 - **Power-on order:** USB / logic first, then the motor supply, so the drivers see their enable
   pins held high (disabled) before they get motor power. Off in the other order. The firmware's
   safe-at-boot state (next section) is what makes this order safe.
 - **The servo's 5 V** comes from the supply's 5 V rail or a small BEC, never from the ESP32's
-  3.3 V pin or its 5 V USB pin: an MG90 stalls at several hundred mA and would reset the board.
+  3.3 V pin or its 5 V / VIN pin: an MG90 stalls at most of an amp. On 2026-11-06 the ESP32 died
+  right after two real carries: the reply garbled the moment the arm went up and USB dropped
+  seconds after it went down. The servo (its supply, and angles never set on the arm, so it may
+  have been pushing at a stop) is the likeliest cause; check both before a new ESP32 goes in.
 
 ## Safety policies
 
@@ -125,9 +147,9 @@ on what each protects. The Pi side adds its own on top.
 
 | Policy | Default | What it protects | What happens |
 | --- | ---: | --- | --- |
-| `MAGNET_MAX_ON_MS` | 15 000 | the electromagnet coil (a held-on coil cooks) | after this long on, the magnet switches off, the arm drops, the board stops: alarm `magnet on too long`. A `CARRY` whose planned magnet time would pass it is refused before it starts (`error:10`), so the rule never drops a piece in a lane |
-| `MAGNET_MIN_OFF_MS` | 500 | the coil's duty cycle | `M3` within this of the last `M5` is refused (`error:9`); inside a sequence the next pick-up waits instead |
-| M3 preconditions | | a magnet that pulls nothing only heats | `M3` is refused while not homed (`error:8`), while moving (`error:3`), with the arm down (`error:12`) |
+| `MAGNET_MAX_ON_MS` | 0 (off: permanent magnet); 15 000 with an electromagnet | the electromagnet coil (a held-on coil cooks) | after this long on, the magnet switches off, the arm drops, the board stops: alarm `magnet on too long`. A `CARRY` whose planned magnet time would pass it is refused before it starts (`error:10`), so the rule never drops a piece in a lane |
+| `MAGNET_MIN_OFF_MS` | 0 (off: permanent magnet); 500 with an electromagnet | the coil's duty cycle | `M3` within this of the last `M5` is refused (`error:9`); inside a sequence the next pick-up waits instead |
+| M3 preconditions | | a carry only starts with the arm up at a piece (with a permanent magnet `M3`/`M5` only mark holding a piece) | `M3` is refused while not homed (`error:8`), while moving (`error:3`), with the arm down (`error:12`) |
 | `IDLE_DISABLE_MS` | 30 000 | motors and DRV8825s (holding current is pure heat) | drivers disabled at boot and after this long with no motion; re-enabled for the next move |
 | `ENABLE_SETTLE_MS` | 5 | the DRV8825 charge pump | wait between enabling the drivers and the first step |
 | `MAX_STEP_HZ` | 20 000 | the DRV8825's 1.9 µs minimum pulse, the ESP32 loop | every feed is capped so no motor is asked for more steps per second, whatever `$110`, `$111` and `$100` say |
@@ -150,17 +172,22 @@ magnet is never left on and the arm never left up.
 
 ## Servo
 
-The MG90 on the carriage carries the electromagnet on a short arm: **extended**, the magnet
-touches the underside of the board top and can take a piece; **retracted**, it hangs clear so
+The MG90 on the carriage carries the permanent magnet on a short arm: **extended**, the magnet
+sits just under the board top and takes the piece above it; **retracted**, it hangs clear so
 the carriage can travel at full speed without dragging whatever it passes under. The firmware
 drives it on `PIN_SERVO` with a 50 Hz pulse of 500–2500 µs (an LEDC channel on the ESP32, the
-Servo library on AVR).
+Servo library on AVR). Since 0.7.2 (`servo_arm.h`) the pulse **sweeps** to a new angle at
+360°/s (90° in 0.25 s) instead of jumping, so the servo never starts at full current, and the
+arm is held at both ends (a limp arm could be pulled up toward the pieces).
 
 - `SERVO_EXTEND_DEG` / `SERVO_RETRACT_DEG` (defaults 90 / 0) are placeholders **to set on the
-  real arm**: with the board homed, type `M7` and `M8` in the serial monitor and adjust until
-  extended just touches the board top and retracted clears the pull on the thickest piece.
-  `SERVO_SETTLE_MS` (300) is how long the firmware gives the arm to arrive before the magnet
-  switches or the carriage moves.
+  real arm**: with the board homed, send `$S=up,down` (0.7.2; `$S=up,down,settle` sets the settle
+  ms too) from the console's command box, then `M7` and `M8`, and adjust until extended stops
+  1–2 mm under the board top and retracted clears the pull on the thickest piece, **neither
+  pressing against anything**: a servo held against a stop stalls at most of an amp. `$S` is
+  refused with the arm up; a reset goes back to `config.h`, so put the numbers that work there.
+  `SERVO_SETTLE_MS` (400) is how long the firmware gives the arm to arrive before the carriage
+  moves.
 - Inside a `CARRY`: travel to the piece → arm up (`M7`) → settle → magnet on (`M3`) → grab
   dwell → the carry moves at carry speed → magnet off (`M5`) → release dwell → arm down
   (`M8`) → settle. `$T` exercises the arm on e4 and in both of its carries. Status shows
@@ -196,14 +223,14 @@ or open `firmware/gantry_firmware/gantry_firmware.ino` in the Arduino IDE (the `
 the folder come along), board **ESP32 Dev Module**, and upload. No library is needed on the
 ESP32 (the servo uses the core's LEDC). The sketch uses the plain Arduino API (`pinMode`,
 `digitalWrite`, `micros`, `Serial`) and the motion and protocol code is the same that runs in
-the laptop tests. Firmware 0.4 compiles to **289 KB of flash and 23 KB of RAM** on the ESP32
+the laptop tests. Firmware 0.7.2 compiles to **290 KB of flash and 23 KB of RAM** on the ESP32
 Dev Module. For a CNC shield it compiles for an **Arduino Mega 2560** (`arduino:avr:mega`,
 `-DGANTRY_CNC_SHIELD`, the `Servo` library installed: 31 KB flash, 3.0 KB RAM); an Uno's 2 KB
 of RAM no longer fits it. On the ESP32 the serial port gets a 512-byte transmit buffer, so a
 reply is queued and the step loop never waits for the UART.
 
 Open the serial monitor at **115200** with "Newline" line endings: half a second after reset it
-says `[duen-gantry 0.4 ready: $X to unlock, $H to home, $T to self-test, CARRY e2 e4 to move a
+says `[duen-gantry 0.7.2 ready: $X to unlock, $H to home, $T to self-test, CARRY e2 e4 to move a
 piece]`. `SELFTEST_AT_BOOT` (off by default) makes the sketch home itself five seconds after
 power-up and then run `$T`, with nothing attached to the USB port; use it for a bench test, not
 on a board with pieces on it.
@@ -231,13 +258,13 @@ no pieces on the board:
 5. **Travel.** `G0 X400`, then `G0 X450`, then smaller steps until the carriage is 3–5 mm
    from the far end; that X is `MAX_X_MM`. Same for Y. Put them in `config.h` and in
    `travel_mm` in `gantry_config.json` if they differ from 470 × 420.
-6. **Servo.** `M7` must lift the magnet to the board top, `M8` must drop it clear; adjust
-   `SERVO_EXTEND_DEG` / `SERVO_RETRACT_DEG` until they do. With the arm up, `G0 X100` is
+6. **Servo.** `M7` must lift the magnet to just under the board top, `M8` must drop it clear,
+   neither pushing against a stop; find the angles with `$S=up,down`, then put them in
+   `SERVO_EXTEND_DEG` / `SERVO_RETRACT_DEG`. With the arm up, `G0 X100` is
    refused (`servo arm up: M8 first`): that is intended.
-7. **Magnet.** With the board homed and the arm up (`M7`), `M3` must pull a piece on the board
-   top; `M5` must let it go and drop the arm. If `M3` does nothing, check `PIN_MAGNET` and the
-   MOSFET; if it is on when it should be off, flip `MAGNET_ACTIVE_HIGH`. Left on, it switches
-   itself off after 15 s with the alarm `magnet on too long`; `$X` clears that.
+7. **Magnet.** With the board homed, a piece on e4 and the arm up (`M7`), `GOTO`-ing away at
+   carry speed must drag the piece along; `M8` (or `M5`, which also drops the arm) must leave
+   it behind. With the permanent magnet `M3` drives no pin.
 8. **Squares.** `GOTO e4`, `GOTO a1`, `GOTO h8`: the magnet should sit under those centres. If
    not, calibrate from the Pi (next section) rather than editing `config.h`: the Pi sends its
    numbers with `$B=` at every connection.
@@ -253,6 +280,12 @@ A motor that stops and hums, buzzes without turning, or loses its place is short
 what it is asked. The motion settings change over serial (RAM only, see The protocol), so each
 check below needs no reflash.
 
+- **Hums but never moves, even very slowly** (`G1 Y1 F6` is 4 steps a second): the steps are not
+  reaching the driver. Firmware 0.4 held each STEP pulse high for 3 µs; on the bench that never
+  turned either motor, while Zain's sketch with 1500 µs pulses moved both. 0.5 boots with 1500 µs
+  (`$0`). Once both motors move, try shorter pulses (`$0=500`, `$0=100`) for more speed; the
+  shortest that still moves both is the one to keep (`STEP_PULSE_US` in `config.h`). At 1500 µs
+  the step rate tops out at 333/s: 66 mm/s on full steps but only 8 mm/s at 1/8 steps.
 - **Slow it down first.** `$120=200`, `$110=30`, `$111=20`, and try the same move. If it runs,
   raise them a step at a time until it stalls and settle well below that, then put the values
   in `DEFAULT_SPEED_MM_S`, `CARRY_SPEED_MM_S` and `DEFAULT_ACCEL_MM_S2` in `config.h` (a reset
@@ -285,7 +318,8 @@ Two levels, one line per command, every command answered `ok` or `error:<code> <
 
 | Command | Does |
 | --- | --- |
-| `$B=50,60,35,17.5,452.5,17.5,35` | square size, a1 centre (x, y), White's and Black's docking-lane x, first slot y, slot pitch. The Pi sends it from `gantry_config.json` on every connection; `$B=50,60,35` sets the squares only |
+| `$B=52.5,51.25,26.25,0,470,12.35,49.41` | square size, a1 centre (x, y), White's and Black's docking-column x, first slot y, slot pitch, in the board's millimetres (Sketch 5). The Pi sends it from `gantry_config.json` on every connection; `$B=52.5,51.25,26.25` sets the squares only; an eighth number (0.7) is the square size along Y when it differs from X's |
+| `$S=80,10` | (0.7.2) the servo arm's up and down angles in degrees, `$S=80,10,400` with the settle time in ms: found on the real arm without a reflash; refused with the arm up (`error:11`); the arm goes to the new down angle at once; a reset goes back to `config.h`. `$$` shows them |
 | `GOTO e4` | move the empty magnet to a place: a square, a docking slot (`w:3`, `b:0`), or `x,y` in squares (`5.5,0.5` is the lane crossing between e1, f1, e2 and f2; `-0.5,4` the lane beside the a file) |
 | `CARRY g1 f3` | the whole carry as one sequence (see Servo): travel, arm up, magnet on, grab, the moves at carry speed, magnet off, release, arm down. Without via-points the board routes itself: straight when the two places share a file, rank or diagonal, otherwise out to a corner, along the lanes and in from a corner |
 | `CARRY g1 f3 5.5,0.5 5.5,1.5` | the same carry through the via-points the Pi chose. Via-points are places too; a slot name (`b:1`) is fine |
@@ -307,14 +341,16 @@ mid-program). `$H` home (magnet off, arm down first), `$X` unlock (magnet off, a
 and the arm), `$$` settings (the values in use now, `$B`, `$G` guards and `$S` servo included),
 `$I` version.
 
-**Motion settings**, firmware 0.4, for finding and curing a stall without reflashing:
+**Motion settings**, firmware 0.4 (`$0` from 0.5), for finding and curing a stall without reflashing:
 
 | Command | Sets | At power-up | Range |
 | --- | --- | ---: | ---: |
+| `$0=<us>` | how long each STEP pulse stays high; the step rate is capped at 1e6 / (2 × pulse), so the low time is at least as long. On the bench 3 µs pulses (0.4) never reached the drivers, so both motors hummed without turning; Zain's sketch, at 1500 µs, moves them | 1500 | 2–5000 |
 | `$110=<mm/s>` | travel speed: `G0`, `GOTO`, a `CARRY`'s travel to the piece, the top of `G1` | 60 | 1–120 |
 | `$111=<mm/s>` | carry speed: a `CARRY`'s moves with the piece, and the fastest `G1` allowed with the arm up | 40 | 1–120 |
 | `$120=<mm/s²>` | acceleration of every move | 400 | 1–800 |
-| `$100=<steps/mm>` | steps per mm, for a driver whose microstep pins are not at 1/8 (5 at full steps). Forgets the position: alarm `not homed` until `$H` or `$HM` | 40 | 1–400 |
+| `$100=<steps/mm>` | steps per mm, both axes. Forgets the position: alarm `not homed` until `$H` or `$HM` | 4.87805 (200 / 41, full steps) | 1–400 |
+| `$130=<mm>`, `$131=<mm>` | the soft limits along X and Y (0.7). The Pi and the console send them from `travel_mm` less `magnet_home_mm` | 470, 420 | 10–1000 |
 
 Each answers `ok`; `error:3 busy` while anything moves or a program (a `GOTO`, `CARRY`, `$T` or
 `G4`) runs; `error:2 bad number`; or `error:13 $110 must be 1..120`, naming the range of the
@@ -322,11 +358,10 @@ setting sent. They are kept in **RAM only**: a reset or power cycle brings back 
 values (`DEFAULT_SPEED_MM_S`, `CARRY_SPEED_MM_S`, `DEFAULT_ACCEL_MM_S2`, `STEPS_PER_MM`), so
 put the numbers that work there. The upper ends are the compiled ceilings `MAX_SPEED_MM_S` and
 `MAX_ACCEL_MM_S2`; nothing goes past them. Homing keeps its own 25 mm/s (less if `$110` is
-lower), and `MAX_STEP_HZ` caps every feed on top (at `$100=400` that is 50 mm/s). A `CARRY`'s
-magnet check (`error:10`) plans with the `$111` and `$120` in use: at 40 mm/s every straight
-carry fits in the 15 s (a1–h8 keeps the magnet on about 13 s), but the longest routes through
-the lanes (a1 to h7 and the like, and the far docking slots) do not; at `$111=50` every
-square-to-square carry fits. The numbers follow GRBL's, the units and meanings do not: GRBL's
+lower), and `MAX_STEP_HZ` caps every feed on top (at `$100=400` that is 50 mm/s). With an
+electromagnet (`MAGNET_MAX_ON_MS` 15 s) a `CARRY`'s magnet check (`error:10`) plans with the
+`$111` and `$120` in use and refused the longest routes through the lanes at 40 mm/s; with the
+permanent magnet there is no such check. The numbers follow GRBL's, the units and meanings do not: GRBL's
 `$110`/`$111` are X and Y rates in mm/min and are saved; here they are travel and carry speed in
 mm/s and are not.
 
@@ -345,13 +380,11 @@ bash gantry/console/console.sh        # opens http://127.0.0.1:8788; pick the ES
 bash gantry/console/console.sh sim    # the pretend board
 ```
 
-- **Captures go to the right.** Unlike the touch screen and the website (where a person takes
+- **Captures go to a docking lane.** Unlike the touch screen and the website (where a person takes
   captured pieces off), the console runs the planner in dock mode (`Layout(captures="dock")`):
-  the taken piece is carried into the docking lane beside the h file, into the free slot with
-  the shortest clear way (usually the one level with its rank). The left side is out of reach:
-  the magnet sits on the right of the Y carriage, so the left lane and the edge lane beside the
-  a file are never used (`docking_lanes`, `reach_mm` in the config; the board drawing hatches
-  what the magnet cannot reach). A promotion brings a docked queen (or rook, bishop, knight)
+  a taken white piece goes to the left column (x 0), a black one to the right (x 470), into the
+  free slot with the shortest clear way (usually the one level with its rank); a full column
+  overflows into the other. Only columns inside the magnet's reach are used (both, on Sketch 5). A promotion brings a docked queen (or rook, bishop, knight)
   back out when there is one. When the path finder finds no way for that plan (a crowded
   corner), the page says so and falls back: the promotion without the docked spare (the pawn
   goes to the square, a note asks for the swap), then the captured piece taken off by the
@@ -360,19 +393,29 @@ bash gantry/console/console.sh sim    # the pretend board
   Set home here (`$HM`), or Bump home (`$H`).
 - **Moves are plain motion commands** (G1, M7, M3, M5, M8), not `CARRY`, so the page's travel
   and carry speeds work on firmware 0.3 too; 0.4 also takes the page's acceleration (`$120`). A
-  carry that would keep the magnet on longer than the page's budget (12 s; the board cuts at
-  15 s) sets the piece down on its clear path and picks it up again.
-- **Scale, per axis.** Real millimetres per millimetre the board counts, for X and for Y. The
-  distance check measures each: about 8 means that DRV8825's microstep pins are floating (full
-  steps; on the bench the Y driver is, so Y hit the frame end after ~55 counted mm). The page
-  divides every position and speed by it, so the board can be used before the pins are fixed.
-  Each axis also has its own top speed (the X axis drags the heavy beam and stalls differently);
-  a diagonal slows down so neither axis passes its own.
+  piece is held for the whole carry: a permanent magnet needs no rests. Only on firmware that
+  cuts the magnet (`$G` above 0: 0.7.1 and earlier) does a longer carry set the piece down on its
+  clear path and pick it up again, 3 s inside that limit ("Rest the piece every" on the page
+  adds a limit of its own).
+- **Real millimetres.** On connecting the page sends `$100` (steps/mm from `mm_per_turn`,
+  41 mm on the bench), `$130` and `$131` (the travel) when the board has other values; a new
+  `$100` means home again. One motor turn (`X/Y: one turn +/−`) sends exactly one turn's steps
+  (200 on full steps): measure how far the carriage went and the page gives mm per turn, with a
+  button to save it into `gantry_config.json`. `+` is away from home (X toward the h-file, Y
+  toward rank 8), `−` toward it. It has no limits and needs no home, since someone is at the
+  gantry running it: past the board's own soft limits the page relabels the spot with `G92` for
+  the turn and puts the true count back afterwards (also after Stop). The distance check (up to
+  400 mm) measures the same with a ruler. Each axis has its own top speed (the X axis drags the
+  heavy beam and stalls differently); a diagonal slows down so neither axis passes its own.
+- **The board (Sketch 5).** Check the board visits a1, h1, h8, a8 and the first and last slot
+  of each usable lane, stopping at each so a person can see the magnet is centred. "a1 is
+  here" (steer the magnet over a1 first) shifts the whole sketch by the difference
+  (`magnet_home_mm`) and saves it.
 - **Overshoot.** A carried piece trails the magnet by 5–6 mm (the MuJoCo model; the path
   simulation's leash model), so every carry would stop that far short of the square. The page
   takes the magnet 5 mm past the last point along the last leg and back (`Overshoot`, 0 to
   turn it off); never outside the travel or the magnet's reach.
-- **Stall checks:** the distance check, a speed ladder (out and back at rising speeds; press It
+- **Stall checks:** one motor turn, the distance check, a speed ladder (out and back at rising speeds; press It
   stalled and the page suggests 70 % of the last clean speed for travel and 60 % for carries),
   a motors-off push test for binding, and a count of the board restarting by itself (supply
   dips).
@@ -385,20 +428,25 @@ Settings are saved in `console/console_settings.json` on this computer only. Tes
 
 ## The Pi side
 
-`pi/gantry_config.json` says where the squares are, in mm from the origin. The origin is the
-one the mechanical team recommends: the magnet's centre at the **bottom-left corner of
-sketch 5** in the Fusion design, the sketch that traces where the magnet can move. That
-rectangle is **470 × 420 mm**, which is the travel and the firmware's soft limits
-(`MAX_X_MM`, `MAX_Y_MM`). Files run along +X, ranks along +Y.
+`pi/gantry_config.json` says where the squares are, in **Sketch 5's millimetres**, from the
+sketch's bottom-left corner (the Fusion design's sketch of where the magnet's centre moves, 470 ×
+420 mm), which is home. Files run along +X, ranks along +Y. `magnet_home_mm` ([0, 0]) is where the
+magnet's centre sits on the sketch at home; `pi/board_layout.py` subtracts it, so a frame whose
+home turns out elsewhere needs only that number changed.
+
+- `mm_per_turn` ([41, 41], measured), `full_steps_per_turn` (200), `microsteps` (1 while the
+  DRV8825 pins are not wired): give `$100`.
 
 - `a1_center_mm`: the magnet's position when it is under the centre of a1.
 - `square_mm`: the pitch of the squares.
 - `park_columns_mm`: the docking lanes beside the board, White's on the left (`w`), Black's on
   the right (`b`); `park_rows_mm` lists the slot centres along them. In the sketch each side has
   one lane of twelve circles at a 35 mm pitch, so the file has one column per side with twelve
-  rows. The driver and the firmware understand them, but nothing is sent there in this version
-  (see Captured pieces); they are kept for a later one.
-- `travel_mm`: the soft limits, the same as `MAX_X_MM`/`MAX_Y_MM` in the firmware.
+  rows. `docking_lanes` says which may be used; one outside the magnet's reach is left out with
+  a warning. The bench console docks captures there; the touch screen and the website do not
+  yet (see Captured pieces).
+- `travel_mm`: the sketch's far corner; less `magnet_home_mm` it is the soft limits (`$130`,
+  `$131`, `MAX_X_MM`/`MAX_Y_MM` in the firmware: 470 × 420).
 - `piece_sizes_mm`, `piece_mm`, `clearance_mm`, `lane_clearance_mm`: for the path finder.
 - `servo`, `servo_settle_s`: whether the board has the arm, and how long it takes (only for
   the time estimate; the board does the sequencing).
@@ -511,9 +559,11 @@ at the frame, raise `lane_clearance_mm`; if the squares turn out bigger, nothing
 
 Options in `gantry_config.json`, each measured by the path simulation below:
 
-- `docking_lanes: ["b"]` and `reach_mm: [50, 0, 470, 420]`: only the right lane holds pieces, and
-  nothing left of x = 50 mm is used (the magnet sits on the right of the Y carriage). Any x_min
-  from 39 to 60 mm gives the same paths; the a-file centres (x = 60) must be reachable.
+- `docking_lanes: ["w", "b"]`: both docking columns hold pieces (Sketch 5 puts them on the
+  travel's side edges). 80 random capture-heavy games on this layout (`path_sim.py --variant
+  "as configured"`, 2026-11-06): 6230 moves, none failed, no capture left to the person, closest
+  planned gap 1.25 mm. (Before 2026-11-06 the config was `docking_lanes: ["b"]` and
+  `reach_mm: [50, 0, 470, 420]`; the table below is from then.)
 - `path_smoothing: true`: after A*, straight shortcuts over the grid path wherever the open
   clearance (3 mm) holds. About half the corners go (every corner is a stop on the gantry); a
   shortcut that is one leg the firmware would take round its own corner gets its midpoint as a
@@ -643,9 +693,9 @@ still works.
 ## Testing without hardware
 
 ```sh
-make -C gantry/firmware/host test                                   # motion, protocol, servo, guard and settings checks: 281 of them
+make -C gantry/firmware/host test                                   # motion, protocol, servo, guard and settings checks: 300 of them
 cd gantry/pi && python3 -m unittest discover -s . -p 'test_*.py'    # paths 19, carry plan 26, driver 32
-cd gantry/console && python3 -m unittest test_console                  # the bench console, 12
+cd gantry/console && python3 -m unittest test_console                  # the bench console, 16
 cd ~/chess-board-pi-only && CHESS_GANTRY_PORT=sim CHESS_GANTRY_DIR=~/chess-gantry/gantry/pi .venv/bin/python -m unittest test.test_pi_gantry
 ```
 

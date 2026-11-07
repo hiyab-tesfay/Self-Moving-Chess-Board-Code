@@ -11,6 +11,7 @@
 #include "config.h"
 #include "motion.h"
 #include "protocol.h"
+#include "servo_arm.h"
 
 // ----------------------------------------------------------------------------- the servo pulse
 // 50 Hz, 500-2500 us. ESP32: an LEDC channel, no library. AVR: the Servo library that comes with
@@ -27,10 +28,8 @@ static void servo_begin() {
   ledcAttachPin(PIN_SERVO, SERVO_LEDC_CHANNEL);
 #endif
 }
-static void servo_write(int angle) {
-  if (angle < 0) angle = 0;
-  if (angle > 180) angle = 180;
-  uint32_t pulse_us = SERVO_MIN_PULSE_US + (uint32_t)angle * (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US) / 180UL;
+// pulse_us 0: no pulses at all, and an MG90 without pulses lets go (it draws next to nothing).
+static void servo_pulse_us(uint32_t pulse_us) {
   uint32_t duty = (uint32_t)(((uint64_t)pulse_us << SERVO_LEDC_BITS) / 20000ULL);   // 20 ms period
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   ledcWrite(PIN_SERVO, duty);
@@ -41,20 +40,29 @@ static void servo_write(int angle) {
 #else
 #include <Servo.h>
 static Servo lift;
-static void servo_begin() { lift.attach(PIN_SERVO, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US); }
-static void servo_write(int angle) { lift.write(angle); }
+static void servo_begin() {}
+static void servo_pulse_us(uint32_t pulse_us) {
+  if (!pulse_us) { lift.detach(); return; }
+  if (!lift.attached()) lift.attach(PIN_SERVO, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+  lift.writeMicroseconds(pulse_us);
+}
 #endif
+
+static gantry::ServoArm arm(servo_pulse_us, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, SERVO_SWEEP_DEG_PER_S,
+                            SERVO_RELEASE_DOWN_MS, SERVO_RETRACT_DEG);   // servo_arm.h: sweeps, and lets go when down
 #endif
 
 // ----------------------------------------------------------------------------- the pins
 struct BoardHal : gantry::Hal {
+  uint32_t pulse_us = STEP_PULSE_US;   // $0 changes it (Motion caps the step rate to match)
+  void set_step_pulse_us(uint32_t us) override { pulse_us = us ? us : STEP_PULSE_US; }
   void set_dir(int motor, bool positive) override {
     digitalWrite(motor == 0 ? PIN_X_DIR : PIN_Y_DIR, positive ? HIGH : LOW);
   }
   void step(uint8_t mask) override {
     if (mask & 1) digitalWrite(PIN_X_STEP, HIGH);
     if (mask & 2) digitalWrite(PIN_Y_STEP, HIGH);
-    delayMicroseconds(STEP_PULSE_US);
+    delayMicroseconds(pulse_us);
     if (mask & 1) digitalWrite(PIN_X_STEP, LOW);
     if (mask & 2) digitalWrite(PIN_Y_STEP, LOW);
   }
@@ -73,13 +81,15 @@ struct BoardHal : gantry::Hal {
 struct BoardPeripherals : gantry::Peripherals {
   bool on = false;
   void magnet(bool want) override {
-    on = want;
+    on = want;   // with a permanent magnet (PIN_MAGNET -1) this only records "holding a piece"
+#if PIN_MAGNET >= 0
     digitalWrite(PIN_MAGNET, (want == MAGNET_ACTIVE_HIGH) ? HIGH : LOW);
+#endif
   }
   bool magnet_on() override { return on; }
   void servo(int angle) override {
 #if PIN_SERVO >= 0
-    servo_write(angle);
+    arm.go(angle, micros());
 #else
     (void)angle;
 #endif
@@ -110,9 +120,10 @@ static const gantry::Settings SETTINGS = {
     ENABLE_SETTLE_MS,
     MOVE_BUDGET_FACTOR,
     MOVE_BUDGET_MARGIN_MS,
+    STEP_PULSE_US,
 };
 
-static const gantry::BoardGeometry BOARD = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS};
+static const gantry::BoardGeometry BOARD = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS, 0.0f};
 
 static BoardHal hal;
 static BoardPeripherals peripherals;
@@ -155,14 +166,15 @@ static void run_until_still() {
 void setup() {
   // 1. Every output safe before anything else: drivers disabled (EN high), magnet off, arm down.
   const int outputs[] = {PIN_X_DIR, PIN_X_STEP, PIN_X_EN, PIN_Y_DIR, PIN_Y_STEP, PIN_Y_EN, PIN_MAGNET};
-  for (int pin : outputs) pinMode(pin, OUTPUT);
+  for (int pin : outputs)
+    if (pin >= 0) pinMode(pin, OUTPUT);   // PIN_MAGNET -1: a permanent magnet, no pin
   digitalWrite(PIN_X_STEP, LOW);
   digitalWrite(PIN_Y_STEP, LOW);
   hal.enable_motors(false);
   peripherals.magnet(false);
 #if PIN_SERVO >= 0
   servo_begin();
-  servo_write(SERVO_RETRACT_DEG);
+  arm.start(SERVO_RETRACT_DEG, micros());   // down, then let go after SERVO_RELEASE_DOWN_MS
 #endif
   set_microstep_pins();
   if (PIN_X_MIN >= 0) pinMode(PIN_X_MIN, INPUT_PULLUP);
@@ -201,6 +213,9 @@ void setup() {
 void loop() {
   motion.run();
   protocol.tick(micros());
+#if PIN_SERVO >= 0
+  arm.tick(micros(), !protocol.servo_up());
+#endif
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {

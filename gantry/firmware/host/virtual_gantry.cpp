@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
   gantry::Settings settings = {
       STEPS_PER_MM, {MAX_X_MM, MAX_Y_MM}, DEFAULT_SPEED_MM_S, DEFAULT_ACCEL_MM_S2, MAX_SPEED_MM_S, MAX_ACCEL_MM_S2, HOMING_SPEED_MM_S,
       HOMING_BUMP_MM, HOMING_PULL_OFF_MM, {INVERT_X_DIR, INVERT_Y_DIR}, COREXY, endstops, HOME_X_FIRST,
-      MAX_STEP_HZ, IDLE_DISABLE_MS, ENABLE_SETTLE_MS, MOVE_BUDGET_FACTOR, MOVE_BUDGET_MARGIN_MS};
+      MAX_STEP_HZ, IDLE_DISABLE_MS, ENABLE_SETTLE_MS, MOVE_BUDGET_FACTOR, MOVE_BUDGET_MARGIN_MS, STEP_PULSE_US};
   SimHal hal;
   hal.endstop_wired = endstops;
   // With switches, pretend the carriage starts 30 mm from each end.
@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
   gantry::Motion motion(hal, settings);
   peripherals.motion = &motion;
   peripherals.hal = &hal;
-  gantry::BoardGeometry board = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS};
+  gantry::BoardGeometry board = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS, 0.0f};
   gantry::Protocol protocol(motion, peripherals, writer, settings, board, FIRMWARE_VERSION " (virtual)");
   protocol.set_carry(CARRY_SPEED_MM_S, GRAB_MS, RELEASE_MS);
   protocol.set_servo(servo, SERVO_EXTEND_DEG, SERVO_RETRACT_DEG, SERVO_SETTLE_MS);

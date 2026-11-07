@@ -15,10 +15,11 @@ three carries instead of one, which the firmware and the camera check already ha
 Options (all off by default, so old configs plan exactly as before; gantry_config.json turns
 them on, and gantry/sim/path_sim.py measures what each one does over many games):
 
-  * `slot_columns`: which docking lanes may hold pieces (the bench uses only the right one);
+  * `slot_columns`: which docking lanes may hold pieces (board_layout.usable_lanes: the ones
+    asked for and inside the magnet's reach);
   * `reach_mm`: the box the magnet can reach (x_min, y_min, x_max, y_max). Nodes outside it are
-    never used: on the bench the magnet sits on the right of the Y carriage, so the far left is
-    out of reach;
+    never used: on the bench the magnet sits 60 mm right of the Y gantry's left edge, so a lane
+    drawn too far left is out of reach (the driver passes the whole travel by default);
   * `smooth`: after A*, replace runs of grid points by straight shortcuts that keep the open
     clearance, so a carry has fewer corners (every corner is a stop on the real gantry);
   * `corner_lag_mm`: a carried piece trails the magnet by a few millimetres (the MuJoCo model says
@@ -58,6 +59,11 @@ class Geometry:
     smooth: bool = False                          # straight shortcuts over the grid path
     corner_lag_mm: float = 0.0                    # how far the piece trails the magnet, checked at corners
     turn_penalty_mm: float = 2.0                  # the search's price for a change of direction
+    square_y_mm: float | None = None              # the square size along Y when measured apart from X (square_mm)
+
+    @property
+    def sy(self) -> float:
+        return self.square_y_mm or self.square_mm
 
     def reachable(self, x_mm: float, y_mm: float) -> bool:
         if self.reach_mm is None:
@@ -71,7 +77,7 @@ class Geometry:
     def board_mm(self, x: float, y: float) -> tuple[float, float]:
         """A board point in mm. The lanes beside the board (x between -1 and 0, or 7 and 8) run between
         the edge file and the docking lane, the same rule the firmware (place_mm) and the driver use."""
-        return self.x_mm(x), self.a1_mm[1] + y * self.square_mm
+        return self.x_mm(x), self.a1_mm[1] + y * self.sy
 
     def x_mm(self, x: float) -> float:
         a1 = self.a1_mm[0]
@@ -158,7 +164,7 @@ class Board:
         # The grid depends only on the geometry, never on the pieces: build it once and share it (the
         # search for room to move a blocker builds hundreds of Boards).
         cache = geometry.__dict__.setdefault("_grids", {})
-        key = (self.slots_per_lane, geometry.reach_mm, geometry.slot_columns, geometry.square_mm, tuple(geometry.a1_mm),
+        key = (self.slots_per_lane, geometry.reach_mm, geometry.slot_columns, geometry.square_mm, geometry.square_y_mm, tuple(geometry.a1_mm),
                tuple(sorted(geometry.park_columns_mm.items())), tuple(geometry.park_rows_mm))
         if key not in cache:
             self.nodes = self._build_nodes()
@@ -238,7 +244,7 @@ class Board:
                     edges[inner].append(slot)
                 continue
             y_mm = self.g.park_rows_mm[slot.row]
-            y = round((y_mm - self.g.a1_mm[1]) / self.g.square_mm * 2) / 2
+            y = round((y_mm - self.g.a1_mm[1]) / self.g.sy * 2) / 2
             y = max(-0.5, min(7.5, y))
             lane = (lane_x, y)
             if lane in edges:

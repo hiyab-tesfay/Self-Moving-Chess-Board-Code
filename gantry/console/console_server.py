@@ -5,16 +5,22 @@
     python3 gantry/console/console_server.py --port sim       # the pretend board: nothing real moves
 
 Make a chess move on the page and the gantry plays it on the real board. Captured pieces are
-carried into the docking lane on the RIGHT of the board ("b:0".."b:11"; the left lane is too
-tight on this frame), castling moves the king then the rook, and a promotion brings a docked
-piece of the new kind out when there is one. Free mode carries any piece to any empty square
-or slot. Undo carries the last move back; Reset board carries every piece home.
+carried into a docking lane beside the board: white pieces to the left lane ("w:0".."w:11"),
+black ones to the right ("b:0".."b:11"), each to the other when its own is full or out of the
+magnet's reach (on Sketch 5 with the magnet 60 mm in from the Y gantry's left edge, the left lane
+is). Castling moves the king then the rook, and a promotion brings a docked piece of the new kind
+out when there is one. Free mode carries any piece to any empty square or slot. Undo carries the
+last move back; Reset board carries every piece home.
+
+The board is Sketch 5's (gantry_config.json, board_layout.py): the console works in the
+millimetres the firmware counts, which is the sketch less the magnet's home. On connecting it
+tells the board its steps/mm ($100, from 41 mm per motor turn) and its travel ($130, $131), so
+every millimetre on the page is a real one. "Check the board" visits a1, h1, h8, a8 and the
+docking lanes; "a1 is here" moves the whole sketch onto where the magnet really is.
 
 Every carry is sent as plain motion commands (G1, M7, M3, M5, M8), not the firmware's CARRY,
-so the speeds set on the page work on any firmware version, and a distance error (the DRV8825
-microstep pins not matching the firmware) is corrected by the page's "scale" without
-reflashing. The stall checks (distance check, speed ladder, motors-off push test, restart
-counter) are on the page too.
+so the speeds set on the page work on any firmware version. The stall checks (one motor turn,
+distance check, speed ladder, motors-off push test, restart counter) are on the page too.
 
 Only one exchange with the board runs at a time (a lock); the Stop button writes "!" at once,
 outside that lock, so it is never stuck behind a move.
@@ -40,6 +46,7 @@ import chess
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "pi"))
+import board_layout as bl  # noqa: E402
 import board_paths as bp  # noqa: E402
 import carry_plan as cp  # noqa: E402
 import gantry_driver as gd  # noqa: E402
@@ -47,32 +54,33 @@ import gantry_driver as gd  # noqa: E402
 SETTINGS_FILE = HERE / "console_settings.json"   # this computer's choices; not committed
 PAGE = HERE / "console.html"
 
-# Real millimetres and seconds. The board's own numbers are these divided by "scale".
+# Real millimetres and seconds: since firmware 0.7 the board counts real mm ($100 from mm_per_turn in the config).
 DEFAULTS = {
     "travel_speed": 40.0,     # mm/s, arm down, nothing carried
     "carry_speed": 25.0,      # mm/s with a piece on the magnet
     "accel": 400.0,           # mm/s^2; sent to the board only by firmware 0.4+ ($120); 0.3 always uses 800
-    "scale_x": 1.0,           # real mm per mm the board counts, per axis: 1 when that driver's microstep pins
-    "scale_y": 1.0,           # match MICROSTEPS, about 8 when they float (full steps)
     "x_speed_cap": 120.0,     # mm/s the X axis itself may reach (the speed ladder finds it); a diagonal slows
     "y_speed_cap": 120.0,     # down so neither axis goes past its own cap
     "servo_settle": 0.35,     # s for the arm to come up or go down
     "grab_settle": 0.3,       # s for the magnet to take hold
     "release_settle": 0.25,   # s for the piece to settle after the magnet lets go
-    "magnet_budget": 12.0,    # s of magnet-on per hold; the firmware cuts it at 15 s, so longer carries rest
+    "magnet_budget": 0.0,     # s per hold before the piece is set down and picked up again; 0 = never (a permanent
+                              # magnet lifted by the servo has no coil to rest). Firmware that cuts the magnet ($G,
+                              # 15 s up to 0.7.1) is kept 3 s under its limit whatever this says: see hold_limit()
     "overshoot": 5.0,         # mm past the last point and back: the carried piece trails the magnet (MuJoCo and
                               # gantry/sim/path_sim.py: 5-6 mm), so without this it stops that far short of the square
     "auto_run": True,         # run a move on the gantry as soon as it is made on the page
 }
-LIMITS = {"travel_speed": (2, 120), "carry_speed": (2, 120), "accel": (50, 800), "scale_x": (0.05, 20), "scale_y": (0.05, 20),
+LIMITS = {"travel_speed": (2, 120), "carry_speed": (2, 120), "accel": (50, 800),
           "x_speed_cap": (2, 1000), "y_speed_cap": (2, 1000),
-          "servo_settle": (0, 3), "grab_settle": (0, 3), "release_settle": (0, 3), "magnet_budget": (3, 14),
+          "servo_settle": (0, 3), "grab_settle": (0, 3), "release_settle": (0, 3), "magnet_budget": (0, 14),
           "overshoot": (0, 15)}
 FW03_CARRY_CAP = 60.0         # board mm/s: the arm-up speed limit of firmware 0.3 (CARRY_SPEED_MM_S)
 FW03_ACCEL = 800.0            # board mm/s^2 of firmware 0.3
 CEILING_SPEED, CEILING_ACCEL = 120.0, 800.0   # the firmware's hard limits (MAX_SPEED_MM_S, MAX_ACCEL_MM_S2)
 POLL_LEG_S = 0.15             # status-poll latency added to every leg when checking the magnet time
 LADDER_SPEEDS = [20, 30, 40, 50, 60, 80, 100, 120]
+TURN_SPEED = 12.0             # mm/s: one motor turn (41 mm) in about 3.5 s, slow enough to count
 
 
 class Busy(Exception):
@@ -109,9 +117,7 @@ def load_settings() -> dict:
     settings = dict(DEFAULTS)
     try:
         saved = json.loads(SETTINGS_FILE.read_text())
-        if "scale" in saved:                      # one scale for both axes, before 2026-11-05 evening
-            saved.setdefault("scale_x", saved["scale"])
-            saved.setdefault("scale_y", saved["scale"])
+        # scale / scale_x / scale_y (before firmware 0.7: real mm per counted mm) are dropped: the board counts real mm.
         settings.update({k: saved[k] for k in DEFAULTS if k in saved})
     except (OSError, ValueError):
         pass
@@ -132,8 +138,9 @@ def chess_from_layout_move(game: chess.Board, layout: cp.Layout, src: str, dst: 
 
 
 class Console:
-    def __init__(self, config: dict, sim_speed: float = 1.0):
+    def __init__(self, config: dict, sim_speed: float = 1.0, config_path: Path | None = None):
         self.config = config
+        self.config_path = config_path
         self.map = gd.BoardMap(config)
         self.geometry = self.map.geometry(config)
         self.settings = load_settings()
@@ -154,7 +161,7 @@ class Console:
         self.waiting: dict | None = None
         self.stop_flag = threading.Event()
         self.game = chess.Board()
-        self.layout = cp.Layout(captures="dock")
+        self.layout = self.new_layout()
         self.history: list[dict] = []
         self.jog_queue: list[tuple[float, float]] = []
         self.preview: dict | None = None
@@ -309,6 +316,7 @@ class Console:
                     pass
             self.tunable = "$111" in self.board_settings
             self.position_lost = False
+            self.push_motion()
             self.say("info", f"Connected to {self.firmware} on {port}"
                      + ("" if self.tunable else " (speeds and acceleration are fixed in this firmware; the console sets speeds per move)"))
             if self.tunable:
@@ -333,6 +341,49 @@ class Console:
             link.close()
             self.say("info", "Disconnected")
 
+    def push_motion(self) -> None:
+        """Steps/mm ($100) and travel ($130, $131) from the config, and the step pulse ($0) when the config sets one.
+        A new $100 makes the board forget its position (home again); firmware before 0.7 has no $130/$131."""
+        lines = bl.motion_lines(self.config)
+        if self.config.get("step_pulse_us"):
+            lines.append(f"$0={int(self.config['step_pulse_us'])}")
+        for line in lines:
+            key, value = line.split("=")
+            if abs(self.board_settings.get(key, -1.0) - float(value)) < 1e-4:
+                continue
+            try:
+                self.exchange(line)
+            except Refused as exc:
+                if key in ("$130", "$131", "$0"):
+                    self.say("warn", f"This firmware keeps its own {key} ({exc}); flash 0.7 for {line}")
+                    continue
+                raise
+            self.board_settings[key] = float(value)
+            if key == "$100":
+                self.position_lost = True
+                self.say("warn", f"Steps per mm set to {float(value):.4f} ({bl.mm_per_turn(self.config)[0]:g} mm per motor turn): "
+                                 "the board forgot where it is. Push the carriage into the bottom-left corner and Set home here.")
+
+    def new_layout(self, board: chess.Board | None = None) -> cp.Layout:
+        """Dock mode, into the docking lanes the magnet can reach."""
+        return cp.Layout(board, captures="dock", dock_lanes=tuple(bl.usable_lanes(self.config)),
+                         dock_slots=bl.slot_count(self.config))
+
+    def save_config(self, new: dict, why: str) -> None:
+        """Write gantry_config.json (the old one kept once as .before-console.json) and use it from now on."""
+        if self.config_path is not None:
+            backup = self.config_path.with_suffix(".before-console.json")
+            if not backup.exists() and self.config_path.exists():
+                backup.write_text(self.config_path.read_text())
+            self.config_path.write_text(json.dumps(new, indent=2) + "\n")
+        with self.lock:
+            self.config = new
+            self.map = gd.BoardMap(new)
+            self.geometry = self.map.geometry(new)
+            self.layout.dock_lanes = tuple(bl.usable_lanes(new))
+            self.layout.dock_slots = bl.slot_count(new)
+        self.say("info", f"Saved the board config: {why}")
+
     def board_carry_cap(self) -> float:
         return self.board_settings.get("$111", FW03_CARRY_CAP)
 
@@ -356,7 +407,9 @@ class Console:
             self.board_settings[key] = value
 
     def scales(self) -> tuple[float, float]:
-        return self.settings["scale_x"], self.settings["scale_y"]
+        """Real mm per counted mm. 1 since firmware 0.7 counts real mm ($100 from mm_per_turn); kept so the
+        older code paths read the same."""
+        return 1.0, 1.0
 
     # ------------------------------------------------------------------ tasks
 
@@ -491,16 +544,30 @@ class Console:
             return self.settings["carry_speed"]
         return min(self.settings["carry_speed"], FW03_CARRY_CAP * min(self.scales()))
 
+    def step_rate_caps(self) -> tuple[float, float]:
+        """Firmware 0.5+: the fastest each axis can go in real mm/s, from the step pulse ($0 caps the step rate at
+        1e6 / (2 x pulse)) and steps/mm. Infinite on older firmware."""
+        pulse, steps_mm = self.board_settings.get("$0", 0.0), self.board_settings.get("$100", 40.0)
+        if pulse <= 0 or steps_mm <= 0:
+            return math.inf, math.inf
+        board = 1e6 / (2 * pulse) / steps_mm
+        sx, sy = self.scales()
+        return board * sx, board * sy
+
     def leg_speed(self, a, b, speed: float, capped: bool = True) -> float:
-        """The speed along a -> b (real mm) that keeps each axis under its own cap."""
+        """The speed along a -> b (real mm) that keeps each axis under its own cap, and under what the step pulse
+        lets the firmware do (that one always: the board slows down by itself, so the plan must know)."""
         d = math.dist(a, b)
-        if not capped or d < 1e-9:
+        if d < 1e-9:
             return speed
         dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+        fx, fy = self.step_rate_caps()
+        cx = min(fx, self.settings["x_speed_cap"]) if capped else fx
+        cy = min(fy, self.settings["y_speed_cap"]) if capped else fy
         if dx > 1e-9:
-            speed = min(speed, self.settings["x_speed_cap"] * d / dx)
+            speed = min(speed, cx * d / dx)
         if dy > 1e-9:
-            speed = min(speed, self.settings["y_speed_cap"] * d / dy)
+            speed = min(speed, cy * d / dy)
         return speed
 
     def here(self) -> tuple[float, float]:
@@ -553,12 +620,29 @@ class Console:
         self.cmd("M8")
         self.sleep(self.settings["servo_settle"])
 
+    def hold_limit(self) -> float | None:
+        """Seconds a piece may be held in one go, or None: no limit. This build lifts a permanent magnet with the
+        servo, so nothing needs a rest, and firmware 0.7.2 says so ($G=0). Firmware that switches the magnet off
+        after $G ms (15000 up to 0.7.1, or a board connected without $G) is kept 3 s under that; magnet_budget,
+        when above 0, is a limit of its own."""
+        caps = []
+        if self.board_settings:   # connected: what this board enforces
+            fw_ms = self.board_settings.get("$G", 15000.0)
+            if fw_ms > 0:
+                caps.append(fw_ms / 1000.0 - 3.0)
+        if self.settings["magnet_budget"] > 0:
+            caps.append(self.settings["magnet_budget"])
+        return min(caps) if caps else None
+
     def holds(self, points: list[tuple[float, float]]) -> list[list[tuple[float, float]]]:
-        """The carry legs grouped so the magnet is never on longer than the budget: a group ends with a rest
+        """The carry legs grouped so a piece is never held longer than hold_limit(): a group ends with a rest
         (the piece set down where it is, on its clear path, and picked up again). A leg longer than the
-        budget is cut into equal parts first."""
+        limit is cut into equal parts first. No limit: one group, no rests."""
+        limit = self.hold_limit()
+        if limit is None:
+            return [list(points)]
         accel = self.accel_real()
-        budget = self.settings["magnet_budget"] - self.settings["grab_settle"]
+        budget = limit - self.settings["grab_settle"]
         pts = [points[0]]
         for b in points[1:]:
             a = pts[-1]
@@ -590,7 +674,7 @@ class Console:
         groups = self.holds(points)
         past = self.overshoot_point(points)
         if past:
-            groups[-1] += [past, points[-1]]   # well under a second more, inside the firmware's 15 s
+            groups[-1] += [past, points[-1]]   # well under a second more (hold_limit keeps 3 s spare)
         for i, group in enumerate(groups):
             if i:
                 self.say("info", "Resting the magnet: setting the piece down on its path and picking it up again")
@@ -615,10 +699,15 @@ class Console:
     # ------------------------------------------------------------------ planning
 
     def best_slot(self, layout: cp.Layout, square: str) -> str | None:
-        """The free right-lane slot with the shortest clear way from `square`, or None (the planner then takes the
-        first free slot and the path finder makes room)."""
+        """The free docking slot with the shortest clear way from `square`, in the taken piece's own lane first (white
+        left, black right), then the other; None when none has a clear way (the planner then takes the first free slot
+        and the path finder makes room)."""
         world = bp.Board(self.geometry, set(layout.pieces), pieces=dict(layout.pieces))
-        return world.best_slot(square, layout.free_slots())
+        free = layout.free_slots(layout.pieces.get(square))
+        if not free:
+            return None
+        own = [s for s in free if s[0] == free[0][0]]
+        return world.best_slot(square, own) or world.best_slot(square, [s for s in free if s not in own])
 
     def make_preview(self, kind: str, label: str, steps: list[dict], before: cp.Layout, after: cp.Layout,
                      game_after: chess.Board | None, extra: dict | None = None) -> dict:
@@ -859,7 +948,7 @@ class Console:
             self.history.pop()
             self.game = preview["game_after"]
         elif kind == "reset":
-            self.layout = cp.Layout(captures="dock")
+            self.layout = self.new_layout()
             self.game = chess.Board()
             self.history = []
         self.preview, self.pending = None, None
@@ -893,7 +982,7 @@ class Console:
         with self.lock:
             if self.task:
                 raise Busy(f"busy: {self.task['name']}")
-            self.game, self.layout, self.history = chess.Board(), cp.Layout(captures="dock"), []
+            self.game, self.layout, self.history = chess.Board(), self.new_layout(), []
             self.preview, self.pending = None, None
         self.say("info", "New game: the pieces are in the starting position, the docking lane is empty")
 
@@ -920,9 +1009,6 @@ class Console:
         self.say("info", "Home set: this spot is 0,0 (the bottom-left corner)")
 
     def home_bump(self) -> None:
-        if any(abs(s - 1) > 0.05 for s in self.scales()):
-            raise gd.GantryError("Bump homing runs at the firmware's own speed and distance, which are wrong while a "
-                                 "scale is not 1. Home by hand (Set home here) instead.")
         self.start("Bump homing", self._home_bump)
 
     def _home_bump(self) -> None:
@@ -1034,33 +1120,152 @@ class Console:
             self.tests["distance"]["state"] = "measure"
         self.say("info", f"Distance check: the board counted {mm:g} mm on {axis.upper()}. Measure the real distance and enter it.")
 
+    def one_turn(self, axis: str, direction: int) -> None:
+        if axis not in ("x", "y") or direction not in (1, -1):
+            raise gd.GantryError("choose X or Y, forward or back")
+        self.start(f"One turn {axis.upper()}{'+' if direction > 0 else '-'}", self._one_turn, axis, direction)
+
+    def _one_turn(self, axis: str, direction: int) -> None:
+        """Sends exactly one motor turn of steps on one axis (200 full steps x the config's microsteps): the pulley
+        turns once and the carriage moves mm_per_turn (41 mm on the bench). The person measures how far it went.
+        + is away from home (X toward the h-file, Y toward rank 8), - is toward home.
+
+        No room check and no home needed: the person is standing at the gantry running it by hand. The board's own
+        soft limits (0..$130 / $131) would refuse a turn that crosses them, so near an edge the spot is relabelled
+        (G92) for the turn and the true count put back after it."""
+        st = self.require(homed=False)
+        self.arm_down()
+        if st["state"] == "Alarm":
+            self.cmd("$X")
+            st = self.query_status()
+        i = 0 if axis == "x" else 1
+        steps = bl.steps_per_turn(self.config)
+        steps_mm = self.board_settings.get("$100", bl.steps_per_mm(self.config))
+        counted = steps / steps_mm
+        expected = bl.mm_per_turn(self.config)[i]
+        AX = axis.upper()
+        here = st["x"] if axis == "x" else st["y"]
+        limit = self.board_settings.get("$130" if axis == "x" else "$131", self.map.travel[i])
+        if counted > limit:
+            raise gd.GantryError(f"One turn is {counted:.0f} mm as the board counts ($100={steps_mm:g}), more than its whole "
+                                 f"{limit:.0f} mm: reconnect so the console sets $100 first.")
+        start = here
+        if not -0.001 <= here + direction * counted <= limit + 0.001:      # the board would refuse: relabel the spot
+            start = 0.0 if direction > 0 else counted
+        with self.lock:
+            self.tests["turn"] = {"axis": axis, "direction": direction, "steps": round(steps), "counted": round(counted, 3),
+                                  "expected": expected, "state": "running", "turns": None, "measured": None}
+        self.progress(f"One turn on {AX}{'+' if direction > 0 else '-'}: {steps:.0f} steps. Measure how far the carriage goes.")
+        if start != here:
+            self.cmd(f"G92 {AX}{start:.3f}")
+        try:
+            self.cmd(f"G1 {AX}{start + direction * counted:.3f} F{TURN_SPEED * 60:.1f}")
+            self.wait_idle(10 + 3 * counted / TURN_SPEED, "the one-turn test")
+        finally:
+            if start != here:                                              # put the true count back, even after Stop
+                try:
+                    now = self.query_status()
+                    moved = (now["x"] if axis == "x" else now["y"]) - start
+                    self.exchange(f"G92 {AX}{here + moved:.3f}", 2.0)
+                except Exception:
+                    self.position_lost = True
+        with self.lock:
+            self.tests["turn"]["state"] = "measure"
+        self.say("info", f"One turn on {AX}: sent {steps:.0f} steps ({counted:.2f} mm as the board counts). It should move "
+                         f"{expected:g} mm. Enter how far it really moved.")
+
+    def turn_result(self, turns: float | None = None, measured: float | None = None) -> float:
+        """mm per turn from what the person saw: millimetres the carriage moved for one turn's steps (or turns of the
+        pulley, which only says whether the microstep setting is right)."""
+        with self.lock:
+            test = self.tests.get("turn")
+            if not test or test["state"] not in ("measure", "done"):
+                raise gd.GantryError("run One turn first")
+            axis = test["axis"].upper()
+            expected = test["expected"]
+            if measured:
+                if not 0.5 <= measured <= 2000:
+                    raise gd.GantryError("enter how far it moved in mm")
+                mm = measured
+            elif turns:
+                if not 0.01 <= turns <= 50:
+                    raise gd.GantryError("enter the turns you saw (for example 1, 8 or 0.125)")
+                mm = expected * turns
+            else:
+                raise gd.GantryError("enter how far it moved in mm")
+            ratio = mm / expected
+            if abs(ratio - 1) < 0.01:
+                hint = f"Matches: {axis} moves {mm:g} mm per turn, as the config says. Nothing to change."
+            elif abs(ratio - 8) < 0.5 or abs(ratio - 0.125) < 0.02 or abs(ratio - 2) < 0.1 or abs(ratio - 0.5) < 0.03:
+                hint = (f"A factor of {ratio:g}: the {axis} driver's microstep pins (M0-M2) are not what the config's "
+                        f"\"microsteps\" ({self.config.get('microsteps', 1)}) says. Fix the pins or the config, not mm per turn.")
+            else:
+                hint = (f"{axis} moves {mm:g} mm per turn, not {expected:g}. Use it so every move is right; measure over a "
+                        "longer run (Distance check, 300 mm) for a better number.")
+            test.update(turns=turns, measured=measured, ratio=round(ratio, 4), mm_per_turn=round(mm, 3), state="done", hint=hint)
+        self.say("info", f"One turn on {axis}: {mm:g} mm. {hint}")
+        return mm
+
+    def use_mm_per_turn(self, axis: str, mm: float) -> None:
+        """Save mm per turn for one axis in the config. X's sets the board's steps/mm ($100), so the board forgets its
+        position (home again); Y's is kept for the record and absorbed by the board's measured squares."""
+        if axis not in ("x", "y") or not 5 <= mm <= 200:
+            raise gd.GantryError("choose X or Y and 5 to 200 mm per turn")
+        if self.task:
+            raise Busy(f"busy: {self.task['name']}")
+        x, y = bl.mm_per_turn(self.config)
+        new = dict(self.config, mm_per_turn=[round(mm, 3), y] if axis == "x" else [x, round(mm, 3)])
+        self.save_config(new, f"{axis.upper()} moves {mm:g} mm per motor turn")
+        if self.link is not None:
+            self.push_motion()
+
+    def distance_check(self, axis: str, mm: float) -> None:
+        if axis not in ("x", "y") or not 1 <= mm <= 400:
+            raise gd.GantryError("choose X or Y and 1 to 400 mm")
+        self.start(f"Distance check {axis.upper()}", self._distance, axis, mm)
+
+    def _distance(self, axis: str, mm: float) -> None:
+        st = self.require(homed=False)
+        self.arm_down()
+        if st["state"] == "Alarm":
+            self.cmd("$X")
+            st = self.query_status()
+        bx, by = st["x"], st["y"]
+        target = f"X{bx + mm:.3f} Y{by:.3f}" if axis == "x" else f"X{bx:.3f} Y{by + mm:.3f}"
+        with self.lock:
+            self.tests["distance"] = {"axis": axis, "mm": mm, "state": "running", "measured": None}
+        self.progress(f"Moving {axis.upper()} by {mm:g} mm as the board counts it (10 mm/s). Measure how far it really went.")
+        self.cmd(f"G1 {target} F600")
+        self.wait_idle(10 + 3 * mm / 10, "the distance check")
+        with self.lock:
+            self.tests["distance"]["state"] = "measure"
+        self.say("info", f"Distance check: the board counted {mm:g} mm on {axis.upper()}. Measure the real distance and enter it.")
+
     def distance_result(self, measured: float) -> float:
+        """mm per turn for that axis from a longer run: the config's value x measured / counted."""
         with self.lock:
             test = self.tests.get("distance")
             if not test:
                 raise gd.GantryError("run the distance check first")
             if not 0.5 <= measured <= 2000:
                 raise gd.GantryError("enter the measured distance in mm")
-            scale = measured / test["mm"]
-            test.update(measured=measured, scale=round(scale, 4), state="done", key=f"scale_{test['axis']}")
-        if abs(scale - 8) < 0.8:
-            hint = (f"About 8x: the {test['axis'].upper()} driver's microstep pins are floating (full steps). Wire M0 and M1 "
-                    "to 3.3 V and M2 to GND for 1/8 steps, or use this scale for that axis.")
-        elif abs(scale - 0.5) < 0.05:
-            hint = "About half: the driver is at 1/16 steps. Set M2 low (1/8) or keep this scale."
-        elif abs(scale - 1) < 0.03:
-            hint = "Matches: the microstep pins agree with the firmware."
-        else:
-            hint = "Not a whole microstep ratio: check the pulley (20 teeth?) and that the belt is not slipping."
-        self.say("info", f"Distance check: {measured:g} mm real for {test['mm']:g} counted = scale {scale:.3f}. {hint}")
-        test["hint"] = hint
-        return scale
+            i = 0 if test["axis"] == "x" else 1
+            ratio = measured / test["mm"]
+            mm = bl.mm_per_turn(self.config)[i] * ratio
+            if abs(ratio - 1) < 0.003:
+                hint = "Matches to 0.3 %: nothing to change."
+            elif abs(ratio - 8) < 0.8 or abs(ratio - 0.125) < 0.02:
+                hint = "About 8x: the driver's microstep pins and the config's microsteps disagree. Fix those, not mm per turn."
+            else:
+                hint = f"{ratio:.4f} of what the board counted: use {mm:.3f} mm per turn for {test['axis'].upper()}."
+            test.update(measured=measured, ratio=round(ratio, 5), mm_per_turn=round(mm, 3), state="done", hint=hint)
+        self.say("info", f"Distance check: {measured:g} mm real for {test['mm']:g} counted. {hint}")
+        return mm
 
     def ladder(self, axis: str, distance: float, speeds: list[float]) -> None:
         if axis not in ("x", "y"):
             raise gd.GantryError("choose X or Y")
-        scale = self.settings["scale_x" if axis == "x" else "scale_y"]
-        speeds = sorted({float(v) for v in speeds if 1 <= float(v) <= CEILING_SPEED * scale})
+        speeds = sorted({float(v) for v in speeds if 1 <= float(v) <= CEILING_SPEED})
         if not speeds:
             raise gd.GantryError("no speeds to try")
         self.start(f"Speed ladder {axis.upper()}", self._ladder, axis, float(distance), speeds)
@@ -1110,6 +1315,41 @@ class Console:
                          "push it into the bottom-left corner and Set home here before the next move.")
         return test
 
+    # ------------------------------------------------------------------ the board itself
+
+    def check_board(self) -> None:
+        self.start("Check the board", self._check_board)
+
+    def _check_board(self) -> None:
+        """The magnet visits a1, h1, h8, a8 and the first and last slot of each docking lane in use, and waits at each
+        for the person to look: is it under the centre? Nothing is carried."""
+        self.require(homed=True)
+        self.arm_down()
+        places = ["a1", "h1", "h8", "a8"]
+        for side in bl.usable_lanes(self.config):
+            n = len(self.map.park_rows)
+            places += [f"{side}:0", f"{side}:{n - 1}"]
+        for place in places:
+            x, y = self.map.place_mm(place)
+            self.move_to(x, y, self.settings["travel_speed"], f"going to {place}")
+            sx, sy = bl.to_sketch(self.config, x, y)
+            self.wait_person(f"Is the magnet under the centre of {place}? (it is at {x:.1f}, {y:.1f} as the board counts, "
+                             f"{sx:.1f}, {sy:.1f} on the sketch). If every square is off by the same amount, press Done, "
+                             f"jog onto a1's centre and press 'a1 is here'.")
+        self.move_to(*self.map.place_mm("a1"), self.settings["travel_speed"], "back to a1")
+        self.say("info", "Board check done: " + ", ".join(places))
+
+    def a1_here(self) -> list[str]:
+        """The magnet sits on a1's real centre: move the whole sketch so a1 is here (magnet_home_mm changes)."""
+        if self.task:
+            raise Busy(f"busy: {self.task['name']}")
+        st = self.require(homed=True)
+        new, report = bl.shift_to(self.config, self.map.square_mm("a1"), (st["x"], st["y"]))
+        self.save_config(new, report[0])
+        for line in report[1:]:
+            self.say("warn" if "out of reach" in line or "left of" in line or "past" in line else "info", line)
+        return report
+
     # ------------------------------------------------------------------ the page's view
 
     def view(self, since: int) -> dict:
@@ -1144,10 +1384,12 @@ class Console:
                          "moves": [h["san"] for h in self.history], "legal": legal, "check": self.game.is_check(),
                          "over": outcome.result() if outcome else None, "valid": self.game.is_valid()},
                 "layout": self.layout.pieces,
-                "geometry": {"square": self.map.square, "a1": self.map.a1, "travel": self.map.travel,
+                "geometry": {"square": self.map.square, "square_y": self.map.square_y, "a1": self.map.a1, "travel": self.map.travel,
                              "columns": {str(k): v for k, v in self.map.columns.items() if k < 0 or k > 7},
                              "park_rows": [self.map.park_rows[i] for i in sorted(self.map.park_rows)],
-                             "reach": self.geometry.reach_mm, "lanes": self.config.get("docking_lanes")},
+                             "reach": self.geometry.reach_mm, "lanes": bl.usable_lanes(self.config),
+                             "home": bl.magnet_home(self.config), "problems": bl.check(self.config),
+                             "mm_per_turn": bl.mm_per_turn(self.config), "steps_per_mm": round(bl.steps_per_mm(self.config), 5)},
                 "log": [e for e in self.log if e["id"] > since], "log_id": self.log_id,
             }
 
@@ -1223,7 +1465,13 @@ class Handler(BaseHTTPRequestHandler):
             "/api/resolve": lambda b: c.resolve(str(b.get("action"))),
             "/api/done": lambda b: c.done(),
             "/api/test/distance": lambda b: c.distance_check(str(b.get("axis", "x")).lower(), float(b.get("mm", 20))),
-            "/api/test/distance-result": lambda b: {"scale": c.distance_result(float(b.get("measured", 0)))},
+            "/api/test/distance-result": lambda b: {"mm_per_turn": c.distance_result(float(b.get("measured", 0)))},
+            "/api/test/turn": lambda b: c.one_turn(str(b.get("axis", "x")).lower(), int(b.get("direction", 1))),
+            "/api/test/turn-result": lambda b: {"mm_per_turn": c.turn_result(float(b.get("turns") or 0) or None,
+                                                                             float(b.get("measured") or 0) or None)},
+            "/api/mm-per-turn": lambda b: c.use_mm_per_turn(str(b.get("axis", "")).lower(), float(b.get("mm", 0))),
+            "/api/check-board": lambda b: c.check_board(),
+            "/api/a1-here": lambda b: {"report": c.a1_here()},
             "/api/test/ladder": lambda b: c.ladder(str(b.get("axis", "x")).lower(), float(b.get("distance", 100)),
                                                    b.get("speeds") or LADDER_SPEEDS),
             "/api/test/stalled": lambda b: c.stalled(),
@@ -1267,7 +1515,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("link").setLevel(logging.WARNING)
-    console = Console(gd.load_config(args.config), args.sim_speed)
+    console = Console(gd.load_config(args.config), args.sim_speed, args.config)
     Handler.console = console
     server = ThreadingHTTPServer(("127.0.0.1", args.http), Handler)
     server.daemon_threads = True

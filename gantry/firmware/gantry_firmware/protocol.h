@@ -11,8 +11,9 @@
 //                       the same carry through the via-points the Pi chose (when a piece is in the way);
 //                       via-points are places too: squares, slots, or x,y in SQUARES (a1 = 0,0; x.5 = lanes)
 //   CARRY d5 w:0        a taken piece goes to docking slot 0 of White's lane
-//   $B=50,60,35,17.5,452.5,17.5,35
-//                       square size, a1 centre, White's and Black's docking lane x, first slot y, slot pitch
+//   $B=50,45,35,2.5,437.5,17.5,35[,49.8]
+//                       square size, a1 centre, White's (left) and Black's (right) docking lane x, first slot
+//                       y, slot pitch, and optionally the square size along Y when it differs (measured)
 //   $T                  the Arduino's own test (homed first): four corners, servo and magnet on e4, a
 //                       knight's carry e4 -> f6 -> e4 through the lanes, back to a1
 //
@@ -42,8 +43,12 @@
 //   $110=<mm/s>         travel speed: G0, GOTO, CARRY's travel to the piece, the top of G1 (1..MAX_SPEED_MM_S)
 //   $111=<mm/s>         carry speed: CARRY's moves with the piece, and the fastest G1 with the arm up (1..MAX_SPEED_MM_S)
 //   $120=<mm/s^2>       acceleration of every move (1..MAX_ACCEL_MM_S2)
-//   $100=<steps/mm>     steps per mm, for a driver not at MICROSTEPS (40 at 1/8, 5 at full steps; 1..400).
+//   $100=<steps/mm>     steps per mm (4.878 at full steps with 41 mm per turn, 39 at 1/8; 1..400).
 //                       Changing it forgets the position: alarm "not homed", then $H or $HM.
+//   $130=<mm> $131=<mm> how far the magnet travels along X / Y (the soft limits; MIN_TRAVEL_MM..MAX_TRAVEL_MM).
+//                       The position stays valid.
+//   $0=<us>             STEP pulse high time (STEP_PULSE_MIN_US..STEP_PULSE_MAX_US, boot STEP_PULSE_US);
+//                       caps the step rate at 1e6 / (2 x us) steps/s, as GRBL's $0 is the step pulse.
 // Homing keeps its own slow speed (never above $110); MAX_STEP_HZ still caps every feed.
 //
 // Every command is answered with "ok" (accepted) or "error:<code> <text>". Poll ? until Idle before
@@ -72,6 +77,12 @@
 #endif
 #ifndef MAX_STEPS_PER_MM
 #define MAX_STEPS_PER_MM 400.0f
+#endif
+#ifndef MIN_TRAVEL_MM
+#define MIN_TRAVEL_MM 10.0f
+#endif
+#ifndef MAX_TRAVEL_MM
+#define MAX_TRAVEL_MM 1000.0f
 #endif
 
 namespace gantry {
@@ -104,6 +115,7 @@ struct Writer {
 struct BoardGeometry {
   float square, a1_x, a1_y, park_w_x, park_b_x, park_row0, park_pitch;
   int park_rows;
+  float square_y;  // the square size along Y when measured apart from X; 0 = the same as `square`
 };
 
 // A place in board terms: coordinates in squares (a1 = 0,0; x.5 = lanes) or a docking slot.
@@ -279,6 +291,7 @@ class Protocol {
     if (!strcmp(line, "$I")) { out_.write("["); out_.write(version_); out_.write("]\n"); reply(OK); return; }
     if (!strcmp(line, "$T")) { reply(selftest()); return; }
     if (!strncmp(line, "$B=", 3)) { reply(set_board(line + 3)); return; }
+    if (!strncmp(line, "$S=", 3)) { reply(set_servo_angles(line + 3)); return; }
     if (line[0] == '$' && line[1] >= '0' && line[1] <= '9') { setting_command(line + 1); return; }
     if (!strcmp(line, "M3")) { reply(magnet_command(true, now_us)); return; }
     if (!strcmp(line, "M5")) { reply(magnet_command(false, now_us)); return; }
@@ -351,7 +364,7 @@ class Protocol {
       place.row = (int)row;
       place.x = text[0] == 'W' ? -1.0f : 8.0f;
       // Where the slot sits in square units, for routing: beside the board at the lane's height.
-      place.y = (board_.park_row0 + row * board_.park_pitch - board_.a1_y) / board_.square;
+      place.y = (board_.park_row0 + row * board_.park_pitch - board_.a1_y) / square_y();
       place.y = (float)((long)(place.y * 2 + (place.y >= 0 ? 0.5f : -0.5f))) / 2.0f;
       if (place.y < -0.5f) place.y = -0.5f;
       if (place.y > 7.5f) place.y = 7.5f;
@@ -380,8 +393,11 @@ class Protocol {
     if (place.x < 0) x_mm = board_.park_w_x + (place.x + 1.0f) * (board_.a1_x - board_.park_w_x);
     else if (place.x > 7) x_mm = h_x + (place.x - 7.0f) * (board_.park_b_x - h_x);
     else x_mm = board_.a1_x + place.x * board_.square;
-    y_mm = board_.a1_y + place.y * board_.square;
+    y_mm = board_.a1_y + place.y * square_y();
   }
+
+  // The square size along Y: measured apart from X by the calibration ($B's eighth number), else the same.
+  float square_y() const { return board_.square_y > 0 ? board_.square_y : board_.square; }
 
  private:
   static void trim(char* s) {
@@ -631,12 +647,17 @@ class Protocol {
   void setting_command(const char* text) {
     char* end;
     long key = strtol(text, &end, 10);
-    if (*end != '=' || (key != 100 && key != 110 && key != 111 && key != 120)) { reply(ERR_UNKNOWN); return; }
+    if (*end != '=' || (key != 0 && key != 100 && key != 110 && key != 111 && key != 120 && key != 130 && key != 131)) {
+      reply(ERR_UNKNOWN);
+      return;
+    }
     const char* digits = end + 1;
     float value = (float)strtod(digits, &end);
     if (end == digits || *end) { reply(ERR_NUMBER); return; }
-    float low = key == 100 ? MIN_STEPS_PER_MM : 1.0f;
-    float high = key == 100 ? MAX_STEPS_PER_MM : key == 120 ? s_.accel_ceiling : s_.speed_ceiling;
+    bool travel = key == 130 || key == 131;
+    float low = key == 0 ? (float)STEP_PULSE_MIN_US : key == 100 ? MIN_STEPS_PER_MM : travel ? MIN_TRAVEL_MM : 1.0f;
+    float high = key == 0 ? (float)STEP_PULSE_MAX_US : key == 100 ? MAX_STEPS_PER_MM : travel ? MAX_TRAVEL_MM
+                 : key == 120 ? s_.accel_ceiling : s_.speed_ceiling;
     if (!(value >= low && value <= high)) {   // written this way round so that NAN fails too
       char lo[16], hi[16], buf[64];
       number(low, lo, sizeof lo);
@@ -646,9 +667,20 @@ class Protocol {
       return;
     }
     if (busy()) { reply(ERR_BUSY); return; }
+    if (key == 0) {
+      reply(m_.set_step_pulse((uint32_t)lroundf(value)));
+      return;
+    }
     if (key == 111) {
       carry_speed_ = value;
       reply(OK);
+      return;
+    }
+    if (travel) {
+      int axis = key == 130 ? X : Y;
+      int code = m_.set_travel(axis, value);
+      if (code == OK) s_.max_mm[axis] = value;
+      reply(code);
       return;
     }
     float speed = s_.max_speed, accel = s_.accel, steps = s_.steps_per_mm;
@@ -670,11 +702,39 @@ class Protocol {
     reply(code);
   }
 
-  int set_board(const char* text) {
-    float v[7];
+  // $S=up,down[,settle]: the arm's angles in degrees (0-180) and its settle time in ms (0-3000), so
+  // they can be found on the real arm without a reflash. Only with the arm down and the board still;
+  // the arm goes to the new down angle at once. A reset goes back to config.h.
+  int set_servo_angles(const char* text) {
+    if (!servo_present_) return ERR_UNKNOWN;
+    long v[3] = {servo_extend_, servo_retract_, (long)servo_settle_ms_};
     int n = 0;
     const char* c = text;
-    while (n < 7) {
+    while (true) {
+      char* end;
+      long x = strtol(c, &end, 10);
+      if (end == c) return ERR_NUMBER;
+      v[n++] = x;
+      if (!*end) break;
+      if (*end != ',' || n == 3) return ERR_NUMBER;
+      c = end + 1;
+    }
+    if (n < 2) return ERR_NUMBER;
+    if (v[0] < 0 || v[0] > 180 || v[1] < 0 || v[1] > 180 || v[2] < 0 || v[2] > 3000) return ERR_RANGE;
+    if (busy()) return ERR_BUSY;
+    if (servo_up_) return ERR_SERVO_UP;
+    servo_extend_ = (int)v[0];
+    servo_retract_ = (int)v[1];
+    servo_settle_ms_ = (uint32_t)v[2];
+    p_.servo(servo_retract_);
+    return OK;
+  }
+
+  int set_board(const char* text) {
+    float v[8];
+    int n = 0;
+    const char* c = text;
+    while (n < 8) {
       char* end;
       v[n] = (float)strtod(c, &end);
       if (end == c) break;
@@ -682,12 +742,13 @@ class Protocol {
       if (*end != ',') break;
       c = end + 1;
     }
-    if (n != 3 && n != 7) return ERR_NUMBER;
-    if (v[0] <= 0) return ERR_NUMBER;
+    if (n != 3 && n != 7 && n != 8) return ERR_NUMBER;
+    if (v[0] <= 0 || (n == 8 && v[7] <= 0)) return ERR_NUMBER;
     board_.square = v[0];
+    board_.square_y = n == 8 ? v[7] : 0.0f;
     board_.a1_x = v[1];
     board_.a1_y = v[2];
-    if (n == 7) {
+    if (n >= 7) {
       board_.park_w_x = v[3];
       board_.park_b_x = v[4];
       board_.park_row0 = v[5];
@@ -782,6 +843,7 @@ class Protocol {
 
   void settings() {
     struct { const char* key; float value; const char* note; } rows[] = {
+        {"$0", (float)m_.settings().step_pulse_us, "step pulse us"},
         {"$100", s_.steps_per_mm, "steps/mm"}, {"$110", s_.max_speed, "travel mm/s"}, {"$111", carry_speed_, "carry mm/s"},
         {"$120", s_.accel, "mm/s^2"},
         {"$130", s_.max_mm[X], "max X mm"}, {"$131", s_.max_mm[Y], "max Y mm"}, {"$22", s_.use_endstops ? 1.0f : 0.0f, "homing switches"}};
@@ -791,10 +853,11 @@ class Protocol {
       snprintf(buf, sizeof buf, "%s=%s (%s)\n", row.key, value, row.note);
       out_.write(buf);
     }
-    char a[16], b[16], c[16], d[16], e[16], f[16], g[16], buf[160];
+    char a[16], b[16], c[16], d[16], e[16], f[16], g[16], h[16], buf[180];
     fixed3(board_.square, a, sizeof a); fixed3(board_.a1_x, b, sizeof b); fixed3(board_.a1_y, c, sizeof c);
     fixed3(board_.park_w_x, d, sizeof d); fixed3(board_.park_b_x, e, sizeof e); fixed3(board_.park_row0, f, sizeof f); fixed3(board_.park_pitch, g, sizeof g);
-    snprintf(buf, sizeof buf, "$B=%s,%s,%s,%s,%s,%s,%s (square, a1, docking lanes)\n", a, b, c, d, e, f, g);
+    fixed3(square_y(), h, sizeof h);
+    snprintf(buf, sizeof buf, "$B=%s,%s,%s,%s,%s,%s,%s,%s (square, a1, docking lanes, square along Y)\n", a, b, c, d, e, f, g, h);
     out_.write(buf);
     snprintf(buf, sizeof buf, "$G=%lu,%lu,%lu (magnet max on ms, min off ms, host timeout ms)\n",
              (unsigned long)(magnet_max_on_us_ / 1000UL), (unsigned long)(magnet_min_off_us_ / 1000UL), (unsigned long)(host_timeout_us_ / 1000UL));

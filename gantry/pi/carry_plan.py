@@ -25,11 +25,13 @@ before the carries run; the gantry driver itself treats a `remove` as already do
 piece leaves the layout entirely: the person keeps it.
 
 Dock mode (`Layout(captures="dock")`, used by the gantry console on the bench) lets the gantry
-take captured pieces off itself, into the docking lane on the RIGHT of the board ("b:0".."b:11",
-beside the h file): the left lane is too tight on this frame. Then:
+take captured pieces off itself, into the docking lanes beside the board: `dock_lanes` names the
+ones in use ("w" left of the a file, "b" right of the h file; the console passes the lanes inside
+the magnet's reach). A taken white piece goes to the left lane ("w:0".."w:11"), a black one to the
+right ("b:0".."b:11"); when its own lane is full or not in use it goes to the other. Then:
 
   * a capture (or the pawn passed en passant) is a carry into the free slot the caller names, or
-    the first free one, before the taker's carry; when the lane is full it falls back to `remove`;
+    the first free one, before the taker's carry; when the lanes are full it falls back to `remove`;
   * a promotion whose new piece waits in the lane brings that piece onto the promotion square and
     parks the pawn in the slot it left; without one it is the plain carry and the note.
 
@@ -46,7 +48,7 @@ import chess
 
 FILES = "abcdefgh"
 SLOTS_PER_LANE = 12   # slots down one docking lane; "b:12" would be a second lane
-DOCK_LANE = "b"       # captured pieces go to the right of the board, beside the h file
+DOCK_LANES = ("b",)   # the default: the right lane only, beside the h file (the console passes both when it can)
 
 
 def _xy(name: str) -> list[float]:
@@ -82,30 +84,40 @@ class Layout:
     """Where every physical piece is, keyed by square (and by slot, "b:3", for docked pieces).
 
     `captures` is "remove" (a person takes captured pieces off: the touch screen and the website)
-    or "dock" (the gantry carries them into the right-hand docking lane: the bench console).
+    or "dock" (the gantry carries them into the docking lanes `dock_lanes`: the bench console).
     """
 
-    def __init__(self, board: chess.Board | None = None, captures: str = "remove", dock_slots: int = SLOTS_PER_LANE) -> None:
+    def __init__(self, board: chess.Board | None = None, captures: str = "remove", dock_slots: int = SLOTS_PER_LANE,
+                 dock_lanes=DOCK_LANES) -> None:
         if captures not in ("remove", "dock"):
             raise ValueError(f"captures must be 'remove' or 'dock', not {captures!r}")
+        if not set(dock_lanes) <= {"w", "b"}:
+            raise ValueError(f"dock_lanes are 'w' and/or 'b', not {dock_lanes!r}")
         board = board or chess.Board()
-        self.captures, self.dock_slots = captures, dock_slots
+        self.captures, self.dock_slots, self.dock_lanes = captures, dock_slots, tuple(dock_lanes)
         self.pieces: dict[str, str] = {chess.square_name(sq): piece.symbol() for sq, piece in board.piece_map().items()}
 
     def copy(self) -> "Layout":
         other = Layout.__new__(Layout)
-        other.captures, other.dock_slots = self.captures, self.dock_slots
+        other.captures, other.dock_slots, other.dock_lanes = self.captures, self.dock_slots, self.dock_lanes
         other.pieces = dict(self.pieces)
         return other
 
-    def free_slots(self) -> list[str]:
-        """Empty slots of the docking lane, nearest the bottom first."""
-        return [name for name in (f"{DOCK_LANE}:{i}" for i in range(self.dock_slots)) if name not in self.pieces]
+    def slots(self, lane: str) -> list[str]:
+        return [f"{lane}:{i}" for i in range(self.dock_slots)]
+
+    def free_slots(self, symbol: str | None = None) -> list[str]:
+        """Empty docking slots, nearest the bottom first. With a piece's symbol, its own lane comes first (white
+        pieces left, black right), then the other; without one, the lanes in dock_lanes order."""
+        lanes = list(self.dock_lanes)
+        if symbol:
+            own = "w" if symbol.isupper() else "b"
+            lanes.sort(key=lambda lane: lane != own)
+        return [name for lane in lanes for name in self.slots(lane) if name not in self.pieces]
 
     def docked(self, symbol: str) -> str | None:
         """The slot holding a docked piece of this kind ("Q"), if any."""
-        for i in range(self.dock_slots):
-            name = f"{DOCK_LANE}:{i}"
+        for name in (n for lane in ("w", "b") for n in self.slots(lane)):
             if self.pieces.get(name) == symbol:
                 return name
         return None
@@ -127,9 +139,9 @@ class Layout:
 
     def dock(self, square: str, slot: str | None = None) -> dict:
         """The gantry carries the piece on `square` into a docking slot (`slot`, or the first free one)."""
-        free = self.free_slots()
+        free = self.free_slots(self.pieces.get(square))
         if not free:
-            raise ValueError("the docking lane is full")
+            raise ValueError("the docking lanes are full")
         if slot is None:
             slot = free[0]
         elif slot not in free:

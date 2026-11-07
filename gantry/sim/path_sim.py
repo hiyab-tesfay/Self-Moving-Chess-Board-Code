@@ -14,7 +14,8 @@ What it measures, for every carry:
   * whether a way was found at all (a failure means the person would have to move it);
   * extra carries to make room (a blocker moved aside and back);
   * path length, corners (each is a stop on the gantry), and the time at the console's speeds;
-  * how long the magnet is on (the firmware cuts it at 15 s; the console rests it at 12);
+  * how long a piece is held (with an electromagnet the firmware cut it at 15 s and the console
+    rested it at 12; this build's permanent magnet has no limit, so it is only a statistic);
   * the leftmost point reached (the magnet sits on the right of the Y carriage);
   * the trailing piece: a carried piece lags the magnet by a few millimetres (MuJoCo: 5-6) and
     cuts inside every corner. A leash model (the piece is pulled along on a string of length
@@ -38,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "pi"))
 import board_paths as bp  # noqa: E402
 import carry_plan as cp  # noqa: E402
+import board_layout as bl  # noqa: E402
 import gantry_driver as gd  # noqa: E402
 
 # The console's defaults (console_server.DEFAULTS): real mm and seconds.
@@ -56,6 +58,7 @@ VARIANTS = {
     "+ corner check": dict(RIGHT, path_smoothing=True, corner_lag_mm=6.0),
     "+ corner cost 10": dict(RIGHT, path_smoothing=True, corner_lag_mm=6.0, turn_penalty_mm=10.0),
     "reach from a-file": dict(RIGHT, reach_mm=[60, 0, 470, 420], path_smoothing=True, corner_lag_mm=6.0),
+    "as configured": {},          # gantry_config.json as it is (Sketch 5 of 2026-11-06: both lanes, 9 slots each)
 }
 
 
@@ -191,7 +194,8 @@ class Variant:
     # ------------------------------------------------------------------ one game
 
     def play(self, moves: list[chess.Move]) -> None:
-        board, layout = chess.Board(), cp.Layout(captures="dock")
+        board = chess.Board()
+        layout = cp.Layout(captures="dock", dock_lanes=tuple(bl.usable_lanes(self.config)), dock_slots=bl.slot_count(self.config))
         for move in moves:
             slot = None
             taken = cp.removal(board, move)

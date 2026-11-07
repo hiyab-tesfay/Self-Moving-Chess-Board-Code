@@ -126,7 +126,7 @@
       <div class="row">
         <button class="btn" id="undo">Undo last move</button>
         <button class="btn" id="resetboard">Reset board (gantry)</button>
-        <button class="btn" id="newgame" title="The pieces are already in the starting position and the lane is empty">New game (pieces set up)</button>
+        <button class="btn" id="newgame" title="The pieces are already in the starting position and the lanes are empty">New game (pieces set up)</button>
       </div>
       <div id="planbox"></div>
     </div>
@@ -170,6 +170,16 @@
     </div>
 
     <div class="panel">
+      <h2>The board (Sketch 5)</h2>
+      <div class="note" id="boardnote"></div>
+      <div id="boardproblems"></div>
+      <div class="row">
+        <button class="btn primary" id="checkboard" title="Visits a1, h1, h8, a8 and the docking lanes, and waits at each for you to look">Check the board</button>
+        <button class="btn" id="a1here" title="Jog the magnet onto a1's real centre first: the whole sketch moves so a1 is here">a1 is here</button>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>Speeds</h2>
       <div class="note" id="speednote"></div>
       <div class="grid2">
@@ -177,14 +187,12 @@
           <label class="field"><span>Travel speed<small>mm/s, arm down</small></span><input type="number" id="s_travel_speed" step="1"></label>
           <label class="field"><span>Carry speed<small>mm/s, piece on the magnet</small></span><input type="number" id="s_carry_speed" step="1"></label>
           <label class="field"><span>Acceleration<small id="accelnote">mm/s²</small></span><input type="number" id="s_accel" step="10"></label>
-          <label class="field"><span>X scale<small>real mm per mm counted</small></span><input type="number" id="s_scale_x" step="0.001"></label>
-          <label class="field"><span>Y scale<small>about 8 if its driver is on full steps</small></span><input type="number" id="s_scale_y" step="0.001"></label>
         </div>
         <div>
           <label class="field"><span>Arm settle<small>s</small></span><input type="number" id="s_servo_settle" step="0.05"></label>
           <label class="field"><span>Grab settle<small>s</small></span><input type="number" id="s_grab_settle" step="0.05"></label>
           <label class="field"><span>Release settle<small>s</small></span><input type="number" id="s_release_settle" step="0.05"></label>
-          <label class="field"><span>Magnet per hold<small>s, the board cuts it at 15</small></span><input type="number" id="s_magnet_budget" step="0.5"></label>
+          <label class="field"><span>Rest the piece every<small>s; 0 = never (permanent magnet)</small></span><input type="number" id="s_magnet_budget" step="0.5"></label>
           <label class="field"><span>Overshoot<small>mm past the square and back, so the trailing piece lands on centre</small></span><input type="number" id="s_overshoot" step="0.5"></label>
           <label class="field"><span>X axis top speed<small>mm/s; the ladder finds it</small></span><input type="number" id="s_x_speed_cap" step="1"></label>
           <label class="field"><span>Y axis top speed<small>mm/s; diagonals slow to suit</small></span><input type="number" id="s_y_speed_cap" step="1"></label>
@@ -197,16 +205,27 @@
       <h2>Stalls and buzzing</h2>
       <div class="note">A stepper buzzes without turning when it is asked for more than it can give at that speed, when it gets
         less current or voltage than it needs, or when the carriage binds. These checks tell which.</div>
-      <details open><summary>1. Distance check (microstep pins)</summary>
-        <div class="note">Moves one axis a short way slowly, as the board counts it. Measure with a ruler how far it really went,
-          and do it for X and for Y: each driver has its own pins. About 8× too far means that driver's M0/M1/M2 pins are floating
-          (full steps): every move on that axis is 8× too far and 8× too fast, which is the classic stall.</div>
+      <details open><summary>1. One motor turn</summary>
+        <div class="note">Each button sends exactly one motor turn of steps on that axis (200 full steps). On the bench one
+          turn moves the carriage <b id="t_expect">41 mm</b>. Measure how far it went and the page saves it as that axis's mm
+          per turn, which sets how the board counts. <b>+</b> is away from home (the bottom-left corner), <b>−</b> is toward
+          it. No limits: it runs anywhere, homed or not, even at the edge, so keep a hand near Stop.</div>
+        <div class="row"><button class="btn" id="t_xp" title="X+: toward the h-file, away from home">X+ → toward h</button>
+          <button class="btn" id="t_xm" title="X−: toward the a-file and home">X− ← toward a</button></div>
+        <div class="row"><button class="btn" id="t_yp" title="Y+: toward rank 8, away from home">Y+ ↑ toward rank 8</button>
+          <button class="btn" id="t_ym" title="Y−: toward rank 1 and home">Y− ↓ toward rank 1</button></div>
+        <div id="t_result"></div>
+      </details>
+      <details><summary>2. Distance check (a long run, for accuracy)</summary>
+        <div class="note">Moves one axis a long way (300 mm is good) at 10 mm/s, as the board counts it. Measure with a tape how
+          far it really went: over 300 mm a 1 mm error is 0.3 %, far better than one turn. The page works out that axis's
+          mm per turn.</div>
         <div class="row"><select id="d_axis"><option value="x">X</option><option value="y">Y</option></select>
-          <input type="number" id="d_mm" value="20" min="1" max="60"><span class="muted">mm counted</span>
+          <input type="number" id="d_mm" value="300" min="1" max="400"><span class="muted">mm counted</span>
           <button class="btn" id="d_run">Run</button></div>
         <div id="d_result"></div>
       </details>
-      <details><summary>2. Speed ladder (how fast it can go)</summary>
+      <details><summary>3. Speed ladder (how fast it can go)</summary>
         <div class="note">Goes out and back at rising speeds. Watch and listen: press <b>It stalled</b> the moment it buzzes,
           skips or stops. The page then suggests speeds with a margin. Home it first; a stall loses the position.</div>
         <div class="row"><select id="l_axis"><option value="x">X</option><option value="y">Y</option></select>
@@ -215,13 +234,13 @@
         <div class="row"><button class="btn" id="l_run">Run ladder</button><button class="btn big-red" id="l_stall">It stalled</button></div>
         <div id="l_result"></div>
       </details>
-      <details><summary>3. Push test (binding)</summary>
+      <details><summary>4. Push test (binding)</summary>
         <div class="note">Press Motors off, then push the carriage slowly along X across the whole board, then along Y.
           It should glide with an even, light force. A tight spot is binding (a V-wheel too tight, the beam twisting
           because only one side is driven, a belt rubbing): the motor will stall there at any speed.</div>
         <div class="row"><button class="btn" id="p_off">Motors off</button></div>
       </details>
-      <details><summary>4. Power and current</summary>
+      <details><summary>5. Power and current</summary>
         <div class="note" id="restarts"></div>
         <ul class="note" style="padding-left:18px;margin:4px 0">
           <li>Motor supply at the driver's VMOT must stay at 12 V or more while moving. The DRV8825 shuts off below 8.2 V; a
@@ -305,7 +324,7 @@ async function poll() {
 // ----------------------------------------------------------------- geometry (mm, y up)
 function sqXY(name) {
   const g = S.geometry, f = FILES.indexOf(name[0]), r = +name[1] - 1;
-  return [g.a1[0] + f * g.square, g.a1[1] + r * g.square];
+  return [g.a1[0] + f * g.square, g.a1[1] + r * (g.square_y || g.square)];
 }
 function slotXY(name) {
   const g = S.geometry, i = +name.slice(2), col = name[0] === "w" ? "-1" : "8";
@@ -378,6 +397,8 @@ function pieceSVG(symbol, x, y, extra) {
 
 function renderBoard() {
   const g = S.geometry, [W, H] = g.travel, half = g.square / 2, parts = [], badges = [];
+  const left = Math.min(0, ...Object.values(g.columns).map((x) => x - 16)) - 12;
+  $("#board").setAttribute("viewBox", `${left} -12 ${W + 24 - left - 12} ${H + 24}`);
   parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="none" stroke="#b9a87e" stroke-dasharray="4 4"/>`);
   const legal = mode === "chess" && selected && !selected.includes(":") ? (S.game.legal[selected] || []) : [];
   for (let f = 0; f < 8; f++) for (let r = 0; r < 8; r++) {
@@ -394,11 +415,12 @@ function renderBoard() {
     if (y0 > 0) parts.push(`<rect x="0" y="${sy(y0)}" width="${W}" height="${y0}" fill="url(#noreach)" opacity=".7"/>`);
     if (y1 < H) parts.push(`<rect x="0" y="0" width="${W}" height="${H - y1}" fill="url(#noreach)" opacity=".7"/>`);
   }
+  if (left < 0) parts.push(`<rect x="${left}" y="0" width="${-left}" height="${H}" fill="url(#noreach)" opacity=".7"><title>Out of the magnet's reach</title></rect>`);
   for (const col of Object.keys(g.columns)) {
-    const left = col === "-1";
+    const side = col === "-1" ? "w" : "b", used = g.lanes.includes(side);
     g.park_rows.forEach((py, i) => {
-      parts.push(`<circle cx="${g.columns[col]}" cy="${sy(py)}" r="13" fill="none" stroke="${left ? "#c8c2b4" : "var(--gold)"}" stroke-width="1.4" stroke-dasharray="${left ? "2 3" : "0"}"/>`);
-      if (!left) parts.push(`<text x="${g.columns[col] + 16}" y="${sy(py) + 3}" font-size="7" fill="#8d7a3a">b:${i}</text>`);
+      parts.push(`<circle cx="${g.columns[col]}" cy="${sy(py)}" r="13" fill="none" stroke="${used ? "var(--gold)" : "#c8c2b4"}" stroke-width="1.4" stroke-dasharray="${used ? "0" : "2 3"}"/>`);
+      if (used) parts.push(`<text x="${g.columns[col] + (side === "b" ? 16 : -30)}" y="${sy(py) + 3}" font-size="7" fill="#8d7a3a">${side}:${i}</text>`);
     });
   }
   // preview paths
@@ -427,8 +449,8 @@ function renderBoard() {
     if (legal.includes(name) || (free && !S.layout[name])) parts.push(`<circle cx="${x}" cy="${sy(y)}" r="6" fill="#3b2063" opacity=".55"/>`);
     parts.push(`<rect class="hit" data-place="${name}" x="${x - half}" y="${sy(y) - half}" width="${g.square}" height="${g.square}" fill="transparent"/>`);
   }
-  g.park_rows.forEach((py, i) => {
-    const name = "b:" + i, x = g.columns["8"];
+  for (const side of g.lanes) g.park_rows.forEach((py, i) => {
+    const name = side + ":" + i, x = g.columns[side === "w" ? "-1" : "8"];
     if (name === selected) parts.push(`<circle cx="${x}" cy="${sy(py)}" r="15" fill="none" stroke="#c9a227" stroke-width="4"/>`);
     if (free && !S.layout[name]) parts.push(`<circle cx="${x}" cy="${sy(py)}" r="5" fill="#3b2063" opacity=".55"/>`);
     parts.push(`<circle class="hit" data-place="${name}" cx="${x}" cy="${sy(py)}" r="16" fill="transparent"/>`);
@@ -501,14 +523,19 @@ function renderControls() {
   const busy = !!S.task, c = S.connected;
   $("#connect").disabled = c || busy;
   $("#disconnect").disabled = !c || busy;
-  for (const id of ["#motorsoff", "#homemanual", "#homebump", "#unlock", "#gobtn", "#servoup", "#servodown", "#magon", "#magoff", "#rawsend", "#p_off", "#d_run", "#l_run"])
+  for (const id of ["#motorsoff", "#homemanual", "#homebump", "#unlock", "#gobtn", "#servoup", "#servodown", "#magon", "#magoff", "#rawsend", "#p_off", "#d_run", "#l_run", "#t_xp", "#t_xm", "#t_yp", "#t_ym", "#checkboard", "#a1here"])
     $(id).disabled = !c || busy;
   document.querySelectorAll("[data-j]").forEach((b) => (b.disabled = !c || busy));
-  $("#homebump").title = Math.abs(S.settings.scale_x - 1) > 0.05 || Math.abs(S.settings.scale_y - 1) > 0.05 ? "Not while a scale is not 1: home by hand" : "$H: drives slowly into the bottom-left corner until the motors stall, then backs off";
+  const g = S.geometry, toSketch = (x, y) => `${(x + g.home[0]).toFixed(1)}, ${(y + g.home[1]).toFixed(1)}`;
+  $("#boardnote").innerHTML = `a1's centre is at ${toSketch(g.a1[0], g.a1[1])} on the sketch (${g.a1[0].toFixed(1)}, ${g.a1[1].toFixed(1)} as the board counts);
+    squares ${g.square}${g.square_y && g.square_y !== g.square ? " × " + g.square_y : ""} mm. At home the magnet is at ${toSketch(0, 0)} on the sketch.
+    One motor turn: X ${g.mm_per_turn[0]} mm, Y ${g.mm_per_turn[1]} mm (${g.steps_per_mm} steps/mm). Docking lanes in use: ${g.lanes.length ? g.lanes.map((l) => l === "w" ? "left" : "right").join(" and ") : "none"}.`;
+  setHTML($("#boardproblems"), g.problems.map((p) => `<div class="banner warn">${esc(p)}</div>`).join(""));
+  $("#t_expect").textContent = `${g.mm_per_turn[0]} mm on X and ${g.mm_per_turn[1]} mm on Y`;
   $("#fwline").textContent = c ? `${S.firmware}${S.tunable ? " · speeds and acceleration set from this page" : " · acceleration fixed at 800 mm/s² by this firmware; speeds set per move"}` : "Plug the ESP32 in by USB, pick its port (usbserial…), then Connect. Pick sim to try the page with the pretend board.";
 }
 
-const SETTING_KEYS = ["travel_speed", "carry_speed", "accel", "scale_x", "scale_y", "servo_settle", "grab_settle", "release_settle",
+const SETTING_KEYS = ["travel_speed", "carry_speed", "accel", "servo_settle", "grab_settle", "release_settle",
   "magnet_budget", "x_speed_cap", "y_speed_cap", "overshoot"];
 function renderSettings(force) {
   const s = S.settings;
@@ -524,14 +551,26 @@ function renderSettings(force) {
 }
 
 function renderTests() {
+  const t = S.tests.turn;
+  let th = "";
+  if (t && t.state === "running") th = `<div class="note">Turning ${t.axis.toUpperCase()} (${t.steps} steps)… watch the flag.</div>`;
+  if (t && (t.state === "measure" || t.state === "done")) {
+    th = `<div class="note">Sent ${t.steps} steps on ${t.axis.toUpperCase()} (${t.counted} mm as the board counts; it should move ${t.expected} mm).</div>
+      <div class="row"><span>It moved</span><input type="number" id="t_mm" step="0.5" value="${t.measured || ""}"><span class="muted">mm</span>
+      <span class="muted">or turns seen</span><input type="number" id="t_turns" step="0.125" value="${t.turns || ""}">
+      <button class="btn" onclick="turnResult()">Check</button></div>`;
+    if (t.state === "done") th += `<div class="banner info">${t.axis.toUpperCase()}: <b>${t.mm_per_turn} mm</b> per turn. ${esc(t.hint || "")}
+      ${Math.abs(t.ratio - 1) < 0.01 ? "" : `<div class="row"><button class="btn primary" onclick="useTurn('${t.axis}', ${t.mm_per_turn})">Use ${t.mm_per_turn} mm per turn for ${t.axis.toUpperCase()}</button></div>`}</div>`;
+  }
+  setHTML($("#t_result"), th);
   const d = S.tests.distance;
   let h = "";
   if (d && d.state === "running") h = `<div class="note">Moving… measure from where it started.</div>`;
   if (d && (d.state === "measure" || d.state === "done")) {
     h = `<div class="row"><span>Real distance</span><input type="number" id="d_meas" step="0.5" value="${d.measured || ""}"><span class="muted">mm</span>
-      <button class="btn" onclick="distanceResult()">Work out the scale</button></div>`;
-    if (d.state === "done") h += `<div class="banner info">Scale <b>${d.scale}</b>. ${esc(d.hint || "")}
-      <div class="row"><button class="btn primary" onclick="useSetting('${d.key}', ${d.scale})">Use ${d.axis.toUpperCase()} scale ${d.scale}</button></div></div>`;
+      <button class="btn" onclick="distanceResult()">Check</button></div>`;
+    if (d.state === "done") h += `<div class="banner info">${d.axis.toUpperCase()}: <b>${d.mm_per_turn} mm</b> per turn. ${esc(d.hint || "")}
+      ${Math.abs(d.ratio - 1) < 0.003 ? "" : `<div class="row"><button class="btn primary" onclick="useTurn('${d.axis}', ${d.mm_per_turn})">Use ${d.mm_per_turn} mm per turn for ${d.axis.toUpperCase()}</button></div>`}</div>`;
   }
   setHTML($("#d_result"), h);
   const l = S.tests.ladder;
@@ -567,6 +606,15 @@ function renderLog() {
 function setHTML(el, html) { if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; } }
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
+async function turnResult() {
+  const turns = parseFloat($("#t_turns").value), mm = parseFloat($("#t_mm").value);
+  if (!(turns > 0) && !(mm > 0)) { toast("Enter how far it moved in mm", true); return; }
+  await api("/api/test/turn-result", mm > 0 ? { measured: mm } : { turns });
+}
+async function useTurn(axis, mm) {
+  if (axis === "x" && !confirm(`Save ${mm} mm per turn for X? The board's steps/mm changes, so it forgets where it is: home it again after.`)) return;
+  if (await api("/api/mm-per-turn", { axis, mm })) toast("Saved");
+}
 async function distanceResult() {
   const v = parseFloat($("#d_meas").value);
   if (!(v > 0)) { toast("Enter the measured distance in mm", true); return; }
@@ -614,9 +662,13 @@ $("#savesettings").onclick = async () => {
 };
 $("#revertsettings").onclick = () => renderSettings(true);
 $("#d_run").onclick = () => api("/api/test/distance", { axis: $("#d_axis").value, mm: +$("#d_mm").value });
+for (const [id, axis, direction] of [["#t_xp", "x", 1], ["#t_xm", "x", -1], ["#t_yp", "y", 1], ["#t_ym", "y", -1]])
+  $(id).onclick = () => api("/api/test/turn", { axis, direction });
 $("#l_run").onclick = () => api("/api/test/ladder", { axis: $("#l_axis").value, distance: +$("#l_dist").value,
   speeds: $("#l_speeds").value.split(/[ ,]+/).map(Number).filter((v) => v > 0) });
 $("#l_stall").onclick = () => api("/api/test/stalled");
+$("#checkboard").onclick = () => api("/api/check-board");
+$("#a1here").onclick = () => { if (confirm("Is the magnet exactly under the centre of a1? The whole board moves so a1 is here (saved in gantry_config.json).")) api("/api/a1-here"); };
 
 loadPorts();
 setInterval(loadPorts, 3000);

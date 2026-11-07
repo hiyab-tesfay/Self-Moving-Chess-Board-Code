@@ -11,6 +11,7 @@
 #include "config.h"
 #include "motion.h"
 #include "protocol.h"
+#include "servo_arm.h"
 
 using namespace gantry;
 
@@ -26,6 +27,8 @@ struct FakeHal : Hal {
   long pressed_below[2] = {-1000000, -1000000};
   bool enabled = false;
   int enable_changes = 0;
+  uint32_t pulse = 0;
+  void set_step_pulse_us(uint32_t us) override { pulse = us; }
   void set_dir(int m, bool positive) override { dir[m] = positive ? 1 : -1; }
   void step(uint8_t mask) override {
     for (int m = 0; m < 2; m++) if (mask & (1 << m)) steps[m] += dir[m];
@@ -36,11 +39,16 @@ struct FakeHal : Hal {
   uint32_t now_us() override { return t; }
 };
 
-// The same numbers the sketch boots with: the default speed and acceleration, under the ceilings.
-static Settings settings(bool corexy = false, bool endstops = false, float max_step_hz = MAX_STEP_HZ) {
-  return {STEPS_PER_MM, {MAX_X_MM, MAX_Y_MM}, DEFAULT_SPEED_MM_S, DEFAULT_ACCEL_MM_S2, MAX_SPEED_MM_S, MAX_ACCEL_MM_S2, HOMING_SPEED_MM_S,
+// The motion checks run at 40 steps/mm (1/8 steps on a 40 mm pulley turn), a fine resolution that
+// shows the profile clearly; the bench's own 4.878 (full steps, 41 mm per turn) has its own test,
+// test_bench_steps_and_travel. Otherwise the numbers the sketch boots with.
+static const float TEST_STEPS_PER_MM = 40.0f;
+// Step pulse 0 (no cap from it) unless asked: most checks are about the profile at full speed.
+static Settings settings(bool corexy = false, bool endstops = false, float max_step_hz = MAX_STEP_HZ, uint32_t pulse_us = 0,
+                         float steps_per_mm = TEST_STEPS_PER_MM) {
+  return {steps_per_mm, {MAX_X_MM, MAX_Y_MM}, DEFAULT_SPEED_MM_S, DEFAULT_ACCEL_MM_S2, MAX_SPEED_MM_S, MAX_ACCEL_MM_S2, HOMING_SPEED_MM_S,
           HOMING_BUMP_MM, HOMING_PULL_OFF_MM, {false, false}, corexy, endstops, true,
-          max_step_hz, IDLE_DISABLE_MS, ENABLE_SETTLE_MS, MOVE_BUDGET_FACTOR, MOVE_BUDGET_MARGIN_MS};
+          max_step_hz, IDLE_DISABLE_MS, ENABLE_SETTLE_MS, MOVE_BUDGET_FACTOR, MOVE_BUDGET_MARGIN_MS, pulse_us};
 }
 
 // Advance simulated time until the motion is idle. Returns the simulated seconds it took.
@@ -106,7 +114,7 @@ static void test_straight_move_counts_and_timing() {
   // Never faster than the speed limit: the shortest interval between steps.
   uint32_t shortest = 1000000;
   for (size_t i = 1; i < hal.step_times.size(); i++) shortest = std::min(shortest, hal.step_times[i] - hal.step_times[i - 1]);
-  CHECK(shortest >= (uint32_t)(1000000.0 / (DEFAULT_SPEED_MM_S * STEPS_PER_MM)) - 1, "peak step interval %u us", shortest);
+  CHECK(shortest >= (uint32_t)(1000000.0 / (DEFAULT_SPEED_MM_S * TEST_STEPS_PER_MM)) - 1, "peak step interval %u us", shortest);
   // Accelerates then decelerates: intervals shrink in the first half, grow in the second.
   size_t n = hal.step_times.size();
   CHECK(hal.step_times[1] - hal.step_times[0] > hal.step_times[n / 2] - hal.step_times[n / 2 - 1], "ramps up");
@@ -158,7 +166,7 @@ static void test_hold_then_resume() {
   long at = hal.steps[0];
   for (int i = 0; i < 1000; i++) { m.run(); hal.t += 5; }
   CHECK(hal.steps[0] == at, "no steps while held");
-  CHECK(fabs(m.position_mm(X) - at / STEPS_PER_MM) < 1e-3, "position still counted");
+  CHECK(fabs(m.position_mm(X) - at / TEST_STEPS_PER_MM) < 1e-3, "position still counted");
   m.unlock();
   CHECK(m.move_to(0, 0, 0) == OK, "can move again");
   run_until_idle(hal, m);
@@ -177,21 +185,21 @@ static void test_bump_homing() {
   CHECK(m.homed() && m.state() == IDLE, "homed and idle");
   CHECK(fabs(m.position_mm(X)) < 1e-3 && fabs(m.position_mm(Y)) < 1e-3, "at 0,0");
   // Without switches it drives the whole travel plus the bump, then pulls off.
-  long expect_x = -(long)((MAX_X_MM + HOMING_BUMP_MM) * STEPS_PER_MM) + (long)(HOMING_PULL_OFF_MM * STEPS_PER_MM);
-  long expect_y = -(long)((MAX_Y_MM + HOMING_BUMP_MM) * STEPS_PER_MM) + (long)(HOMING_PULL_OFF_MM * STEPS_PER_MM);
+  long expect_x = -(long)((MAX_X_MM + HOMING_BUMP_MM) * TEST_STEPS_PER_MM) + (long)(HOMING_PULL_OFF_MM * TEST_STEPS_PER_MM);
+  long expect_y = -(long)((MAX_Y_MM + HOMING_BUMP_MM) * TEST_STEPS_PER_MM) + (long)(HOMING_PULL_OFF_MM * TEST_STEPS_PER_MM);
   CHECK(labs(hal.steps[0] - expect_x) <= 1 && labs(hal.steps[1] - expect_y) <= 1, "bump travel %ld,%ld expected %ld,%ld", hal.steps[0], hal.steps[1], expect_x, expect_y);
 }
 
 static void test_switch_homing_stops_at_the_switch() {
   FakeHal hal;
   hal.endstops = true;
-  hal.pressed_below[0] = -(long)(30 * STEPS_PER_MM);
-  hal.pressed_below[1] = -(long)(20 * STEPS_PER_MM);
+  hal.pressed_below[0] = -(long)(30 * TEST_STEPS_PER_MM);
+  hal.pressed_below[1] = -(long)(20 * TEST_STEPS_PER_MM);
   Motion m(hal, settings(false, true));
   CHECK(m.home() == OK, "homing from alarm is allowed");
   run_until_idle(hal, m);
   CHECK(m.homed(), "homed with switches");
-  long pull = (long)(HOMING_PULL_OFF_MM * STEPS_PER_MM);
+  long pull = (long)(HOMING_PULL_OFF_MM * TEST_STEPS_PER_MM);
   CHECK(labs(hal.steps[0] - (hal.pressed_below[0] + pull)) <= 1, "X stopped at the switch: %ld", hal.steps[0]);
   CHECK(labs(hal.steps[1] - (hal.pressed_below[1] + pull)) <= 1, "Y stopped at the switch: %ld", hal.steps[1]);
   CHECK(fabs(m.position_mm(X)) < 1e-3 && fabs(m.position_mm(Y)) < 1e-3, "zeroed at the pull-off spot");
@@ -279,8 +287,11 @@ static void test_move_budget_catches_a_starved_loop() {
 
 // ------------------------------------------------------------------ the protocol
 
+// The board as sketch 5 draws it (a1 at 60, lanes at 17.5 and 452.5): the board checks below were
+// written against it. config.h's defaults (the board slid right for the magnet's offset) are
+// checked in test_bench_steps_and_travel.
 static BoardGeometry board_geometry() {
-  return {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS};
+  return {50.0f, 60.0f, 35.0f, 17.5f, 452.5f, 17.5f, 35.0f, PARK_ROWS, 0.0f};
 }
 
 // Advance simulated time until the sequence and the motion are done.
@@ -404,7 +415,11 @@ static void test_board_commands() {
   CHECK(pos() == "330.000,310.000", "h8 with 40 mm squares from (50,30): %s", pos().c_str());
   CHECK(send("$B=0,1,2") == "error:2 bad number\n", "a zero square is refused");
   CHECK(send("$$").find("$B=40.000,50.000,30.000") != std::string::npos, "settings show the board: %s", r.out.text.c_str());
-  CHECK(send("$$").find("$G=15000,500,20000") != std::string::npos, "settings show the guards: %s", r.out.text.c_str());
+  {
+    char want[64];
+    snprintf(want, sizeof want, "$G=%d,%d,%d", (int)MAGNET_MAX_ON_MS, (int)MAGNET_MIN_OFF_MS, (int)HOST_TIMEOUT_MS);
+    CHECK(send("$$").find(want) != std::string::npos, "settings show the guards (%s): %s", want, r.out.text.c_str());
+  }
   send("$B=50,60,35,17.5,452.5,17.5,35");
 
   // The self-test visits the corners, works the magnet and does a knight's carry there and back.
@@ -468,6 +483,86 @@ static void test_protocol() {
 
 // ------------------------------------------------------------------ the servo arm
 
+// servo_arm.h (0.7.2): the pulse sweeps instead of jumping, and the arm is let go once down.
+static std::vector<uint32_t> g_pulses;
+static void record_pulse(uint32_t us) { g_pulses.push_back(us); }
+
+static void test_servo_arm_drive() {
+  g_pulses.clear();
+  gantry::ServoArm arm(record_pulse, 500, 2500, 360.0f, 500, 0);
+  uint32_t t = 1000;
+  arm.start(0, t);
+  CHECK(g_pulses.size() == 1 && g_pulses[0] == 500, "power-up: the down pulse at once");
+  for (int i = 0; i < 400; i++) { t += 1000; arm.tick(t, true); }
+  CHECK(arm.pulsing(), "still held 0.4 s after power-up");
+  for (int i = 0; i < 300; i++) { t += 1000; arm.tick(t, true); }
+  CHECK(!arm.pulsing() && g_pulses.back() == 0, "let go once down for half a second: last pulse %u", g_pulses.back());
+
+  g_pulses.clear();
+  uint32_t t0 = t, reached = 0, biggest = 0;
+  arm.go(90, t);
+  CHECK(g_pulses.size() == 1 && g_pulses[0] == 500, "M7 starts from where the arm rests: %u", g_pulses[0]);
+  for (int i = 0; i < 2000; i++) {
+    t += 1000;
+    arm.tick(t, false);
+    if (!reached && arm.angle() == 90.0f) reached = t - t0;
+  }
+  for (size_t i = 1; i < g_pulses.size(); i++) {
+    uint32_t d = g_pulses[i] > g_pulses[i - 1] ? g_pulses[i] - g_pulses[i - 1] : g_pulses[i - 1] - g_pulses[i];
+    if (d > biggest) biggest = d;
+  }
+  CHECK(biggest <= 25, "the pulse never jumps more than ~2 deg at a time: %u us", biggest);
+  CHECK(reached >= 240000 && reached <= 260000, "90 deg in about 0.25 s: %u us", reached);
+  CHECK(arm.pulsing() && g_pulses.back() == 1500, "held up (1500 us) as long as it is up: %u", g_pulses.back());
+
+  g_pulses.clear();
+  arm.go(0, t);
+  for (int i = 0; i < 1000; i++) { t += 1000; arm.tick(t, true); }
+  CHECK(g_pulses.size() > 40 && g_pulses[g_pulses.size() - 2] == 500 && g_pulses.back() == 0 && !arm.pulsing(),
+        "M8 sweeps down, then lets go");
+  g_pulses.clear();
+  arm.go(10, t);
+  for (int i = 0; i < 1000; i++) { t += 1000; arm.tick(t, true); }
+  CHECK(g_pulses.front() == 500 && !arm.pulsing() && g_pulses.back() == 0, "a new down angle ($S) sweeps there from rest, then lets go");
+
+  g_pulses.clear();
+  gantry::ServoArm held(record_pulse, 500, 2500, 0.0f, 0, 0);
+  held.start(0, t);
+  held.go(180, t);
+  for (int i = 0; i < 2000; i++) { t += 1000; held.tick(t, i > 1000); }
+  CHECK(held.angle() == 180.0f && g_pulses.back() == 2500 && held.pulsing(), "sweep 0 jumps, release 0 never lets go");
+  CHECK(arm.pulse_for(-5) == 500 && arm.pulse_for(200) == 2500 && arm.pulse_for(90) == 1500, "pulse widths clamp to 0-180 deg");
+}
+
+// $S=up,down[,settle] (0.7.2): the arm's angles found on the real arm, without a reflash.
+static void test_servo_angles() {
+  Rig r(true);
+  auto send = [&](const char* t) { return r.send(t); };
+  Protocol& p = r.p;
+  FakePeripherals& per = r.per;
+  send("$X");
+  r.home();
+  CHECK(send("$S=80,10") == "ok\n" && per.angle == 10 && !p.servo_up(), "$S sets the angles and the arm goes to the new down: %d", per.angle);
+  send("$$");
+  CHECK(r.out.text.find("$S=80,10,400 (servo up deg") != std::string::npos, "$$ shows them: %s", r.out.text.c_str());
+  CHECK(send("M7") == "ok\n" && per.angle == 80, "M7 uses the new up angle: %d", per.angle);
+  CHECK(send("$S=70,5") == "error:11 servo arm up: M8 first\n", "not while the arm is up: %s", r.out.text.c_str());
+  CHECK(send("M8") == "ok\n" && per.angle == 10, "M8 the new down angle: %d", per.angle);
+  CHECK(send("$S=85,15,600") == "ok\n", "with a settle time");
+  send("$$");
+  CHECK(r.out.text.find("$S=85,15,600 (") != std::string::npos, "settle set: %s", r.out.text.c_str());
+  CHECK(send("$S=200,0").rfind("error:13", 0) == 0, "angles stop at 180: %s", r.out.text.c_str());
+  CHECK(send("$S=90,0,5000").rfind("error:13", 0) == 0, "settle stops at 3000 ms: %s", r.out.text.c_str());
+  CHECK(send("$S=80").rfind("error:2", 0) == 0, "both angles needed: %s", r.out.text.c_str());
+  CHECK(send("$S=A,B").rfind("error:2", 0) == 0, "numbers only: %s", r.out.text.c_str());
+  CHECK(send("$S=1,2,3,4").rfind("error:2", 0) == 0, "three numbers at most: %s", r.out.text.c_str());
+  CHECK(send("$S=80,10,").rfind("error:2", 0) == 0, "no trailing comma: %s", r.out.text.c_str());
+  send("$$");
+  CHECK(r.out.text.find("$S=85,15,600 (") != std::string::npos, "refusals change nothing: %s", r.out.text.c_str());
+  Rig plain(false);
+  CHECK(plain.send("$S=80,10").rfind("error:1", 0) == 0, "no $S without a servo: %s", plain.out.text.c_str());
+}
+
 static void test_servo_sequence() {
   Rig r(true);
   auto send = [&](const char* t) { return r.send(t); };
@@ -512,7 +607,8 @@ static void test_servo_sequence() {
         p.program_step(8).type == STEP_SERVO && !p.program_step(8).on && p.program_step(9).type == STEP_DWELL && p.program_step(9).ms == SERVO_SETTLE_MS,
         "magnet off, release dwell, arm down, settle");
   double took = run_program(hal, m, p);
-  double y_e2 = A1_Y_MM + SQUARE_MM, y_e4 = A1_Y_MM + 3 * SQUARE_MM;
+  const gantry::BoardGeometry g = board_geometry();   // the board this test set up, not config.h's
+  double y_e2 = g.a1_y + g.square, y_e4 = g.a1_y + 3 * g.square;
   CHECK(per.events.size() == 4, "four events, got %zu", per.events.size());
   if (per.events.size() == 4) {
     CHECK(per.events[0].first == "arm up" && fabs(per.events[0].second - y_e2) < 1e-3, "1. arm up on e2: %s at Y=%.1f", per.events[0].first.c_str(), per.events[0].second);
@@ -648,6 +744,45 @@ static long ramp_steps(const std::vector<uint32_t>& times, double cruise_us) {
   return -1;
 }
 
+// The bench: 3 us pulses never reached the drivers; Zain's 1500 us ones move both motors. The step
+// rate must leave the low time at least as long as the high time.
+static void test_step_pulse_caps_the_rate() {
+  CHECK(STEP_PULSE_US == 1500, "boot step pulse 1500 us: %d", (int)STEP_PULSE_US);
+  FakeHal hal;
+  Motion m(hal, settings(false, false, MAX_STEP_HZ, STEP_PULSE_US));
+  CHECK(hal.pulse == 1500, "the Hal is told the pulse: %u", hal.pulse);
+  CHECK(fabs(m.settings().max_step_hz - 1000000.0f / 3000.0f) < 0.01f, "333 steps/s: %.2f", m.settings().max_step_hz);
+  CHECK(fabs(m.step_capped(120.0f) - 1000000.0f / 3000.0f / 40.0f) < 1e-3, "8.33 mm/s at 40 steps/mm: %.3f", m.step_capped(120.0f));
+  m.unlock();
+  m.move_to(20, 0, 0);
+  run_until_idle(hal, m);
+  uint32_t shortest = 1000000;
+  for (size_t i = 1; i < hal.step_times.size(); i++) shortest = std::min(shortest, hal.step_times[i] - hal.step_times[i - 1]);
+  CHECK(shortest >= 2995, "every step at least 3 ms after the last: %u us", shortest);
+  CHECK(hal.steps[0] == 800, "and the move arrives: %ld", hal.steps[0]);
+  CHECK(m.set_step_pulse(100) == OK && hal.pulse == 100 && fabs(m.settings().max_step_hz - 5000.0f) < 0.01f, "100 us: 5 kHz");
+  CHECK(m.set_step_pulse(0) == ERR_RANGE, "0 refused");
+  CHECK(m.set_step_pulse(2) == OK && fabs(m.settings().max_step_hz - MAX_STEP_HZ) < 0.01f, "2 us: MAX_STEP_HZ still caps");
+}
+
+static void test_step_pulse_setting() {
+  Rig r;
+  auto send = [&](const char* t) { return r.send(t); };
+  CHECK(send("$0=1500") == "ok\n", "$0: %s", r.out.text.c_str());
+  CHECK(r.hal.pulse == 1500 && fabs(r.m.step_capped(120.0f) - 8.3333f) < 1e-3, "the Hal and the cap follow: %u", r.hal.pulse);
+  std::string s = send("$$");
+  CHECK(s.find("$0=1500.000 (step pulse us)\n") != std::string::npos, "$$ shows it: %s", s.c_str());
+  CHECK(send("$0=1") == "error:13 $0 must be 2..5000\n", "too short: %s", r.out.text.c_str());
+  CHECK(send("$0=5001") == "error:13 $0 must be 2..5000\n", "too long: %s", r.out.text.c_str());
+  CHECK(send("$0=") == "error:2 bad number\n", "nothing: %s", r.out.text.c_str());
+  CHECK(r.hal.pulse == 1500, "refusals changed nothing");
+  send("$X");
+  CHECK(send("G0 X20") == "ok\n" && r.m.moving(), "a move under way");
+  CHECK(send("$0=200") == "error:3 busy\n", "no $0 while moving: %s", r.out.text.c_str());
+  run_until_idle(r.hal, r.m, &r.p);
+  CHECK(send("$0=200") == "ok\n" && r.hal.pulse == 200, "after it: %s", r.out.text.c_str());
+}
+
 static void test_settings_at_boot() {
   CHECK(DEFAULT_SPEED_MM_S == 60 && DEFAULT_ACCEL_MM_S2 == 400 && CARRY_SPEED_MM_S == 40,
         "boot defaults 60 mm/s, 400 mm/s^2, carry 40 mm/s: %.0f, %.0f, %.0f", DEFAULT_SPEED_MM_S, DEFAULT_ACCEL_MM_S2, CARRY_SPEED_MM_S);
@@ -729,7 +864,7 @@ static void test_settings_change_the_motion() {
   double took = run_until_idle(hal, r.m, &r.p);
   double ideal = ideal_time(100, 30, DEFAULT_ACCEL_MM_S2);
   CHECK(fabs(took - ideal) < ideal * 0.03 + 0.01, "100 mm at 30 mm/s took %.3fs, the trapezoid says %.3fs", took, ideal);
-  CHECK(shortest_interval(hal.step_times) >= (uint32_t)(1e6 / (30 * STEPS_PER_MM)) - 5, "no step faster than 30 mm/s: %u us", shortest_interval(hal.step_times));
+  CHECK(shortest_interval(hal.step_times) >= (uint32_t)(1e6 / (30 * TEST_STEPS_PER_MM)) - 5, "no step faster than 30 mm/s: %u us", shortest_interval(hal.step_times));
   // ...and it is the top of G1 too: a faster feed runs at 30.
   hal.step_times.clear();
   CHECK(send("G1 X150 F6000") == "ok\n", "G1 at 100 mm/s asked");
@@ -741,13 +876,13 @@ static void test_settings_change_the_motion() {
   hal.step_times.clear();
   send("G0 X350");
   took = run_until_idle(hal, r.m, &r.p);
-  long ramp_400 = ramp_steps(hal.step_times, 1e6 / (60 * STEPS_PER_MM));
+  long ramp_400 = ramp_steps(hal.step_times, 1e6 / (60 * TEST_STEPS_PER_MM));
   CHECK(fabs(took - ideal_time(200, 60, 400)) < 0.05, "200 mm at 400 mm/s^2: %.3fs vs %.3fs", took, ideal_time(200, 60, 400));
   CHECK(send("$120=200") == "ok\n", "$120=200");
   hal.step_times.clear();
   send("G0 X150");
   took = run_until_idle(hal, r.m, &r.p);
-  long ramp_200 = ramp_steps(hal.step_times, 1e6 / (60 * STEPS_PER_MM));
+  long ramp_200 = ramp_steps(hal.step_times, 1e6 / (60 * TEST_STEPS_PER_MM));
   CHECK(fabs(took - ideal_time(200, 60, 200)) < 0.05, "200 mm at 200 mm/s^2: %.3fs vs %.3fs", took, ideal_time(200, 60, 200));
   CHECK(ramp_400 > 150 && ramp_200 > 1.8 * ramp_400 && ramp_200 < 2.2 * ramp_400, "the ramp doubles: %ld steps at 400, %ld at 200", ramp_400, ramp_200);
   CHECK(fabs(r.m.move_seconds(100, 60) - ideal_time(100, 60, 200)) < 0.01, "the planner uses the new acceleration too");
@@ -765,12 +900,12 @@ static void test_settings_change_the_motion() {
   hal.step_times.clear();
   r.home();
   uint32_t at_60 = shortest_interval(hal.step_times);
-  CHECK(at_60 >= (uint32_t)(1e6 / (HOMING_SPEED_MM_S * STEPS_PER_MM)) - 5 && at_60 < (uint32_t)(1e6 / (HOMING_SPEED_MM_S * STEPS_PER_MM)) + 50,
+  CHECK(at_60 >= (uint32_t)(1e6 / (HOMING_SPEED_MM_S * TEST_STEPS_PER_MM)) - 5 && at_60 < (uint32_t)(1e6 / (HOMING_SPEED_MM_S * TEST_STEPS_PER_MM)) + 50,
         "homing at %.0f mm/s with $110=60: %u us per step", HOMING_SPEED_MM_S, at_60);
   send("$110=20");
   hal.step_times.clear();
   r.home();
-  CHECK(r.m.homed() && shortest_interval(hal.step_times) >= (uint32_t)(1e6 / (20 * STEPS_PER_MM)) - 5,
+  CHECK(r.m.homed() && shortest_interval(hal.step_times) >= (uint32_t)(1e6 / (20 * TEST_STEPS_PER_MM)) - 5,
         "homing at 20 mm/s with $110=20: %u us per step", shortest_interval(hal.step_times));
 }
 
@@ -792,17 +927,20 @@ static void test_carry_uses_the_carry_speed() {
   if (per.event_us.size() == 2) {
     // From the magnet switching on to it switching off: the grab dwell, then the 100 mm carry e2 -> e4.
     double carry_s = (per.event_us[1] - per.event_us[0]) / 1e6 - GRAB_MS / 1000.0;
-    double ideal = ideal_time(SQUARE_MM * 2, 20, DEFAULT_ACCEL_MM_S2);
+    double ideal = ideal_time(board_geometry().square * 2, 20, DEFAULT_ACCEL_MM_S2);
     CHECK(fabs(carry_s - ideal) < ideal * 0.03 + 0.01, "the carry leg took %.3fs, a 20 mm/s trapezoid %.3fs", carry_s, ideal);
     // From the command to the magnet: the travel from 0,0 to e2 at the travel speed.
     double travel_s = (per.event_us[0] - start) / 1e6;
-    double d = sqrt((A1_X_MM + 4 * SQUARE_MM) * (A1_X_MM + 4 * SQUARE_MM) + (A1_Y_MM + SQUARE_MM) * (A1_Y_MM + SQUARE_MM));
+    const BoardGeometry g = board_geometry();
+    double d = sqrt((g.a1_x + 4 * g.square) * (g.a1_x + 4 * g.square) + (g.a1_y + g.square) * (g.a1_y + g.square));
     double travel_ideal = ideal_time(d, DEFAULT_SPEED_MM_S, DEFAULT_ACCEL_MM_S2);
     CHECK(fabs(travel_s - travel_ideal) < travel_ideal * 0.03 + 0.01, "the travel leg took %.3fs, a %.0f mm/s trapezoid %.3fs", travel_s, DEFAULT_SPEED_MM_S, travel_ideal);
   }
 
-  // The magnet precheck plans with the carry speed and the acceleration as they are now.
-  r.hal.t += MAGNET_MIN_OFF_MS * 1000UL + 1000;
+  // The magnet precheck plans with the carry speed and the acceleration as they are now. It only
+  // exists for an electromagnet's coil: these are that build's limits (15 s on, 0.5 s off).
+  r.p.set_guards(15000, 500, HOST_TIMEOUT_MS);
+  r.hal.t += 500 * 1000UL + 1000;
   send("GOTO a1");
   run_program(r.hal, r.m, r.p);
   CHECK(send("$111=20") == "ok\n" && send("CARRY a1 a8") == "error:10 magnet would be on too long\n",
@@ -811,7 +949,7 @@ static void test_carry_uses_the_carry_speed() {
   CHECK(send("$111=25") == "ok\n" && send("CARRY a1 a8") == "ok\n", "at 25 mm/s it is 14.4 s: %s", r.out.text.c_str());
   run_program(r.hal, r.m, r.p);
   CHECK(r.pos() == "60.000,385.000", "and it runs: %s", r.pos().c_str());
-  r.hal.t += MAGNET_MIN_OFF_MS * 1000UL + 1000;
+  r.hal.t += 500 * 1000UL + 1000;
   CHECK(send("$120=10") == "ok\n" && send("CARRY a8 a1") == "error:10 magnet would be on too long\n",
         "the same carry with a slow ramp is too long: %s", r.out.text.c_str());
   // With the boot carry speed, the longest straight carry fits.
@@ -820,6 +958,23 @@ static void test_carry_uses_the_carry_speed() {
   CHECK(send("CARRY a8 h1") == "ok\n", "the a8-h1 diagonal at 40 mm/s: %s", r.out.text.c_str());
   run_program(r.hal, r.m, r.p);
   CHECK(r.pos() == "410.000,35.000" && r.m.state() == IDLE, "and it arrives without the magnet guard tripping: %s", r.pos().c_str());
+
+  // This build's permanent magnet (config.h: PIN_MAGNET -1, both limits 0): no carry is refused or cut
+  // short for its length, and a grab right after a release does not wait for a coil to cool.
+  Rig perm;
+  perm.send("$X");
+  perm.home();
+  perm.send("GOTO a1");
+  run_program(perm.hal, perm.m, perm.p);
+  CHECK(perm.send("$111=20") == "ok\n" && perm.send("CARRY a1 a8") == "ok\n",
+        "permanent magnet: 17.5 s under the magnet is fine: %s", perm.out.text.c_str());
+  run_program(perm.hal, perm.m, perm.p);
+  CHECK(perm.pos() == "60.000,385.000" && perm.m.state() == IDLE, "and it arrives, no alarm: %s", perm.pos().c_str());
+  CHECK(perm.send("CARRY a8 a1") == "ok\n", "straight back, no cooling wait: %s", perm.out.text.c_str());
+  run_program(perm.hal, perm.m, perm.p);
+  CHECK(perm.pos() == "60.000,35.000", "back on a1: %s", perm.pos().c_str());
+  perm.send("$$");
+  CHECK(perm.out.text.find("$G=0,0,") != std::string::npos, "$$ says there are no coil limits: %s", perm.out.text.c_str());
 }
 
 static void test_carry_speed_caps_g1_with_the_arm_up() {
@@ -862,6 +1017,83 @@ static void test_steps_per_mm_clears_homed() {
   CHECK(r.m.state() == IDLE && r.pos() == "14.000,0.000" && took > 3.9 && took < 4.3, "4 mm at 1 mm/s in %.2fs, %s: %s", took, r.m.alarm_reason(), r.pos().c_str());
 }
 
+// Firmware 0.7 on the bench: full steps, 41 mm per motor turn (measured 2026-11-06), the travel and
+// the board as $130 / $131 / $B set them, square size along Y apart from X.
+static void test_bench_steps_and_travel() {
+  CHECK(fabsf(STEPS_PER_MM - 200.0f / 41.0f) < 1e-4f, "4.878 steps/mm: %.4f", STEPS_PER_MM);
+  CHECK(fabsf(200.0f / STEPS_PER_MM - 41.0f) < 1e-3f, "one turn (200 full steps) is 41 mm: %.3f", 200.0f / STEPS_PER_MM);
+  CHECK(MAX_X_MM == 470.0f && MAX_Y_MM == 420.0f, "Sketch 5: the magnet's 470 x 420 travel");
+  CHECK(A1_X_MM == 51.25f && A1_Y_MM == 26.25f && SQUARE_MM == 52.5f, "a1 at 51.25, 26.25; 52.5 mm squares");
+  CHECK(A1_Y_MM + 7.5f * SQUARE_MM == MAX_Y_MM && 2 * A1_X_MM + 7 * SQUARE_MM == MAX_X_MM, "the board fills the height, centred across");
+  CHECK(PARK_W_X_MM == 0.0f && PARK_B_X_MM == MAX_X_MM, "the docking columns on the travel's side edges: %.1f, %.1f", PARK_W_X_MM, PARK_B_X_MM);
+  CHECK(fabsf(PARK_ROW0_MM + (PARK_ROWS - 1) * PARK_PITCH_MM - 407.65f) < 0.01f, "9 slots up to y 407.65");
+
+  FakeHal hal;
+  FakePeripherals per;
+  CaptureWriter out;
+  Settings s = settings(false, false, MAX_STEP_HZ, STEP_PULSE_US, STEPS_PER_MM);
+  Motion m(hal, s);
+  BoardGeometry board = {SQUARE_MM, A1_X_MM, A1_Y_MM, PARK_W_X_MM, PARK_B_X_MM, PARK_ROW0_MM, PARK_PITCH_MM, PARK_ROWS, 0.0f};
+  Protocol p(m, per, out, s, board, "test");
+  per.motion = &m;
+  per.hal = &hal;
+  p.set_carry(CARRY_SPEED_MM_S, GRAB_MS, RELEASE_MS);
+  p.set_servo(false, SERVO_EXTEND_DEG, SERVO_RETRACT_DEG, SERVO_SETTLE_MS);
+  p.set_guards(MAGNET_MAX_ON_MS, MAGNET_MIN_OFF_MS, HOST_TIMEOUT_MS);
+  auto send = [&](const char* text) {
+    char buf[200];
+    strncpy(buf, text, sizeof buf - 1);
+    buf[sizeof buf - 1] = 0;
+    out.text.clear();
+    p.handle_line(buf, hal.t);
+    return out.text;
+  };
+  auto at = [&]() {
+    char buf[40];
+    snprintf(buf, sizeof buf, "%.1f,%.1f", m.position_mm(X), m.position_mm(Y));
+    return std::string(buf);
+  };
+  CHECK(send("$$").find("$100=4.878 (steps/mm)\n") != std::string::npos, "$100 at boot: %s", out.text.c_str());
+  CHECK(send("$100=4.87805") == "ok\n" && !m.homed() && m.state() == ALARM, "the Pi's value is the same: nothing changes");
+  CHECK(send("$HM") == "ok\n" && m.homed(), "home by hand");
+  CHECK(send("$100=4.87805") == "ok\n" && m.homed(), "sent again after the home: still homed");
+  long before = hal.steps[0];
+  CHECK(send("G0 X41") == "ok\n", "one turn's worth");
+  run_until_idle(hal, m, &p);
+  CHECK(hal.steps[0] - before == 200, "41 mm is 200 full steps, one motor turn: %ld", hal.steps[0] - before);
+
+  // $130 / $131: the measured travel, kept through a move; the position stays valid.
+  CHECK(send("$130=400") == "ok\n" && send("$131=402.5") == "ok\n", "travel set: %s", out.text.c_str());
+  CHECK(m.homed() && m.settings().max_mm[X] == 400.0f && m.settings().max_mm[Y] == 402.5f, "kept, still homed");
+  CHECK(send("$$").find("$130=400.000 (max X mm)\n") != std::string::npos, "$$ shows it: %s", out.text.c_str());
+  CHECK(send("G0 X401") == "error:4 outside the travel limits\n", "past it refused: %s", out.text.c_str());
+  CHECK(send("G0 X400 Y402.5") == "ok\n", "up to it allowed");
+  run_until_idle(hal, m, &p);
+  CHECK(send("$130=5") == "error:13 $130 must be 10..1000\n", "too short: %s", out.text.c_str());
+  CHECK(send("$131=1001") == "error:13 $131 must be 10..1000\n", "too long: %s", out.text.c_str());
+  send("G0 X0 Y0");
+  CHECK(send("$130=470") == "error:3 busy\n", "not while moving: %s", out.text.c_str());
+  run_until_idle(hal, m, &p);
+  CHECK(send("$130=470") == "ok\n" && send("$131=420") == "ok\n", "back to the full travel");
+
+  // The boot board, Sketch 5 (one full step is 0.205 mm, so places land within 0.11 mm).
+  CHECK(send("GOTO a1") == "ok\n", "a1"); run_program(hal, m, p);
+  CHECK(fabsf(m.position_mm(X) - 51.25f) < 0.11f && fabsf(m.position_mm(Y) - 26.25f) < 0.11f, "a1 at 51.25,26.25: %s", at().c_str());
+  CHECK(send("GOTO w:0") == "ok\n", "left column"); run_program(hal, m, p);
+  CHECK(fabsf(m.position_mm(X) - 0.0f) < 0.11f && fabsf(m.position_mm(Y) - 12.35f) < 0.11f, "left slot 0 at 0,12.35: %s", at().c_str());
+  CHECK(send("GOTO b:8") == "ok\n", "right column"); run_program(hal, m, p);
+  CHECK(fabsf(m.position_mm(X) - 470.0f) < 0.11f && fabsf(m.position_mm(Y) - 407.65f) < 0.11f, "right slot 8 at 470,407.65: %s", at().c_str());
+
+  // $B's eighth number: the square size along Y measured apart from X.
+  CHECK(send("$B=50.2,1,36,-41.5,394,17.5,35,49.6") == "ok\n", "per-axis squares: %s", out.text.c_str());
+  CHECK(send("GOTO h8") == "ok\n", "h8"); run_program(hal, m, p);
+  CHECK(fabsf(m.position_mm(X) - (1 + 7 * 50.2f)) < 0.11f && fabsf(m.position_mm(Y) - (36 + 7 * 49.6f)) < 0.11f, "h8 from both sizes: %s", at().c_str());
+  CHECK(send("$$").find("$B=50.200,1.000,36.000,-41.500,394.000,17.500,35.000,49.600") != std::string::npos, "$$ shows both: %s", out.text.c_str());
+  CHECK(send("$B=50,0,35,-42.5,392.5,17.5,35,0") == "error:2 bad number\n", "a zero Y size refused: %s", out.text.c_str());
+  CHECK(send("$B=50,0,35,-42.5,392.5,17.5,35") == "ok\n", "seven numbers: Y follows X again");
+  CHECK(send("$$").find("$B=50.000,0.000,35.000,-42.500,392.500,17.500,35.000,50.000") != std::string::npos, "$$: %s", out.text.c_str());
+}
+
 int main() {
   test_straight_move_counts_and_timing();
   test_long_move_cruises_at_max_speed();
@@ -878,14 +1110,19 @@ int main() {
   test_protocol();
   test_board_commands();
   test_servo_sequence();
+  test_servo_angles();
+  test_servo_arm_drive();
   test_magnet_guards();
   test_host_lost_finishes_the_carry_then_makes_the_board_safe();
+  test_step_pulse_caps_the_rate();
+  test_step_pulse_setting();
   test_settings_at_boot();
   test_settings_accepted_refused_and_busy();
   test_settings_change_the_motion();
   test_carry_uses_the_carry_speed();
   test_carry_speed_caps_g1_with_the_arm_up();
   test_steps_per_mm_clears_homed();
+  test_bench_steps_and_travel();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

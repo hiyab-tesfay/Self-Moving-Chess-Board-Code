@@ -29,9 +29,11 @@ CONFIG = {
     "park_columns_mm": {"w": [43.0, 15.0], "b": [507.0, 535.0]}, "park_rows_mm": None,
     "travel_mm": [450.0, 400.0], "travel_speed_mm_s": 120.0, "carry_speed_mm_s": 60.0,
     "grab_settle_s": 0.3, "release_settle_s": 0.2, "servo": True, "servo_settle_s": 0.3, "home_on_start": True,
+    "step_pulse_us": 10,      # a board wired for 1/8 steps, whose wiring passes short pulses
+    "mm_per_turn": 40.0, "microsteps": 8,   # 40 steps/mm, sent as $100: a fine step, so positions read back exactly
 }
 GCODE = dict(CONFIG, protocol="grbl")
-REAL = gd.load_config(gd.DEFAULT_CONFIG)   # gantry_config.json: the board as drawn, which the pretend board also uses
+REAL = gd.load_config(gd.DEFAULT_CONFIG)   # gantry_config.json: Sketch 5 as drawn (a1 at 51.25,26.25; 52.5 mm squares; lanes at x 0 and 470)
 STEPS_PER_MM = 40.0
 
 
@@ -79,10 +81,10 @@ class BoardMapTests(unittest.TestCase):
         # Half-way between the h file and the docking lane, in the path finder as in the firmware.
         board = gd.BoardMap(REAL)
         geometry = board.geometry(REAL)
-        self.assertEqual(board.point_mm(7.5, 1.5), (431.25, 110.0))
-        self.assertEqual(geometry.board_mm(7.5, 1.5), (431.25, 110.0))
-        self.assertEqual(geometry.board_mm(-0.5, 0.5), (38.75, 60.0))
-        self.assertEqual(geometry.board_mm(5.5, 0.5), (335.0, 60.0))
+        self.assertEqual(board.point_mm(7.5, 1.5), (444.375, 105.0))
+        self.assertEqual(geometry.board_mm(7.5, 1.5), (444.375, 105.0))
+        self.assertEqual(geometry.board_mm(-0.5, 0.5), (25.625, 52.5))
+        self.assertEqual(geometry.board_mm(5.5, 0.5), (340.0, 52.5))
 
     def test_unreachable_points_fail_before_anything_moves(self):
         with self.assertRaises(gd.GantryError):
@@ -91,7 +93,11 @@ class BoardMapTests(unittest.TestCase):
             gd.plan_carry(job("x", ("p", "h2", "b:0", [[7, 1], [8, 0]])), self.board, CONFIG)
 
     def test_the_board_setup_line_for_the_firmware(self):
-        self.assertEqual(gd.BoardMap(REAL).setup_line(), "$B=50,60,35,17.5,452.5,17.5,35")
+        self.assertEqual(gd.BoardMap(REAL).setup_line(), "$B=52.5,51.25,26.25,0,470,12.35,49.41", "Sketch 5 as the board counts it")
+        two = dict(REAL, square_mm=[52.6, 52.2])
+        self.assertEqual(gd.BoardMap(two).setup_line(), "$B=52.6,51.25,26.25,0,470,12.35,49.41,52.2", "Y's size as the eighth number")
+        for got, want in zip(gd.BoardMap(two).square_mm("h8"), (51.25 + 7 * 52.6, 26.25 + 7 * 52.2)):
+            self.assertAlmostEqual(got, want)
         self.assertEqual(self.board.setup_line(), "$B=50,75,40,43,507,40,50", "no park rows: the slots follow the ranks")
 
     def test_places_as_the_firmware_reads_them(self):
@@ -107,8 +113,8 @@ class BoardMapTests(unittest.TestCase):
     def test_millimetres_and_squares_agree_with_the_firmware_off_the_board_too(self):
         board = gd.BoardMap(REAL)
         # The firmware's place_mm is linear past the last rank and between the h file and the lane.
-        self.assertEqual(board.point_mm(3, 7.25), (210.0, 397.5))
-        self.assertEqual(board.point_mm(3, -0.2), (210.0, 25.0))
+        self.assertEqual(board.point_mm(3, 7.25), (208.75, 406.875))
+        self.assertEqual(board.point_mm(3, -0.2), (208.75, 15.75))
         for x, y in ((0, 0), (7.5, 7.5), (7.6, -0.3), (3.25, 4.75), (-0.5, 2.0)):
             mm = board.point_mm(x, y)
             back = board.units(*mm)
@@ -128,7 +134,9 @@ class BoardMapTests(unittest.TestCase):
         into_lane = job("x", ("p", "h2", "b:1", [[7, 1], [8, 1]]))
         line, = texts(gd.plan_carry(into_lane, board, REAL))
         x, y = (float(v) for v in line.split()[-1].split(","))
-        self.assertEqual(board.point_mm(x, y), ((410 + 452.5) / 2, (85 + 52.5) / 2))
+        mid = board.point_mm(x, y)               # half-way from h2 to slot b:1, kept to the firmware's 3 decimals of a square
+        self.assertAlmostEqual(mid[0], (418.75 + 470) / 2, delta=0.03)
+        self.assertAlmostEqual(mid[1], (78.75 + 61.76) / 2, delta=0.03)
         lane = job("x", ("p", "b:1", "b:2", [[8, 1], [8, 2]]))
         self.assertEqual(texts(gd.plan_carry(lane, board, REAL)), ["CARRY b:1 b:2"], "along the lane: the firmware's own way")
 
@@ -210,11 +218,11 @@ class CarryPlanTests(unittest.TestCase):
 
     def test_predict_reads_carry_lines(self):
         lines = [("CARRY g1 f3 5.5,0.5 5.5,1.5", "")]
-        guess = gd.predict(lines, REAL, STEPS_PER_MM, start=(360.0, 35.0), board=self.board)
-        self.assertEqual(guess["steps"], [2000, 4000], "25+0+25 mm in X, 25+50+25 mm in Y from g1")
-        self.assertEqual(guess["end_mm"], (310.0, 135.0))
+        guess = gd.predict(lines, REAL, STEPS_PER_MM, start=(366.25, 26.25), board=self.board)
+        self.assertEqual(guess["steps"], [2100, 4200], "26.25+0+26.25 mm in X, 26.25+52.5+26.25 mm in Y from g1")
+        self.assertEqual(guess["end_mm"], (313.75, 131.25))
         self.assertGreater(guess["seconds"], 0.3 + 0.2 + 2 * 0.3 + 100 / 60, "dwells, two servo settles and the carry at 60 mm/s")
-        without_servo = gd.predict(lines, dict(REAL, servo=False), STEPS_PER_MM, start=(360.0, 35.0), board=self.board)
+        without_servo = gd.predict(lines, dict(REAL, servo=False), STEPS_PER_MM, start=(366.25, 26.25), board=self.board)
         self.assertAlmostEqual(guess["seconds"] - without_servo["seconds"], 0.6, places=2)
 
     def test_too_many_carries_is_a_planning_error(self):
@@ -297,6 +305,7 @@ class PretendBoardTests(unittest.TestCase):
         state, (moves, mags, servos), sent = self.run_job(job("e2e4", ("P", "e2", "e4", [[4, 1], [4, 3]])))
         self.assertTrue(state["homed"])
         self.assertIn("$B=50,75,40,43,507,40,50", sent, "the board is told where the squares are first")
+        self.assertLess(sent.index("$0=10"), sent.index("$B=50,75,40,43,507,40,50"), "and its step pulse before that")
         self.assertEqual([s for s in sent if s.startswith("CARRY")], ["CARRY e2 e4"])
         self.assertEqual((state["x"], state["y"]), (275.0, 190.0), "ends over e4")
         self.assertEqual(servos, [("up", 275.0, 90.0), ("down", 275.0, 190.0)], "the arm lifts on e2 and drops on e4")
@@ -427,10 +436,10 @@ class PretendBoardTests(unittest.TestCase):
         finally:
             link.close()
 
-    def test_calibration_steers_to_a1_and_h1_and_saves_the_squares(self):
-        config = dict(CONFIG, square_mm=1.0, a1_center_mm=[0.0, 0.0])
+    def test_calibration_steers_to_a1_h1_and_h8_and_saves_the_layout(self):
+        config = dict(CONFIG, square_mm=1.0, a1_center_mm=[0.0, 0.0], park_rows_mm=[17.5 + 35 * i for i in range(12)])
         path = Path(__file__).resolve().parent / ".test_calibrated.json"
-        answers = iter(["x+60", "y+35", "bogus", "x+900", "ok", "x+350", "ok"])
+        answers = iter(["x+60", "y+35", "bogus", "x+900", "ok", "x+350", "ok", "y+350", "ok"])
         said = []
         link = gd.Link("sim", 115200)
         try:
@@ -442,11 +451,14 @@ class PretendBoardTests(unittest.TestCase):
         self.assertEqual(saved["a1_center_mm"], [60.0, 35.0])
         self.assertEqual(saved["square_mm"], 50.0)
         self.assertEqual(saved["travel_mm"], [450.0, 400.0], "the rest of the config is kept")
+        self.assertEqual(saved["park_columns_mm"], {"w": [8.75], "b": [450.0]}, "lanes 51.25 mm out from the edge files, inside the travel")
+        self.assertEqual(saved["park_rows_mm"][-1], 367.5, "slots past the travel are dropped")
         self.assertTrue(any("x+10 moves" in line for line in said), "a typo gets help, not a crash")
         self.assertTrue(any("outside the gantry's travel" in line for line in said), "a jog past the travel is refused")
-        self.assertTrue(any("squares 50.00 mm" in line for line in said))
+        self.assertTrue(any("squares 50.00 mm along X and 50.00 mm along Y" in line for line in said), said)
+        self.assertTrue(any("Both docking lanes and the whole board are inside the magnet's reach." in line for line in said), said)
         moves = [t for t in link.traces if t.startswith("# MOVE")]
-        self.assertIn("to X=410.000 Y=35.000", moves[-1], "the last jog ends under h1")
+        self.assertIn("to X=410.000 Y=385.000", moves[-1], "the last jog ends under h8")
 
     def test_dry_run_prints_the_commands_and_the_prediction(self):
         gcode = subprocess.run([sys.executable, str(Path(gd.__file__)), "--dry-run", "--gcode", "--config", str(self.config_path), "--move", "a2a4"],
@@ -482,7 +494,9 @@ class PretendBoardTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual(played.returncode, 0, played.stderr[-500:])
         reply = json.loads(played.stdout.strip().splitlines()[-1])
-        self.assertEqual((reply["x_mm"], reply["y_mm"]), (260.0, 235.0), "ends over e5 on the real board's numbers")
+        # e5 on Sketch 5: the board counts whole full steps of 41/200 mm, so within 0.11 mm.
+        self.assertAlmostEqual(reply["x_mm"], 261.25, delta=0.11)
+        self.assertAlmostEqual(reply["y_mm"], 236.25, delta=0.11, msg="ends over e5 on the real board's numbers")
 
     @classmethod
     def tearDownClass(cls):

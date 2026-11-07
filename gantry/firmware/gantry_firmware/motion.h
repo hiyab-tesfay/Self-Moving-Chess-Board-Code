@@ -21,6 +21,7 @@ struct Hal {
   virtual void enable_motors(bool on) = 0;
   virtual bool endstop(int axis) = 0;             // true while the min switch is pressed; always false without switches
   virtual uint32_t now_us() = 0;                  // wraps like Arduino micros(); only differences are used
+  virtual void set_step_pulse_us(uint32_t us) { (void)us; }   // how long step() holds STEP high ($0)
 };
 
 struct Settings {
@@ -43,6 +44,7 @@ struct Settings {
   uint32_t enable_settle_ms;    // wait between enabling the drivers and the first step
   float move_budget_factor;     // a move may take this many times its planned duration...
   uint32_t move_budget_margin_ms;   // ...plus this, before "move took too long"
+  uint32_t step_pulse_us;       // STEP high time ($0); caps the step rate at 1e6 / (2 x this). 0: no cap, the Hal's own
 };
 
 enum State { ALARM, IDLE, RUN, HOME, HOLD };
@@ -67,6 +69,16 @@ class Motion {
     enabled_ = false;      // the board's setup() has already put EN high; this only mirrors that
     idle_since_ = 0;
     budget_deadline_ = 0;
+    step_hz_ceiling_ = s.max_step_hz;
+    apply_step_pulse(s.step_pulse_us);
+  }
+
+  // $0: the STEP pulse length. The step rate cap follows it (low time at least the high time).
+  int set_step_pulse(uint32_t us) {
+    if (moving()) return ERR_BUSY;
+    if (us == 0) return ERR_RANGE;
+    apply_step_pulse(us);
+    return OK;
   }
 
   State state() const { return state_; }
@@ -105,6 +117,15 @@ class Motion {
       homed_ = false;
       alarm_ = "not homed";
     }
+    return OK;
+  }
+
+  // $130 / $131: how far the magnet may travel along one axis (the soft limit). Refused while a move
+  // or homing runs; the position stays valid (only targets are checked against it).
+  int set_travel(int axis, float mm) {
+    if (moving()) return ERR_BUSY;
+    if (!(mm > 0)) return ERR_RANGE;
+    s_.max_mm[axis] = mm;
     return OK;
   }
 
@@ -393,6 +414,18 @@ class Motion {
 
   Hal& hal_;
   Settings s_;
+  float step_hz_ceiling_;   // MAX_STEP_HZ, before the step pulse lowers it
+
+  void apply_step_pulse(uint32_t us) {
+    s_.step_pulse_us = us;
+    float cap = step_hz_ceiling_;
+    if (us > 0) {
+      float by_pulse = 1000000.0f / (2.0f * (float)us);
+      if (cap <= 0 || by_pulse < cap) cap = by_pulse;
+    }
+    s_.max_step_hz = cap;
+    hal_.set_step_pulse_us(us);
+  }
   State state_;
   bool homed_;
   const char* alarm_;
