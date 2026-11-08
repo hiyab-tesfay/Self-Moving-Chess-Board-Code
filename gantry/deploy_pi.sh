@@ -14,8 +14,8 @@ ssh "$PI" "mkdir -p ~/chess-gantry-backups && cd ~/chess-gantry && tar czf ~/che
 
 # Tune answers made on the Pi live in its pi/gantry_config.json: once it has some, keep that file.
 KEEP=()
-if ssh "$PI" "grep -qE 'square_nudges_mm|calibrated_on_pi' ~/chess-gantry/gantry/pi/gantry_config.json 2>/dev/null"; then
-  echo "== the Pi's gantry_config.json has Tune / 'centre is here' answers: keeping it"
+if ssh "$PI" "grep -qE 'square_nudges_mm|calibrated_on_pi|\"start_mm\": \\[|\"home_spot_mm\": \\[' ~/chess-gantry/gantry/pi/gantry_config.json 2>/dev/null"; then
+  echo "== the Pi's gantry_config.json has Tune / 'centre is here' answers or a saved start / home spot: keeping it"
   KEEP=(--exclude 'pi/gantry_config.json')
 fi
 

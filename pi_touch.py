@@ -2791,7 +2791,18 @@ class TouchApp:
 
     def gantry_set_home(self) -> None:
         self.run_gantry_action("Setting home here…", lambda gantry: gantry.set_home_here(),
-                               lambda st: "Home set: this spot is home. " + self.position_words(st))
+                               lambda st: ("Home set, then drove to the start: " + self.corner_words(st)
+                                           if st.get("went_to_start") else
+                                           "Home set: this spot is home. " + self.position_words(st)))
+
+    @staticmethod
+    def corner_words(st: dict) -> str:
+        corner = st.get("from_corner") or {}
+        mm, steps = corner.get("mm"), corner.get("steps")
+        if not mm or not steps:
+            return ""
+        return (f"{mm[0]:.1f} mm along X and {mm[1]:.1f} mm along Y from the corner "
+                f"({steps[0]} and {steps[1]} motor steps).")
 
     def gantry_ask_home_spot(self) -> None:
         if self.busy:
@@ -2815,8 +2826,9 @@ class TouchApp:
 
     def gantry_set_start(self) -> None:
         self.run_gantry_action("Saving the start…", lambda gantry: gantry.set_start_here(),
-                               lambda st: "Saved: Center gantry and every finished move now end here (a8). "
-                                          + self.position_words(st))
+                               lambda st: "Saved: " + (self.corner_words(st) or self.position_words(st))
+                                          + " From now on: push it into the corner, tap Set home here, and it drives "
+                                            "here by itself.")
 
     def gantry_return_home(self) -> None:
         self.run_gantry_action("Returning home…", lambda gantry: gantry.return_home(),

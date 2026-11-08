@@ -79,6 +79,22 @@ class ManualControlTests(unittest.TestCase):
         st = self.player.set_home_here()    # steered onto the home spot: home it there
         self.assertTrue(st["homed"])
 
+    def test_home_in_the_corner_then_it_drives_to_the_memorised_start(self):
+        self.player.set_home_here()                        # in the corner: beside a8, the Pi counts 0, 420
+        self.player.jog(53, 0)
+        self.player.jog(0, -26)
+        st = self.player.set_start_here()
+        corner = st["from_corner"]
+        self.assertAlmostEqual(corner["mm"][0], 53.0, delta=self.STEP)
+        self.assertAlmostEqual(corner["mm"][1], 26.0, delta=self.STEP)
+        per_mm = 200 * 1 / 41.0                            # full steps per turn x microsteps / mm per turn
+        self.assertAlmostEqual(corner["steps"][0], 53.0 * per_mm, delta=1.5)
+        self.assertAlmostEqual(corner["steps"][1], 26.0 * per_mm, delta=1.5)
+        self.player.motors_off()                           # pushed back into the corner by hand ...
+        st = self.player.set_home_here()                   # ... homed there: it goes straight to the start
+        self.assertTrue(st["went_to_start"])
+        self.assertAt(st, *self.player.config["start_mm"])
+
     def test_the_arm_goes_up_and_down_before_and_after_homing(self):
         self.player.config["servo_settle_s"] = 0.0
         st = self.player.arm(True)

@@ -312,8 +312,25 @@ class GantryPlayer:
                 gantry.command("M5")
             state = self.gd.set_home_here(gantry, self.config)
             self.restore_text = ""
+            start = self.config.get("start_mm")
+            if start:      # the memorised spot: from the corner straight to it, every time
+                st = self._usable(gantry.status(), homed=True)
+                report = self._move(gantry, st, float(start[0]), float(start[1]), "going to the start")
+                return dict(report, went_to_start=True, from_corner=self.from_corner(report))
             return self._report(state)
         return self._manual(work)
+
+    def from_corner(self, st: dict) -> dict:
+        """How far the carriage is from the home corner: mm along X (towards the h-file) and along Y (away from the
+        corner), and the same in motor steps (steps per mm = full steps per turn x microsteps / mm per turn)."""
+        flip = self.gd.y_flip_mm(self.config)
+        dx = float(st["x"])
+        dy = (flip - float(st["y"])) if flip is not None else float(st["y"])
+        turn = self.config.get("mm_per_turn", [41.0, 41.0])
+        turn = turn if isinstance(turn, (list, tuple)) else [turn, turn]
+        per_turn = float(self.config.get("full_steps_per_turn", 200)) * float(self.config.get("microsteps", 1))
+        return {"mm": [round(dx, 2), round(dy, 2)],
+                "steps": [round(dx * per_turn / float(turn[0])), round(dy * per_turn / float(turn[1]))]}
 
     def save_home_spot_here(self) -> dict:
         """Homed in the true corner and jogged to where the person will home from now on: that offset becomes
@@ -331,7 +348,7 @@ class GantryPlayer:
             st = self._usable(gantry.status(), homed=True)
             start = [round(st["x"], 2), round(st["y"], 2)]
             self._save({"start_mm": start, "start_square": square})
-            return dict(self._report(st), saved={"start_mm": start})
+            return dict(self._report(st), saved={"start_mm": start}, from_corner=self.from_corner(st))
         return self._manual(work)
 
     def motors_off(self) -> dict:
