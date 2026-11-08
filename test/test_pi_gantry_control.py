@@ -79,6 +79,16 @@ class ManualControlTests(unittest.TestCase):
         st = self.player.set_home_here()    # steered onto the home spot: home it there
         self.assertTrue(st["homed"])
 
+    def test_the_arm_goes_up_and_down_before_and_after_homing(self):
+        self.player.config["servo_settle_s"] = 0.0
+        st = self.player.arm(True)
+        self.assertEqual(st["servo"], "up")
+        self.assertEqual(self.player.arm(False)["servo"], "down")
+        self.player.set_home_here()
+        self.assertEqual(self.player.arm(True)["servo"], "up")
+        st = self.player.jog(5, -5)               # a move lowers the arm first: nothing is dragged
+        self.assertEqual(st["servo"], "down")
+
     def test_home_center_jog_and_go_to(self):
         st = self.player.set_home_here()
         self.assertTrue(st["homed"])

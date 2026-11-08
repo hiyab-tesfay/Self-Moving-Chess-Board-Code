@@ -2822,6 +2822,11 @@ class TouchApp:
         self.run_gantry_action("Returning home…", lambda gantry: gantry.return_home(),
                                lambda st: "Home. " + self.position_words(st))
 
+    def gantry_arm(self, up: bool) -> None:
+        self.run_gantry_action("Raising the arm…" if up else "Lowering the arm…", lambda gantry: gantry.arm(up),
+                               lambda _st: "Arm up: the magnet is against the board." if up
+                               else "Arm down: the magnet is clear of the board.")
+
     def gantry_motors_off(self) -> None:
         self.run_gantry_action("Switching the motors off…", lambda gantry: gantry.motors_off(),
                                lambda _st: "Motors off: the carriage can be pushed by hand. Set home before moving again.")
@@ -2843,7 +2848,8 @@ class TouchApp:
         homed = "homed" if st["homed"] else "NOT homed"
         alarm = f" · {st['state']}: {st['reason']}" if st["state"] not in ("Idle", "Alarm") or (
             st["state"] == "Alarm" and st["reason"] not in ("", "not homed")) else ""
-        return f"X {st['x']:.1f}   Y {st['y']:.1f} mm  ·  {homed}  ·  {st['memory']}{alarm}"
+        arm = {"up": "  ·  arm up", "down": "  ·  arm down"}.get(st.get("servo"), "")
+        return f"X {st['x']:.1f}   Y {st['y']:.1f} mm  ·  {homed}{arm}  ·  {st['memory']}{alarm}"
 
     # the layer itself
 
@@ -2907,6 +2913,12 @@ class TouchApp:
             button = self.gantry_button(steps, label, lambda k=key: self.set_gantry_step(k), font=small)
             button.grid(row=0, column=index, sticky="ew", padx=1)
             self.gantry_step_buttons[key] = button
+        arm = tk.Frame(middle, bg=self.BG)
+        arm.pack(side="top", fill="x", pady=(6, 0))
+        for index, (label, up) in enumerate((("Arm up", True), ("Arm down", False))):
+            arm.grid_columnconfigure(index, weight=1, uniform="arm")
+            self.gantry_button(arm, label, lambda u=up: self.gantry_arm(u)).grid(
+                row=0, column=index, sticky="ew", padx=1, ipady=4 if self.compact else 8)
 
         # Right: homing, start, motors, Back (or the "Make this spot home?" question).
         self.gantry_right = tk.Frame(body, bg=self.BG)

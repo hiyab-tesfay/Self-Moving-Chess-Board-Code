@@ -71,6 +71,10 @@ class FakeControl:
     def motors_off(self):
         return self._done("motors_off")
 
+    def arm(self, up):
+        self.calls.append(("arm", up))
+        return dict(self._done("arm_up" if up else "arm_down"), servo="up" if up else "down")
+
     def square_size_mm(self):
         return 53.0, 53.0
 
@@ -161,6 +165,15 @@ class HeadlessGantryScreenTest(unittest.TestCase):
             action()
             app.poll_results()
             self.assertEqual(control.calls[-1], (name,))
+
+        app.gantry_arm(True)
+        app.poll_results()
+        self.assertIn(("arm", True), control.calls)
+        self.assertIn("arm up", app.gantry_readout_text())
+        app.gantry_arm(False)
+        app.poll_results()
+        self.assertIn(("arm", False), control.calls)
+        self.assertIn("arm down", app.gantry_readout_text())
 
     def test_one_action_at_a_time(self):
         app = self.app()

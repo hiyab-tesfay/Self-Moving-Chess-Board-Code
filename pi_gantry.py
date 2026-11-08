@@ -344,6 +344,29 @@ class GantryPlayer:
             return self._report(gantry.status())
         return self._manual(work)
 
+    def arm(self, up: bool) -> dict:
+        """The servo arm: up (M7, the magnet against the board) or down (M8, clear of it). The magnet goes off before
+        the arm comes down, so nothing is dropped half way. Waits servo_settle_s so the next move never starts with
+        the arm still travelling. Works before homing too (the carriage does not move)."""
+        def work(gantry):
+            st = gantry.status()
+            if st["state"] not in ("Idle", "Alarm", "Hold"):
+                raise self.gd.GantryError(f"The board is busy ({st['state']}).")
+            if st["state"] == "Alarm" and st["reason"] in ("", "not homed"):
+                gantry.command("$X")      # locked after a restart: the arm may still move (the carriage does not)
+            elif st["state"] in ("Alarm", "Hold"):
+                raise self.gd.GantryError(f"The board is stopped ({st['reason'] or st['state']}). Check it, put the "
+                                          "carriage on its home spot and tap Set home here.")
+            if not up and st["magnet"]:
+                gantry.command("M5")
+            gantry.command("M7" if up else "M8")
+            settle = float(self.config.get("servo_settle_s", 3.0)) if self.config.get("servo", True) else 0.0
+            if settle:
+                gantry.command(f"G4 P{settle:.3f}")
+                gantry.wait_idle(settle + 5, "the arm going up" if up else "the arm going down")
+            return self._report(gantry.status())
+        return self._manual(work)
+
     def square_size_mm(self) -> tuple[float, float]:
         """One square along X (files) and along Y (ranks), mm: the jog pad's "1 square"."""
         board = self.gd.BoardMap(self.config)
