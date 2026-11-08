@@ -102,7 +102,9 @@ class ManualControlTests(unittest.TestCase):
         self.assertEqual(self.player.arm(False)["servo"], "down")
         self.player.set_home_here()
         self.assertEqual(self.player.arm(True)["servo"], "up")
-        st = self.player.jog(5, -5)               # a move lowers the arm first: nothing is dragged
+        st = self.player.jog(5, -5)               # the jog pad keeps the arm up (at 20 mm/s, under the carry speed)
+        self.assertEqual(st["servo"], "up")
+        st = self.player.center()                 # longer moves lower it first: nothing is dragged across the board
         self.assertEqual(st["servo"], "down")
 
     def test_home_center_jog_and_go_to(self):

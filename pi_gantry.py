@@ -267,13 +267,13 @@ class GantryPlayer:
                 gantry.command(f"G92 X{mid_x:.3f} Y{mid_y:.3f}")
                 st = self._usable(gantry.status(), homed=False)
                 speed = float(self.config.get("unhomed_jog_speed_mm_s", 15.0))
-                return self._move(gantry, st, st["x"] + dx, st["y"] + dy, "jog", check=False, speed=speed)
+                return self._move(gantry, st, st["x"] + dx, st["y"] + dy, "jog", check=False, speed=speed, keep_arm=True)
             travel = self.gd.BoardMap(self.config).travel
             tx = min(max(st["x"] + dx, 0.0), travel[0])
             ty = min(max(st["y"] + dy, 0.0), travel[1])
             if abs(tx - st["x"]) < 0.01 and abs(ty - st["y"]) < 0.01:
                 raise self.gd.GantryError("The carriage is already at the edge of its travel that way.")
-            return self._move(gantry, st, tx, ty, "jog", check=True)
+            return self._move(gantry, st, tx, ty, "jog", check=True, keep_arm=True)
         return self._manual(work)
 
     def center(self) -> dict:
@@ -513,14 +513,22 @@ class GantryPlayer:
     def _away_words(self) -> str:
         return "right ▶ or down ▼" if self.gd.y_flip_mm(self.config) is not None else "right ▶ or up ▲"
 
+    ARM_UP_JOG_MM_S = 20.0      # under the firmware's carry speed ($111: 40 at boot, 25 from the console)
+
     def _move(self, gantry, st: dict, x: float, y: float, what: str, check: bool = True,
-              speed: float | None = None) -> dict:
-        """The empty magnet (magnet off, arm down) to x, y at the travel speed; waits until it is there."""
+              speed: float | None = None, keep_arm: bool = False) -> dict:
+        """The empty magnet (magnet off, arm down) to x, y at the travel speed; waits until it is there.
+        keep_arm (the jog pad): an arm that is up stays up, and the move runs at ARM_UP_JOG_MM_S, because the
+        firmware refuses anything faster than a carry with the arm up (the magnet is at the board)."""
         if check:
             self.gd.BoardMap(self.config).check(x, y, what)
         if st["magnet"]:
             gantry.command("M5")
-        if st.get("servo") == "up":
+        arm_up = st.get("servo") == "up"
+        if arm_up and keep_arm:
+            limit = min(self.ARM_UP_JOG_MM_S, float(self.config.get("carry_speed_mm_s", 40.0)))
+            speed = min(float(speed if speed is not None else self.config.get("travel_speed_mm_s", 60.0)), limit)
+        elif arm_up:
             gantry.command("M8")
             settle = float(self.config.get("servo_settle_s", 3.0)) if self.config.get("servo", True) else 0.0
             if settle:
