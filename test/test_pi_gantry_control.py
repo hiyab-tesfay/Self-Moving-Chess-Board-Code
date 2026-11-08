@@ -210,7 +210,11 @@ class ManualControlTests(unittest.TestCase):
         self.assertEqual((st["uci"], st["carry"]), ("g1f3", True))
         self.assertFalse(st["magnet"])
         self.assertEqual(st["servo"], "down")
-        self.assertAt(st, *self.map.square_mm("f3"))           # no start_mm saved: it stays where it let go
+        # No start_mm saved: it stays where it let go. With drag_lag_mm the MAGNET stops that far past f3's centre
+        # along the way it came in (the dragged piece trails it, so the piece stops on the centre).
+        lag = float(self.player.config.get("drag_lag_mm", 0.0))
+        fx, fy = self.map.square_mm("f3")
+        self.assertAlmostEqual(((st["x"] - fx) ** 2 + (st["y"] - fy) ** 2) ** 0.5, lag, delta=2 * self.STEP)
         start = list(self.map.square_mm("a8"))
         self.player.config["start_mm"] = start                  # in memory only (the pretend board)
         st = self.player.test_move("e2e4", carry=True)

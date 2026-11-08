@@ -373,6 +373,60 @@ def checked_points(step: dict, board: BoardMap) -> list[tuple[float, float]]:
     return points
 
 
+def lag_compensated(points, lag_mm: float, travel=None) -> list[tuple[float, float]]:
+    """Where the MAGNET must go so a dragged piece lands on `points` (the path the piece should follow, the first one
+    being where it is picked up). Returns the magnet's waypoints after the first point.
+
+    The math: dragged along a direction u (unit vector), the piece settles lag_mm BEHIND the magnet, at
+    magnet - lag*u, because friction holds it back until the magnet's pull balances it. So:
+      * along a straight leg the piece trails on the same line: nothing to correct there;
+      * at a path point P reached along u_in, the magnet goes to P + lag*u_in: the piece then sits exactly on P
+        (without this the piece stops lag_mm short of every corner and cuts it, and stops short of the target);
+      * at a corner (the next leg goes along u_out), the magnet then swings to P + lag*u_out: it stays lag_mm from
+        the piece the whole time, so the piece stays on the corner while the lead turns onto the new line, and the
+        next leg drags it along that line;
+      * at the last point the magnet stops at P + lag*u_in, so the piece stops on the square's centre.
+    Points are clamped inside the travel (0..travel): next to the frame (rank 8's centres sit on the Y limit here)
+    the lead along that axis is lost, and the piece lands up to lag_mm short there."""
+    import math as _math
+    pts = [(float(x), float(y)) for x, y in points]
+    if len(pts) < 2:
+        return []
+    if lag_mm <= 0:
+        return pts[1:]
+
+    def unit(a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        d = _math.hypot(dx, dy)
+        return (dx / d, dy / d) if d > 1e-9 else None
+
+    def clamp(x, y):
+        if travel is not None:
+            x = min(max(x, 0.0), float(travel[0]))
+            y = min(max(y, 0.0), float(travel[1]))
+        return round(x, 3), round(y, 3)
+
+    out: list[tuple[float, float]] = []
+
+    def add(point):
+        if not out or _math.hypot(point[0] - out[-1][0], point[1] - out[-1][1]) > 1e-3:
+            out.append(point)
+
+    u_in = None
+    for i in range(1, len(pts)):
+        u = unit(pts[i - 1], pts[i])
+        u_in = u or u_in
+        p = pts[i]
+        if u_in is None:
+            continue
+        add(clamp(p[0] + lag_mm * u_in[0], p[1] + lag_mm * u_in[1]))
+        if i < len(pts) - 1:
+            u_out = unit(p, pts[i + 1])
+            if u_out is not None and abs(u_out[0] - u_in[0]) + abs(u_out[1] - u_in[1]) > 1e-6:
+                add(clamp(p[0] + lag_mm * u_out[0], p[1] + lag_mm * u_out[1]))
+    return out
+
+
 def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
     """G-code lines for a job (GRBL boards, firmware 0.1), each with a note for the log. Fails before anything moves if a point is out of reach.
 
@@ -404,7 +458,8 @@ def plan(job: dict, board: BoardMap, config: dict) -> list[tuple[str, str]]:
             lines.append((f"G4 P{servo:.3f}", "let the arm settle"))
         lines.append(("M3", describe_step(step)))   # perform() tells progress() this note: the touch screen shows it
         lines.append((f"G4 P{float(config['grab_settle_s']):.3f}", "let the magnet take hold"))
-        for (x, y) in points[1:]:
+        # drag_lag_mm: the carried piece trails the magnet; lead it so the PIECE follows the path (lag_compensated).
+        for (x, y) in lag_compensated(points, float(config.get("drag_lag_mm", 0.0)), board.travel):
             lines.append((f"G1 X{x:.3f} Y{y:.3f} F{carry_feed:.0f}", f"carry {label}"))
         lines.append(("M5", f"release {label}"))
         lines.append((f"G4 P{float(config['release_settle_s']):.3f}", "let go cleanly"))
