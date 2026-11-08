@@ -17,9 +17,16 @@ person presses Check), and only then lets the gantry play the capturing move:
     player.reset(say)                          # everything back home; returns the pieces the person must put back
     player.expected_squares()                  # the squares the camera should see occupied
 
+Manual control, for the touch screen's Gantry screen (each opens the link if needed and keeps it open until
+close(); every move with the magnet off and the arm down; see "manual control" below):
+    player.status() / jog(dx, dy) / center() / go_to_square("e4") / set_home_here() / save_home_spot_here() /
+    set_start_here() / return_home() / motors_off()   -> {x, y, homed, remembered, memory, units, ...}
+
 Configuration, from the environment:
-    CHESS_GANTRY_PORT    serial device of the ESP32 (e.g. /dev/ttyUSB0), or "sim" for the pretend
-                         board in gantry/firmware/host. Unset: no gantry, from_env() returns None.
+    CHESS_GANTRY_PORT    serial device of the ESP32 (e.g. /dev/ttyUSB0), "auto" for the first of the
+                         sorted /dev/ttyUSB* then /dev/ttyACM* (none found: a warning and no
+                         gantry), or "sim" for the pretend board in gantry/firmware/host.
+                         Unset: no gantry, from_env() returns None.
     CHESS_GANTRY_DIR     the gantry/pi folder of the Self-Moving-Chess-Board-Code repo (branch
                          gantry). Default: the first of ~/chess-gantry/gantry/pi and
                          ~/Self-Moving-Chess-Board-Code/gantry/pi that exists.
@@ -34,6 +41,7 @@ the arm and stops the motion on any exception, and this module sends M5 and M8 o
 """
 from __future__ import annotations
 
+import glob
 import logging
 import os
 from pathlib import Path
@@ -41,6 +49,7 @@ import sys
 
 import chess
 
+AUTO_PORT_PATTERNS = ("/dev/ttyUSB*", "/dev/ttyACM*")   # CP210x/CH340 first, then CDC-ACM
 DEFAULT_DIRS = (Path.home() / "chess-gantry" / "gantry" / "pi", Path.home() / "Self-Moving-Chess-Board-Code" / "gantry" / "pi")
 log = logging.getLogger("pi_gantry")
 
@@ -56,6 +65,15 @@ def find_gantry_dir(explicit: str | None = None) -> Path | None:
     for candidate in DEFAULT_DIRS:
         if candidate.is_dir():
             return candidate
+    return None
+
+
+def find_serial_port() -> str | None:
+    """The first of the sorted /dev/ttyUSB*, then the first of the sorted /dev/ttyACM*; None when there is neither."""
+    for pattern in AUTO_PORT_PATTERNS:
+        found = sorted(glob.glob(pattern))
+        if found:
+            return found[0]
     return None
 
 
@@ -77,6 +95,9 @@ class GantryPlayer:
         except (OSError, ValueError) as exc:
             raise GantryError(f"The gantry's settings could not be read ({self.config_path}): {exc}") from None
         self.link = None
+        self.manual = None          # the Gantry the manual controls use while this link is open (see _manual_gantry)
+        self.restore_text = ""      # what connecting for the manual controls found out about the position
+        self.save_to_file = port != "sim"   # the pretend board changes its settings in memory only, like the console
         self.layout = self.cp.Layout()
 
     # ------------------------------------------------------------------ set-up
@@ -88,6 +109,14 @@ class GantryPlayer:
             port = (os.environ.get("CHESS_GANTRY_PORT") or "").strip()
             if not port:
                 return None
+            if port.lower() == "auto":
+                found = find_serial_port()
+                if found is None:
+                    log.warning("CHESS_GANTRY_PORT=auto but no serial device was found (%s); playing without the gantry",
+                                ", ".join(AUTO_PORT_PATTERNS))
+                    return None
+                log.info("CHESS_GANTRY_PORT=auto: using %s", found)
+                port = found
             directory = find_gantry_dir(os.environ.get("CHESS_GANTRY_DIR"))
             if directory is None:
                 log.warning("CHESS_GANTRY_PORT is set but no gantry folder was found (CHESS_GANTRY_DIR, %s)", ", ".join(str(d) for d in DEFAULT_DIRS))
@@ -105,12 +134,7 @@ class GantryPlayer:
         """Open the link, tell the board where the squares are, home if the config says so. Raises GantryError."""
         if self.link is not None:
             return
-        try:
-            self.link = self.gd.Link(self.port, int(self.config.get("baud", 115200)), log)
-        except self.gd.GantryError as exc:
-            raise GantryError(str(exc)) from None
-        except Exception as exc:
-            raise GantryError(f"Could not open the gantry on {self.port}: {exc}") from None
+        self._open_link()
         try:
             gantry = self.gd.Gantry(self.link, log)
             gantry.check_safe()
@@ -126,7 +150,22 @@ class GantryPlayer:
             self.close()
             raise GantryError(f"The gantry did not answer: {exc}") from None
 
+    def _open_link(self) -> None:
+        """Just the link (the port lock taken first, so a second program gets a plain refusal). Raises GantryError."""
+        if self.link is not None:
+            return
+        try:
+            flip_y = self.gd.y_flip_mm(self.config)
+            self.link = self.gd.Link(self.port, int(self.config.get("baud", 115200)), log,
+                                     keep_running=self.config.get("keep_esp32_running"))
+            self.link.flip_y = flip_y   # home beside a8: every Y mirrored, from the first status on
+        except self.gd.GantryError as exc:
+            raise GantryError(str(exc)) from None
+        except Exception as exc:
+            raise GantryError(f"Could not open the gantry on {self.port}: {exc}") from None
+
     def close(self) -> None:
+        self.manual = None
         if self.link is not None:
             try:
                 self.link.close()
@@ -199,6 +238,217 @@ class GantryPlayer:
     def expected_squares(self) -> set[str]:
         """The squares the camera should see occupied: after a capture the taken piece is gone, after reset() the full start."""
         return set(self.layout.on_board())
+
+    # ------------------------------------------------------------------ manual control (the touch screen's Gantry panel)
+    # Each method opens the link if it is not open yet (the port lock: one program at a time) and leaves it open:
+    # a burst of jog presses must not pay for opening it every time (see _manual_gantry). close() lets it go.
+    # Every move goes with the magnet off and the arm down, at the travel speed. Faults come back as GantryError.
+
+    def status(self) -> dict:
+        """{x, y, homed, state, reason, magnet, servo, remembered, memory, restore, units}: where the carriage is
+        as the Pi counts (home beside a8 mirrors Y), whether the position file trusts it, and `units` (the spot in
+        square units: a1's centre 0,0) for the screen's little board."""
+        return self._manual(lambda gantry: self._report(gantry.status()))
+
+    def jog(self, dx: float, dy: float) -> dict:
+        """Move by dx, dy mm (as the Pi counts: +X towards the h-file, +Y towards rank 8). Homed: the target is
+        kept inside the travel (a jog past the frame stops at its edge). Not homed: only away from the home corner
+        (+X, and +Y or, with home beside a8, -Y), the only moves the firmware allows before homing."""
+        def work(gantry):
+            st = self._usable(gantry.status(), homed=False)
+            if not st["homed"]:
+                toward_corner_y = dy > 0 if gantry.link.flip_y is not None else dy < 0
+                if dx < 0 or toward_corner_y:
+                    raise self.gd.GantryError("Not homed: before homing the gantry only moves away from the home corner "
+                                              f"({self._away_words()}). Set home first.")
+                tx, ty = st["x"] + dx, st["y"] + dy
+            else:
+                travel = self.gd.BoardMap(self.config).travel
+                tx = min(max(st["x"] + dx, 0.0), travel[0])
+                ty = min(max(st["y"] + dy, 0.0), travel[1])
+                if abs(tx - st["x"]) < 0.01 and abs(ty - st["y"]) < 0.01:
+                    raise self.gd.GantryError("The carriage is already at the edge of its travel that way.")
+            return self._move(gantry, st, tx, ty, "jog", check=st["homed"])
+        return self._manual(work)
+
+    def center(self) -> dict:
+        """Center gantry: the empty magnet to the starting position (start_mm, saved with Set start here), or a8's
+        centre on the board map when none is saved."""
+        def work(gantry):
+            st = self._usable(gantry.status(), homed=True)
+            start = self.config.get("start_mm")
+            x, y = (float(start[0]), float(start[1])) if start else self.gd.BoardMap(self.config).square_mm("a8")
+            return self._move(gantry, st, x, y, "going to the start")
+        return self._manual(work)
+
+    def go_to_square(self, square: str) -> dict:
+        square = str(square).strip().lower()
+        if len(square) != 2 or square[0] not in "abcdefgh" or square[1] not in "12345678":
+            raise GantryError(f"{square!r} is not a square.")
+
+        def work(gantry):
+            st = self._usable(gantry.status(), homed=True)
+            x, y = self.gd.BoardMap(self.config).square_mm(square)
+            return self._move(gantry, st, x, y, f"going to {square}")
+        return self._manual(work)
+
+    def return_home(self) -> dict:
+        """Back to the home spot (the corner, or home_spot_mm away from it) in one straight line."""
+        def work(gantry):
+            st = self._usable(gantry.status(), homed=True)
+            x, y = self.gd.home_xy(self.config)
+            return self._move(gantry, st, x, y, "returning home")
+        return self._manual(work)
+
+    def set_home_here(self) -> dict:
+        """The person has put the carriage on its home spot: $HM, and G92 to the corner + home_spot_mm when set."""
+        def work(gantry):
+            st = gantry.status()
+            if st["magnet"]:
+                gantry.command("M5")
+            state = self.gd.set_home_here(gantry, self.config)
+            self.restore_text = ""
+            return self._report(state)
+        return self._manual(work)
+
+    def save_home_spot_here(self) -> dict:
+        """Homed in the true corner and jogged to where the person will home from now on: that offset becomes
+        home_spot_mm in gantry_config.json. The count stays as it is (it is still measured from the corner)."""
+        def work(gantry):
+            st = self._usable(gantry.status(), homed=True)
+            spot = self.gd.home_spot_from_here(st, self.config)
+            self._save({"home_spot_mm": spot})
+            return dict(self._report(st), saved={"home_spot_mm": spot})
+        return self._manual(work)
+
+    def set_start_here(self, square: str = "a8") -> dict:
+        """Where the magnet is now becomes the starting position (start_mm; Center gantry and the end of every job go there)."""
+        def work(gantry):
+            st = self._usable(gantry.status(), homed=True)
+            start = [round(st["x"], 2), round(st["y"], 2)]
+            self._save({"start_mm": start, "start_square": square})
+            return dict(self._report(st), saved={"start_mm": start})
+        return self._manual(work)
+
+    def motors_off(self) -> dict:
+        """M18: the carriage can be pushed by hand (the position file stops trusting the count)."""
+        def work(gantry):
+            st = gantry.status()
+            if st["magnet"]:
+                gantry.command("M5")
+            gantry.command("M18")
+            return self._report(gantry.status())
+        return self._manual(work)
+
+    def square_size_mm(self) -> tuple[float, float]:
+        """One square along X (files) and along Y (ranks), mm: the jog pad's "1 square"."""
+        board = self.gd.BoardMap(self.config)
+        return board.square, board.square_y
+
+    # manual control, inside
+
+    def _manual_gantry(self):
+        """The open link, configured once for the manual controls: Y mirrored for home beside a8, steps/mm and travel
+        sent, the board geometry ($B) for the duen protocol, and a restarted board put back at its remembered spot.
+
+        Opening costs about 1.5 s on the real board (with keep_esp32_running the ESP32 does not restart: the link
+        waits for its first status line, then Gantry listens a second for anything it printed, then three settings
+        go out); without keep_esp32_running it also restarts the ESP32 (2 s, and the count is lost). So the link
+        stays open across presses until close()."""
+        self._open_link()   # no check_safe here: a board in alarm or hold must still reach Set home here
+        if self.manual is None or self.manual.link is not self.link:
+            gantry = self.gd.Gantry(self.link, log)
+            self.link.flip_y = self.gd.y_flip_mm(self.config)
+            gantry.set_motion(self.config)
+            if not self.gd.uses_gcode(self.config):
+                gantry.set_step_pulse(self.config)
+                gantry.set_board(self.config)
+            st = gantry.status()
+            if st["homed"] and st["state"] != "Alarm":
+                self.restore_text = ""
+            else:
+                _outcome, self.restore_text = gantry.restore_position(self.config)
+            self.manual = gantry
+        return self.manual
+
+    def _manual(self, work) -> dict:
+        try:
+            gantry = self._manual_gantry()
+            return work(gantry)
+        except self.gd.GantryError as exc:
+            self._make_safe()
+            raise GantryError(str(exc)) from None
+        except GantryError:
+            self._make_safe()
+            raise
+        except Exception as exc:
+            self._make_safe()
+            self.close()
+            raise GantryError(f"The gantry stopped: {exc}") from None
+
+    def _usable(self, st: dict, homed: bool) -> dict:
+        """Refuse while the board wants a person to look first; with homed=True also while it is not homed."""
+        if st["host_lost"]:
+            raise self.gd.GantryError("The board lost contact with the Pi and made itself safe. Check the carriage, "
+                                      "put it on its home spot and tap Set home here.")
+        if st["state"] == "Hold":
+            raise self.gd.GantryError("The board is stopped (hold). Put the carriage on its home spot and tap Set home here.")
+        if st["state"] == "Alarm" and st["reason"] not in ("", "not homed"):
+            raise self.gd.GantryError(f"The board is in alarm ({st['reason']}). Check it, put the carriage on its home "
+                                      "spot and tap Set home here.")
+        if homed and not st["homed"]:
+            raise self.gd.GantryError("Not homed. Put the carriage on its home spot and tap Set home here.")
+        if st["state"] not in ("Idle", "Alarm"):
+            raise self.gd.GantryError(f"The board is busy ({st['state']}).")
+        return st
+
+    def _away_words(self) -> str:
+        return "right ▶ or down ▼" if self.gd.y_flip_mm(self.config) is not None else "right ▶ or up ▲"
+
+    def _move(self, gantry, st: dict, x: float, y: float, what: str, check: bool = True) -> dict:
+        """The empty magnet (magnet off, arm down) to x, y at the travel speed; waits until it is there."""
+        if check:
+            self.gd.BoardMap(self.config).check(x, y, what)
+        if st["magnet"]:
+            gantry.command("M5")
+        if st.get("servo") == "up":
+            gantry.command("M8")
+            settle = float(self.config.get("servo_settle_s", 3.0)) if self.config.get("servo", True) else 0.0
+            if settle:
+                gantry.command(f"G4 P{settle:.3f}")
+                gantry.wait_idle(settle + 5, "the arm going down")
+        if st["state"] == "Alarm":       # "not homed" after a restart: $X lets it jog away from the corner
+            gantry.command("$X")
+        speed = float(self.config.get("travel_speed_mm_s", 60.0))
+        distance = ((x - st["x"]) ** 2 + (y - st["y"]) ** 2) ** 0.5
+        if distance >= 0.01:
+            gantry.command(f"G1 X{x:.3f} Y{y:.3f} F{speed * 60:.0f}")
+            gantry.wait_idle(10 + 3 * distance / max(speed, 1.0), what, expected=distance / max(speed, 1.0))
+        return self._report(gantry.status())
+
+    def _report(self, st: dict) -> dict:
+        memory = getattr(self.link, "memory", None)
+        if memory is not None:
+            described = memory.describe()
+        else:
+            described = {"remembered": False, "text": "pretend board: the position is not saved"}
+        try:
+            units = self.gd.BoardMap(self.config).units(st["x"], st["y"]) if st["homed"] else None
+        except Exception:
+            units = None
+        return {"x": st["x"], "y": st["y"], "homed": bool(st["homed"]), "state": st["state"], "reason": st["reason"],
+                "magnet": bool(st["magnet"]), "servo": st.get("servo"), "remembered": bool(described.get("remembered")),
+                "memory": described.get("text", ""), "restore": self.restore_text, "units": units}
+
+    def _save(self, values: dict) -> None:
+        """Into gantry_config.json (the old file kept once as gantry_config.json.before-touch) and into the config in
+        use. The pretend board keeps it in memory only."""
+        if self.save_to_file:
+            try:
+                self.gd.update_config_file(self.config_path, values)
+            except (OSError, ValueError) as exc:
+                raise self.gd.GantryError(f"Could not save {self.config_path}: {exc}") from None
+        self.config.update(values)
 
     # ------------------------------------------------------------------ inside
 

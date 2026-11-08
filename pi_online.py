@@ -7,10 +7,7 @@ starting position carries `fresh`, so the server starts from an empty board inst
 game somebody left behind. Until a connected browser starts a game the screen shows the
 website address and the board's access code; then it shows the game as the website plays
 it; when the game ends the pieces go home ("Putting the pieces back…") and the address and
-code come back with the result. End Game / Reset Board on the screen send `reset` once. When the
-website's move is a capture the gantry waits for the person to take the piece off: the screen
-shows "Remove the piece" with a Check button, which asks the server (POST /api/board-confirm) to
-photograph the board and go on once the square is empty.
+code come back with the result. End Game / Reset Board on the screen send `reset` once.
 Nothing here touches the camera or the in-person game.
 
 Settings come from ~/.config/duen-chess/relay.env, the same file the game server reads:
@@ -95,8 +92,6 @@ class OnlineSettings:
 class RelayClient:
     """Talks to the game server on this Pi as the screen's own session."""
 
-    CONFIRM_TIMEOUT = 15.0   # /api/board-confirm has the server photograph the board and check it
-
     def __init__(self, settings: OnlineSettings, session: str | None = None, timeout: float = 2.0) -> None:
         self.settings = settings
         self.session = session or "touchscreen-" + uuid4().hex
@@ -115,23 +110,13 @@ class RelayClient:
             message["fresh"] = True
         if reset:
             message["reset"] = True
-        return self._post("/api/online", message, self.timeout)
-
-    def confirm(self, job_id: str) -> dict:
-        """Check on the screen while the website's game waits for a captured piece to be taken off:
-        the server photographs the board and, when the square is empty, plays the move. Returns the
-        snapshot, the same shape as a heartbeat's; while the piece is still there the board stays
-        waiting and `motion.error` says so."""
-        return self._post("/api/board-confirm", {"jobId": job_id}, self.CONFIRM_TIMEOUT)
-
-    def _post(self, path: str, message: dict, timeout: float) -> dict:
         body = json.dumps(message).encode()
         request = urllib.request.Request(
-            self.settings.relay_url.rstrip("/") + path, data=body, method="POST",
+            self.settings.relay_url.rstrip("/") + "/api/online", data=body, method="POST",
             headers={"Authorization": "Bearer " + self.settings.token, "X-Player-Session": self.session,
                      "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as reply:
+            with urllib.request.urlopen(request, timeout=self.timeout) as reply:
                 data = json.loads(reply.read())
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
@@ -179,9 +164,6 @@ class OnlineView:
     # as the website plays it (End Game); "resetting": the final position while the pieces go home (no
     # button); "fix_setup": the reset stopped, the person sets up the start position and taps Check Again.
     mode: str = "game"
-    # The job the screen's Check button confirms (POST /api/board-confirm): the game waits for the person
-    # to take a captured piece off the board. None in every other state.
-    check_job: str | None = None
 
 
 ENDED_TITLES = {"timeout": "Out of time", "resignation": "Game over", "abandoned": "Game over"}
@@ -220,17 +202,6 @@ def describe_online(snapshot: dict, settings: OnlineSettings) -> OnlineView:
             return OnlineView(connected, board, last_move, f"Camera checking {current}", "Checking the pieces on the board.", f"Camera checking {current}…")
         return OnlineView(connected, board, last_move, f"Gantry moving {current}", "Keep hands clear of the board.", f"Gantry moving {current}…")
 
-    def removing() -> OnlineView:
-        # The gantry does not take captured pieces off: the person does, then taps Check, and the server's
-        # camera confirms the square is empty before the move is played. `error`: it was still there.
-        steps = " ".join(motion.get("instructions") or [])
-        error = (motion.get("error") or "").strip()
-        job_id = motion.get("jobId")
-        return OnlineView(connected, board, last_move, "Remove the piece",
-                          error or steps or "Take the captured piece off the board, then tap Check.",
-                          error or "Waiting for the piece to be removed…",
-                          check_job=str(job_id) if job_id is not None else None)
-
     # The pieces are going home: after a game ended, or after Reset Board on the screen.
     if state == "moving" and current == "reset":
         status = "Checking the pieces…" if stage == "camera" else "Putting the pieces back…"
@@ -248,8 +219,6 @@ def describe_online(snapshot: dict, settings: OnlineSettings) -> OnlineView:
     if game_over:
         if state == "moving":
             return moving()   # the last move is still being carried; the reset follows
-        if state == "waiting" and stage == "remove":
-            return removing()   # a capture that ends the game: the piece comes off before the gantry plays it
         result = snapshot.get("result") or "The game has ended."
         return OnlineView(connected, board, last_move, "Online", f"Last game: {result} {where}",
                           f"Last game: {result} Waiting for a player to connect…", mode="pairing")
@@ -264,8 +233,6 @@ def describe_online(snapshot: dict, settings: OnlineSettings) -> OnlineView:
                           (motion.get("error") or "") + " Set the pieces to match the screen, then confirm on the website.",
                           "The board stopped. Fix the pieces, then confirm on the website.")
     if state == "waiting":
-        if stage == "remove":
-            return removing()
         steps = " ".join(motion.get("instructions") or [])
         return OnlineView(True, board, last_move, "Move the piece by hand", steps or "Follow the website.", steps or "Waiting for the move on the board.")
     if state == "moving":
@@ -294,7 +261,6 @@ class OnlineSession:
         self.checking = False
         self.verified = False
         self.problem: str | None = None
-        self.confirming = False   # Check was tapped: /api/board-confirm is on its way (the screen's worker)
         # One-shot flags for the next heartbeat ("fresh", "reset"); each stays until a heartbeat carrying it succeeded.
         self._pending: set[str] = set()
         self._flags = threading.Lock()

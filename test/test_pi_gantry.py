@@ -44,6 +44,40 @@ class FromEnvTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CHESS_GANTRY_PORT": "sim", "CHESS_GANTRY_DIR": "/nowhere/gantry/pi"}):
             self.assertIsNone(pi_gantry.GantryPlayer.from_env())
 
+    def test_auto_port_without_a_device_means_no_gantry_and_a_warning(self):
+        with mock.patch.dict(os.environ, {"CHESS_GANTRY_PORT": "auto"}), \
+                mock.patch.object(pi_gantry.glob, "glob", return_value=[]), \
+                self.assertLogs("pi_gantry", level="WARNING") as logs:
+            self.assertIsNone(pi_gantry.GantryPlayer.from_env())
+        self.assertIn("auto", "\n".join(logs.output))
+
+
+class AutoPortTests(unittest.TestCase):
+    def fake_devices(self, devices):
+        import fnmatch
+        return mock.patch.object(pi_gantry.glob, "glob",
+                                 side_effect=lambda pattern: [d for d in devices if fnmatch.fnmatch(d, pattern)])
+
+    def test_usb_first_sorted_then_acm(self):
+        with self.fake_devices(["/dev/ttyACM0", "/dev/ttyUSB1", "/dev/ttyUSB0"]):
+            self.assertEqual(pi_gantry.find_serial_port(), "/dev/ttyUSB0")
+        with self.fake_devices(["/dev/ttyACM1", "/dev/ttyACM0"]):
+            self.assertEqual(pi_gantry.find_serial_port(), "/dev/ttyACM0")
+        with self.fake_devices([]):
+            self.assertIsNone(pi_gantry.find_serial_port())
+
+    def test_auto_port_picks_the_device_for_the_player(self):
+        created = []
+        with mock.patch.dict(os.environ, {"CHESS_GANTRY_PORT": "auto", "CHESS_GANTRY_DIR": "/some/gantry/pi",
+                                          "CHESS_GANTRY_CONFIG": "/some/gantry_config.json"}), \
+                self.fake_devices(["/dev/ttyACM0", "/dev/ttyUSB0"]), \
+                mock.patch.object(pi_gantry, "find_gantry_dir", return_value=Path("/some/gantry/pi")), \
+                mock.patch.object(Path, "is_file", return_value=True), \
+                mock.patch.object(pi_gantry.GantryPlayer, "__init__",
+                                  lambda self, directory, port, config: created.append(port) or None):
+            self.assertIsNotNone(pi_gantry.GantryPlayer.from_env())
+        self.assertEqual(created, ["/dev/ttyUSB0"])
+
 
 @unittest.skipUnless(GANTRY_DIR, "needs the gantry folder (CHESS_GANTRY_DIR)")
 class PlanningTests(unittest.TestCase):
@@ -107,8 +141,9 @@ class PretendBoardTests(unittest.TestCase):
             self.assertEqual(notes, ["Put a black pawn on e7.", "Put a white knight on g1."], "what the gantry cannot bring back")
             self.assertEqual(player.expected_squares(), set(occupied_squares(chess.Board())),
                              "the camera check expects the full start, so it only passes once the person has put them back")
-            self.assertEqual(said[4:], ["Moving the white bishop from c4 to f1", "Moving the black bishop from c5 to f8",
-                                        "Moving the white pawn from e4 to e2", "Moving the black knight from e5 to b8"])
+            # The planner may carry the pieces home in any order: check the same four carries, once each.
+            self.assertCountEqual(said[4:], ["Moving the white bishop from c4 to f1", "Moving the black bishop from c5 to f8",
+                                             "Moving the white pawn from e4 to e2", "Moving the black knight from e5 to b8"])
         finally:
             player.close()
 

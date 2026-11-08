@@ -25,10 +25,13 @@ def without_our_block(contents: str) -> str:
     return "".join(lines[:beginnings[0]] + lines[endings[0] + 1:])
 
 
-def autostart_entry(project: Path, log: Path, camera: str, device: int) -> str:
+def autostart_entry(project: Path, log: Path, camera: str, device: int,
+                    gantry_port: str | None = None) -> str:
     command = [str(project / ".venv/bin/python"), str(project / "pi_touch.py"),
                "--calibration", str(project / "calibration"),
                "--camera", camera, "--device", str(device)]
+    if gantry_port:
+        command = ["env", f"CHESS_GANTRY_PORT={gantry_port}"] + command
     return (f"{BEGIN}\n"
             f"cd {shlex.quote(str(project))} && {shlex.join(command)} "
             f">> {shlex.quote(str(log))} 2>&1 &\n"
@@ -61,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera", choices=("pi", "usb"), default="pi")
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--gantry-port", default=None,
+                        help='Drive the gantry: its serial device (e.g. /dev/ttyUSB0) or "auto" '
+                             "(first /dev/ttyUSB*, then /dev/ttyACM*). Default: no gantry")
     parser.add_argument("--remove", action="store_true", help="Remove this app from autostart")
     args = parser.parse_args(argv)
 
@@ -79,8 +85,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"Project virtual environment is missing: {python}")
     log = state_home / "chess-board-pi-only/touchscreen.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    update_autostart(autostart, autostart_entry(project, log, args.camera, args.device))
+    update_autostart(autostart, autostart_entry(project, log, args.camera, args.device,
+                                               args.gantry_port))
     print(f"Touch screen will start at desktop login. Autostart: {autostart}")
+    if args.gantry_port:
+        print(f"Gantry: CHESS_GANTRY_PORT={args.gantry_port}")
     print(f"Startup log: {log}")
     return 0
 

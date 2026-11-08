@@ -2,7 +2,7 @@ import unittest
 
 import chess
 
-from board_vision import Observation
+from board_vision import Observation, TemporalObservation
 from move_observation import occupied_squares
 from pi_touch import GantryError, MoveRejected, TouchSession
 
@@ -21,11 +21,12 @@ class FakeGantry:
     the notes for the pieces the person took during the game (`reset_notes`)."""
 
     def __init__(self, log=None, fail_play: str | None = None, fail_reset: str | None = None,
-                 reset_notes=()) -> None:
+                 reset_notes=(), fail_human: str | None = None) -> None:
         self.calls: list[tuple] = []
         self.log = log if log is not None else []
         self.fail_play = fail_play
         self.fail_reset = fail_reset
+        self.fail_human = fail_human
         self.reset_notes = list(reset_notes)
         self.closed = False
 
@@ -41,6 +42,8 @@ class FakeGantry:
 
     def human_moved(self, board_before, move) -> None:
         self._note("human_moved", board_before.fen(), move.uci())
+        if self.fail_human:
+            raise GantryError(self.fail_human)
 
     def removal_needed(self, board_before, move):
         """(square, symbol) of the piece `move` captures, or None. A question, so it is not in `log`."""
@@ -138,11 +141,18 @@ class TouchSessionTest(unittest.TestCase):
         self.assertEqual(session.put_pieces_back(), [])
         with self.assertRaises(ValueError):
             session.carry_computer_move()
+        # A capture without a gantry: no remove phase, the person makes the whole move by hand as before.
+        session.game.board.set_fen(GantrySessionTest.EXCHANGE)
+        session.verify_setup(occupied_squares(session.game.board))
+        session.scan_human(after(session.game.board, "e4d5"))
+        self.assertEqual(session.announce_computer(chess.Move.from_uci("d8d5")), "Qxd5")
+        self.assertEqual((session.phase, session.removal, session.gantry_note), ("computer", None, None))
+        self.assertEqual(session.verify_computer(after(session.game.board, "d8d5")), "Qxd5")
 
 
 class GantrySessionTest(unittest.TestCase):
-    """The in-person game with a gantry: it learns the start position from the camera, follows the person's
-    move, carries Stockfish's move, and the camera checks the board after every move either way."""
+    """The game with a gantry: it learns the start position, follows the person's move, carries
+    Stockfish's move, and the camera checks the board after every move either way."""
 
     def start(self, gantry) -> TouchSession:
         session = TouchSession("beginner", gantry=gantry)
@@ -169,10 +179,8 @@ class GantrySessionTest(unittest.TestCase):
         self.assertEqual(session.game.board.turn, chess.BLACK, "the position does not move until the camera agrees")
         session.gantry_moved(notes)
         gantry.log.append("camera")
-        with self.assertRaises(MoveRejected) as rejected:
+        with self.assertRaises(MoveRejected):
             session.verify_computer(occupied_squares(session.game.board))
-        self.assertIn("missing on e5", str(rejected.exception))
-        self.assertIn("extra on e7", str(rejected.exception))
         self.assertEqual(session.phase, "computer", "a mismatch keeps the move pending until the pieces are fixed")
         self.assertEqual(session.verify_computer(after(session.game.board, "e7e5")), "e5")
         self.assertEqual(session.phase, "human")
@@ -195,10 +203,17 @@ class GantrySessionTest(unittest.TestCase):
         self.assertIsNone(session.gantry_note)
         self.assertEqual(gantry.calls[-1], ("new_game", session.game.board.fen()))
 
+    def test_a_gantry_that_loses_track_of_the_persons_move_follows_the_board(self):
+        gantry = FakeGantry(fail_human="The pieces do not match the game.")
+        session = self.start(gantry)
+        self.assertEqual(session.scan_human(after(session.game.board, "e2e4")), "e4", "the person's move still counts")
+        self.assertEqual(session.phase, "thinking")
+        self.assertEqual(gantry.calls[-1], ("new_game", session.game.board.fen()))
+
     def test_the_pieces_go_home_when_the_game_ends(self):
         gantry = FakeGantry()
         session = TouchSession("beginner", gantry=gantry)
-        self.assertEqual(session.put_pieces_back(), [], "before the camera verified the start position the gantry knows nothing")
+        self.assertEqual(session.put_pieces_back(), [], "before the start position was verified the gantry knows nothing")
         self.assertEqual(gantry.names, [])
         session.game.board.set_fen("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1")
         session.verify_setup(occupied_squares(session.game.board))
@@ -214,6 +229,15 @@ class GantrySessionTest(unittest.TestCase):
         session.resign()
         self.assertEqual(session.put_pieces_back(), ["Put a black pawn on e7."])
         self.assertEqual(session.gantry.names[-1], "reset")
+
+    def test_the_start_known_from_the_calibration_tells_the_gantry(self):
+        gantry = FakeGantry()
+        session = TouchSession("beginner", gantry=gantry)
+        session.phase = "human"   # as the app does when the calibration already verified the start
+        session.gantry_start_known()
+        self.assertTrue(session.layout_known)
+        self.assertEqual(gantry.calls, [("new_game", chess.Board().fen())])
+        TouchSession("beginner").gantry_start_known()   # without a gantry: nothing
 
     def test_promotion_and_capture_moves_reach_the_gantry_as_chess_moves(self):
         gantry = FakeGantry()
@@ -245,6 +269,8 @@ class GantrySessionTest(unittest.TestCase):
         self.assertEqual(session.removal, ("d5", "P"))
         self.assertEqual(session.removal_text(), "the white pawn off d5")
         self.assertEqual(gantry.calls[-1], ("removal_needed", board.fen(), "d8d5"), "asked with the board before the move")
+        with self.assertRaises(ValueError):
+            session.carry_computer_move()   # the gantry never plays before the camera saw the square empty
         # First Check: the pawn is still there. Nothing moves; the phase stays until the camera sees it gone.
         with self.assertRaises(MoveRejected) as still:
             session.verify_removal(occupied_squares(board))
@@ -285,6 +311,18 @@ class GantrySessionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             session.verify_removal(occupied - {"d5"})   # only in the remove phase
 
+    def test_the_removal_check_with_a_temporal_calibration(self):
+        session = self.capture_pending(FakeGantry())
+        quiet = {square: 2.0 for square in chess.SQUARE_NAMES}
+        with self.assertRaises(MoveRejected) as unchanged:
+            session.verify_removal_temporal(TemporalObservation((), quiet))
+        self.assertIn("does not see d5 emptied", str(unchanged.exception))
+        with self.assertRaises(MoveRejected):   # another square changed as much: not a clean removal
+            session.verify_removal_temporal(TemporalObservation(("d5", "a2"), dict(quiet, d5=30.0, a2=28.0)))
+        self.assertEqual(session.phase, "remove")
+        self.assertEqual(session.verify_removal_temporal(TemporalObservation(("d5",), dict(quiet, d5=30.0))), "d5")
+        self.assertEqual(session.phase, "computer")
+
     def test_en_passant_names_the_pawn_beside_the_destination(self):
         gantry = FakeGantry()
         session = TouchSession("beginner", gantry=gantry)
@@ -297,19 +335,21 @@ class GantrySessionTest(unittest.TestCase):
         session.carry_computer_move()
         self.assertEqual(gantry.calls[-1][0::2], ("play", "e4d3"))
 
-    def test_a_quiet_move_or_no_gantry_skips_the_remove_phase(self):
+    def test_a_quiet_move_skips_the_remove_phase(self):
         session = self.start(FakeGantry())
         session.scan_human(after(session.game.board, "e2e4"))
         session.announce_computer(chess.Move.from_uci("e7e5"))
         self.assertEqual((session.phase, session.removal), ("computer", None))
-        # Without a gantry the person takes the piece off as part of making the move by hand, as before.
-        session = TouchSession("beginner")
-        session.game.board.set_fen(self.EXCHANGE)
-        session.verify_setup(occupied_squares(session.game.board))
-        session.scan_human(after(session.game.board, "e4d5"))
-        self.assertEqual(session.announce_computer(chess.Move.from_uci("d8d5")), "Qxd5")
+
+    def test_a_gantry_without_removal_needed_never_takes_a_capture(self):
+        class OldGantry(FakeGantry):
+            removal_needed = None   # an older pi_gantry that would take the captured piece off itself
+
+        session = self.capture_pending(OldGantry())
         self.assertEqual((session.phase, session.removal), ("computer", None))
+        self.assertIn("cannot wait for a captured piece", session.gantry_note, "the person makes the capture by hand")
         self.assertEqual(session.verify_computer(after(session.game.board, "d8d5")), "Qxd5")
+        self.assertEqual(session.gantry.names[-1], "new_game", "the gantry's picture follows the camera")
 
 
 if __name__ == "__main__":

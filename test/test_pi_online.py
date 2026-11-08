@@ -98,31 +98,6 @@ class ViewTest(unittest.TestCase):
             view = describe_online(snapshot(clients=1, started=True, turn="w", motion=motion), SETTINGS)
             self.assertEqual((view.title, view.mode), (title, "game"), motion)
 
-    def test_a_capture_waits_for_the_piece_to_be_taken_off(self):
-        """The gantry does not take captured pieces off: the server waits, the screen shows Check."""
-        remove = {"state": "waiting", "stage": "remove", "current": "d8d5", "jobId": "job-3",
-                  "instructions": ["Take the black pawn off d5, then press Check."]}
-        view = describe_online(snapshot(clients=1, started=True, turn="w", motion=remove), SETTINGS)
-        self.assertEqual((view.title, view.detail, view.status, view.mode, view.check_job),
-                         ("Remove the piece", "Take the black pawn off d5, then press Check.",
-                          "Waiting for the piece to be removed…", "game", "job-3"))
-        error = "d5 still has a piece on it. Take it off, then tap Check."
-        view = describe_online(snapshot(clients=1, started=True, turn="w", motion=dict(remove, error=error)), SETTINGS)
-        self.assertEqual((view.title, view.detail, view.status, view.mode, view.check_job),
-                         ("Remove the piece", error, error, "game", "job-3"))
-        view = describe_online(snapshot(clients=1, started=True, turn="w", motion=dict(remove, instructions=None, jobId=None)), SETTINGS)
-        self.assertEqual((view.detail, view.check_job), ("Take the captured piece off the board, then tap Check.", None))
-        # A capture that ends the game still waits for the piece before the gantry plays it.
-        view = describe_online(snapshot(clients=1, started=True, gameOver=True, result="Stockfish wins by checkmate.",
-                                        motion=remove), SETTINGS)
-        self.assertEqual((view.title, view.check_job, view.mode), ("Remove the piece", "job-3", "game"))
-        # Every other waiting or moving state is as before, without a Check.
-        for motion in ({"state": "waiting", "instructions": ["Move the black pawn from e7 to e5."]},
-                       {"state": "moving", "stage": "gantry", "current": "d8d5", "jobId": "job-3"}):
-            view = describe_online(snapshot(clients=1, started=True, turn="w", motion=motion), SETTINGS)
-            self.assertIsNone(view.check_job, motion)
-        self.assertEqual(view.title, "Gantry moving d8d5")
-
     def test_game_over_while_the_pieces_go_home(self):
         board = chess.Board("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1")
         board.push_uci("f7f8")   # mate
@@ -248,16 +223,6 @@ class HeartbeatTest(unittest.TestCase):
             RelayClient(OnlineSettings("w" * 64, self.server.url, "x", None)).heartbeat()
         with self.assertRaises(OnlineError):
             RelayClient(OnlineSettings("t" * 64, "http://127.0.0.1:1", "x", None)).heartbeat()
-
-    def test_confirm_posts_the_job_with_the_heartbeat_headers(self):
-        client = RelayClient(self.settings)
-        self.assertTrue(client.confirm("job-3")["ok"], "the answer is a snapshot like the heartbeat's")
-        self.assertEqual(self.server.calls[-1][:2], ("/api/board-confirm", client.session))
-        self.assertEqual(self.server.bodies[-1], {"jobId": "job-3"})
-        with self.assertRaises(OnlineError):
-            RelayClient(OnlineSettings("w" * 64, self.server.url, "x", None)).confirm("job-3")
-        with self.assertRaises(OnlineError):
-            RelayClient(OnlineSettings("t" * 64, "http://127.0.0.1:1", "x", None)).confirm("job-3")
 
     def test_the_session_thread_heartbeats_until_stopped_then_says_goodbye(self):
         results = queue.SimpleQueue()
