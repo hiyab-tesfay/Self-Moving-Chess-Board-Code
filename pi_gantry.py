@@ -21,6 +21,7 @@ Manual control, for the touch screen's Gantry screen (each opens the link if nee
 close(); every move with the magnet off and the arm down; see "manual control" below):
     player.status() / jog(dx, dy) / center() / go_to_square("e4") / set_home_here() / save_home_spot_here() /
     set_start_here() / return_home() / motors_off()   -> {x, y, homed, remembered, memory, units, ...}
+    player.plan_test_move("e2e4") -> {path_units, carries, ...} (no link)   player.test_move("e2e4", carry) -> as above
 
 Configuration, from the environment:
     CHESS_GANTRY_PORT    serial device of the ESP32 (e.g. /dev/ttyUSB0), "auto" for the first of the
@@ -382,6 +383,69 @@ class GantryPlayer:
                 gantry.command(f"G4 P{settle:.3f}")
                 gantry.wait_idle(settle + 5, "the arm going up" if up else "the arm going down")
             return self._report(gantry.status())
+        return self._manual(work)
+
+    # test moves (the Gantry screen's "Test move"): plan one move, trace its path with the empty magnet, or run it
+
+    def _test_job(self, uci: str, occupied=None) -> tuple[dict, list[dict]]:
+        """The one-move job and its routed steps. occupied: None (an otherwise empty board: only the moving piece),
+        "start" (the standard starting position, so pieces are in the way), or an iterable of squares."""
+        uci = str(uci).strip().lower()
+        squares = (uci[:2], uci[2:4])
+        if len(uci) != 4 or any(len(s) != 2 or s[0] not in "abcdefgh" or s[1] not in "12345678" for s in squares):
+            raise GantryError(f"{uci!r} is not a move: pick two squares, like e2 then e4.")
+        if squares[0] == squares[1]:
+            raise GantryError("Pick two different squares.")
+        if occupied == "start":
+            job = self.gd.simple_move_job(uci)                              # the starting position
+        else:
+            job = self.gd.simple_move_job(uci, occupied=set(occupied or ()) | {squares[0]})
+        try:
+            steps = self.gd.route(job, self.gd.BoardMap(self.config), self.config)
+        except self.gd.GantryError as exc:
+            raise GantryError(f"No way for {squares[0]} → {squares[1]}: {exc}") from None
+        except Exception as exc:   # board_paths.NoPath and friends
+            raise GantryError(f"No way for {squares[0]} → {squares[1]}: {exc}") from None
+        return job, steps
+
+    def plan_test_move(self, uci: str, occupied=None) -> dict:
+        """The path one move would take, without the gantry (pure planning, no link):
+        {uci, path_units: every carry's points in square units (a1's centre 0,0) one after the other, paths: one
+        list per carry, carries, notes}. Raises GantryError in plain words (not a square, no way through)."""
+        job, steps = self._test_job(uci, occupied)
+        carries = [step for step in steps if step.get("op") == "carry"]
+        if not carries:
+            raise GantryError(f"Nothing to carry for {uci}.")
+        paths = [[[float(px), float(py)] for px, py in step["path"]] for step in carries]
+        notes = [self.gd.describe_step(step) for step in carries]
+        notes += [step.get("message", "") for step in steps if step.get("op") == "note"]
+        return {"uci": job["label"], "path_units": [p for path in paths for p in path], "paths": paths,
+                "reasons": [step.get("reason", "move") for step in carries], "carries": len(carries), "notes": notes}
+
+    def test_move(self, uci: str, carry: bool, occupied=None, say=None) -> dict:
+        """Homed only. carry=False (Trace path): the empty magnet (off, arm down) visits every point of the planned
+        path at the travel speed; nothing is picked up and it stays on the target square. carry=True (Run move): the
+        piece really is carried, exactly as in a game (the driver's run_job on the open link: arm up, magnet on,
+        carry, release, arm down, then park at start_mm when that is saved). Ends with the magnet off and the arm
+        down, also on any fault. Returns the status report plus uci and carry."""
+        job, steps = self._test_job(uci, occupied)
+
+        def work(gantry):
+            st = self._usable(gantry.status(), homed=True)
+            if carry:
+                self.gd.run_job(job, self.config, self.link, log, progress=say)
+                report = self._report(gantry.status())
+            else:
+                board = self.gd.BoardMap(self.config)
+                carries = [step for step in steps if step.get("op") == "carry"]
+                for step in carries:     # checked first: nothing moves when a point is out of reach
+                    self.gd.checked_points(step, board)
+                report = self._report(st)
+                for step in carries:
+                    for px, py in step["path"]:
+                        x, y = board.point_mm(float(px), float(py))
+                        report = self._move(gantry, report, x, y, f"tracing {step['from']} → {step['to']}")
+            return dict(report, uci=job["label"], carry=bool(carry))
         return self._manual(work)
 
     def square_size_mm(self) -> tuple[float, float]:

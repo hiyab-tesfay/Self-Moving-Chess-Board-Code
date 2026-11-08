@@ -78,6 +78,16 @@ class FakeControl:
     def square_size_mm(self):
         return 53.0, 53.0
 
+    def plan_test_move(self, uci, occupied=None):
+        self.calls.append(("plan_test_move", uci, occupied))
+        if "plan_test_move" in self.fail:
+            raise GantryError(self.fail["plan_test_move"])
+        path = [[4.0, 1.0], [4.5, 1.5], [4.5, 2.5], [4.0, 3.0]]
+        return {"uci": uci, "path_units": path, "paths": [path], "reasons": ["move"], "carries": 1, "notes": []}
+
+    def test_move(self, uci, carry, occupied=None, say=None):
+        return dict(self._done("test_move", uci, carry, occupied), uci=uci, carry=carry)
+
     def close(self):
         self.closed = True
 
@@ -236,6 +246,100 @@ class HeadlessGantryScreenTest(unittest.TestCase):
         self.assertFalse(control.closed)
         self.assertIs(app.gantry, control)
 
+    def tap(self, app, square):
+        left, top, step = app.gantry_board_geometry()
+        col, row = "abcdefgh".index(square[0]), 8 - int(square[1])
+        app.tap_gantry_board(mock.Mock(x=left + (col + .5) * step, y=top + (row + .5) * step))
+
+    def test_test_move_picks_two_squares_plans_draws_traces_and_runs(self):
+        pi_touch.tk.Button.side_effect = lambda *a, **k: mock.MagicMock()   # one mock per button
+        app = self.app()
+        control = FakeControl()
+        control.homed = True
+        self.open_with(app, control)
+        app.gantry_test_open()
+        self.assertTrue(app.gantry_test)
+        labels = [b.gantry_label for b in app.gantry_buttons]
+        for label in ("Board: empty", "Trace path", "Run move", "Clear", "Done"):
+            self.assertIn(label, labels)
+        self.tap(app, "e2")
+        self.assertEqual(app.gantry_test_from, "e2")
+        self.assertEqual(control.calls, [("status",)], "a tap in test mode does not move the gantry")
+        app.gantry_board.create_line.reset_mock()
+        self.tap(app, "e4")
+        self.assertEqual(app.gantry_test_to, "e4")
+        self.assertEqual(control.calls[-1], ("plan_test_move", "e2e4", None))
+        self.assertEqual(app.gantry_test_move_text(), "e2 → e4 · 1 carry")
+        arrows = [c for c in app.gantry_board.create_line.call_args_list if c.kwargs.get("arrow") == "last"]
+        self.assertEqual(len(arrows), 1, "the path is drawn with an arrow")
+        self.assertEqual(len(arrows[0].args), 8, "four points")
+
+        app.gantry_test_trace()
+        app.poll_results()
+        self.assertEqual(control.calls[-1], ("test_move", "e2e4", False, None))
+        self.assertTrue(app.message.startswith("Traced e2 → e4"), app.message)
+
+        app.gantry_test_toggle_board()           # the starting position: planned again around the pieces
+        self.assertTrue(app.gantry_test_start)
+        self.assertEqual(control.calls[-1], ("plan_test_move", "e2e4", "start"))
+        self.assertIn("Board: start position", [b.gantry_label for b in app.gantry_buttons])
+
+        calls = len(control.calls)
+        app.gantry_test_ask_run()                # Run move asks first
+        self.assertTrue(app.gantry_test_confirm)
+        self.assertEqual(len(control.calls), calls, "nothing runs before the answer")
+        self.assertIn("Is a piece on e2 and e4 empty?", app.gantry_test_question())
+        app.gantry_test_cancel_run()
+        self.assertFalse(app.gantry_test_confirm)
+        app.gantry_test_ask_run()
+        app.gantry_test_run()
+        app.poll_results()
+        self.assertEqual(control.calls[-1], ("test_move", "e2e4", True, "start"))
+        self.assertTrue(app.message.startswith("Moved e2 → e4"), app.message)
+
+        self.tap(app, "g1")                      # a third tap starts over
+        self.assertEqual((app.gantry_test_from, app.gantry_test_to, app.gantry_test_plan), ("g1", None, None))
+        app.gantry_test_clear()
+        self.assertIsNone(app.gantry_test_from)
+
+        app.gantry_test_done()
+        self.assertFalse(app.gantry_test)
+        self.assertIn("Test move", [b.gantry_label for b in app.gantry_buttons])
+        self.tap(app, "e4")                      # back to normal: a tap goes there
+        app.poll_results()
+        self.assertEqual(control.calls[-1], ("go_to_square", "e4"))
+
+    def test_test_move_without_a_plan_or_while_busy_does_nothing(self):
+        pi_touch.tk.Button.side_effect = lambda *a, **k: mock.MagicMock()   # one mock per button
+        app = self.app()
+        control = FakeControl(fail={"plan_test_move": "No way for e2 → e7: e7 is not empty"})
+        self.open_with(app, control)
+        app.gantry_test_open()
+        self.tap(app, "e2")
+        self.tap(app, "e7")
+        self.assertIsNone(app.gantry_test_plan)
+        self.assertEqual(app.message_color, app.RED)
+        self.assertIn("e7 is not empty", app.message)
+        app.gantry_test_trace()
+        app.gantry_test_ask_run()
+        self.assertFalse(app.gantry_test_confirm)
+        self.assertFalse(any(call[0] == "test_move" for call in control.calls))
+        control.fail.clear()
+        self.tap(app, "e2")
+        self.tap(app, "e4")
+        with mock.patch.object(app, "submit") as submit:   # the trace is still running
+            app.gantry_test_trace()
+            self.assertTrue(app.busy)
+            app.refresh_gantry_screen()
+            states = {b.gantry_label: [c.kwargs["state"] for c in b.configure.call_args_list if "state" in c.kwargs][-1]
+                      for b in app.gantry_buttons}
+            self.assertEqual(set(states.values()), {"disabled"}, "every button off while busy")
+            self.tap(app, "a1")
+            app.gantry_test_done()
+        self.assertEqual(submit.call_count, 1)
+        self.assertEqual(app.gantry_test_from, "e2", "taps wait while busy")
+        self.assertTrue(app.gantry_test, "Done waits while busy")
+
     def test_without_a_gantry_the_reason_is_shown(self):
         app = self.app()
         environment = {key: value for key, value in os.environ.items() if key != "CHESS_GANTRY_PORT"}
@@ -317,7 +421,7 @@ class RealScreenSmokeTest(unittest.TestCase):
             self.pump(app, root)
             screen = app.gantry_screen
             for label in ("Center gantry", "▲", "▼", "◀", "▶", "1 mm", "5 mm", "1 square", "Set home here",
-                          "Make this spot home", "Set start here", "Return home", "Motors off", "Back"):
+                          "Make this spot home", "Set start here", "Return home", "Motors off", "Test move", "Back"):
                 self.assertIsNotNone(self.find(screen, label), label)
             self.assertIn("NOT homed", app.gantry_readout_label.cget("text"))
             self.find(screen, "Set home here").invoke()
@@ -332,6 +436,26 @@ class RealScreenSmokeTest(unittest.TestCase):
             self.find(screen, "▼").invoke()
             self.pump(app, root)
             self.assertAlmostEqual(app.gantry_readout["y"], 415.0, delta=0.25)
+            # Test move: pick e2 then e4, the path is drawn, Trace path drives the empty magnet to e4.
+            self.find(screen, "Test move").invoke()
+            root.update()
+            for label in ("Board: empty", "Trace path", "Run move", "Clear", "Done"):
+                self.assertIsNotNone(self.find(screen, label), label)
+            self.assertEqual(self.find(screen, "Trace path").cget("state"), "disabled", "nothing planned yet")
+            app.gantry_test_tap("e2")
+            app.gantry_test_tap("e4")
+            root.update()
+            self.assertEqual(app.gantry_test_plan["carries"], 1)
+            self.assertTrue(app.gantry_board.find_withtag("all"))
+            self.find(screen, "Trace path").invoke()
+            self.pump(app, root)
+            self.assertTrue(app.gantry_message.cget("text").startswith("Traced"), app.gantry_message.cget("text"))
+            e4 = app.gantry.gd.BoardMap(app.gantry.config).square_mm("e4")
+            self.assertAlmostEqual(app.gantry_readout["x"], e4[0], delta=0.25)
+            self.assertAlmostEqual(app.gantry_readout["y"], e4[1], delta=0.25)
+            self.find(screen, "Done").invoke()
+            root.update()
+            self.assertIsNotNone(self.find(screen, "Back"))
             gantry = app.gantry
             self.find(screen, "Back").invoke()
             root.update()

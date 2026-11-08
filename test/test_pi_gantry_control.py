@@ -189,6 +189,78 @@ class ManualControlTests(unittest.TestCase):
         self.assertAt(st, *self.map.square_mm("c3"))
         self.assertIn("restored", st["restore"])
 
+    # test moves (the Gantry screen's Test move)
+
+    def test_trace_path_ends_on_the_target_with_the_magnet_off(self):
+        self.player.config["servo_settle_s"] = 0.0
+        self.player.set_home_here()
+        st = self.player.test_move("e2e4", carry=False)
+        self.assertEqual((st["uci"], st["carry"]), ("e2e4", False))
+        self.assertAt(st, *self.map.square_mm("e4"))
+        self.assertFalse(st["magnet"])
+        self.assertEqual(st["servo"], "down")
+
+    def test_run_move_carries_and_ends_safe_at_the_start(self):
+        self.player.config["servo_settle_s"] = 0.05   # not 0: the driver's plan only raises the arm (M7) with a settle
+        self.player.set_home_here()
+        st = self.player.test_move("g1f3", carry=True, occupied="start")
+        self.assertEqual((st["uci"], st["carry"]), ("g1f3", True))
+        self.assertFalse(st["magnet"])
+        self.assertEqual(st["servo"], "down")
+        self.assertAt(st, *self.map.square_mm("f3"))           # no start_mm saved: it stays where it let go
+        start = list(self.map.square_mm("a8"))
+        self.player.config["start_mm"] = start                  # in memory only (the pretend board)
+        st = self.player.test_move("e2e4", carry=True)
+        self.assertFalse(st["magnet"])
+        self.assertEqual(st["servo"], "down")
+        self.assertAt(st, *start)                               # parked at the start after the job
+        self.player.go_to_square("c3")                          # the same open link keeps working
+        self.assertNotIn("start_mm", self.file(), "the pretend board never writes the config")
+
+    def test_test_moves_need_home(self):
+        for carry in (False, True):
+            with self.assertRaisesRegex(pi_gantry.GantryError, "Not homed"):
+                self.player.test_move("e2e4", carry=carry)
+        with self.assertRaisesRegex(pi_gantry.GantryError, "not a move"):
+            self.player.test_move("e2e9", carry=False)
+
+
+@unittest.skipUnless(GANTRY_DIR is not None, "needs the gantry folder")
+class PlanTestMoveTests(unittest.TestCase):
+    """plan_test_move is pure planning: the real config (a temporary copy), no link opened."""
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        config = tmp / "gantry_config.json"
+        config.write_text((GANTRY_DIR / "gantry_config.json").read_text())
+        self.player = pi_gantry.GantryPlayer(GANTRY_DIR, "sim", config)
+        self.player.config["edge_routes"] = True
+
+    def test_e2e4_on_an_empty_board_goes_centre_corner_line_corner_centre(self):
+        plan = self.player.plan_test_move("e2e4")
+        self.assertIsNone(self.player.link, "no link for planning")
+        self.assertEqual(plan["uci"], "e2e4")
+        self.assertEqual(plan["carries"], 1)
+        self.assertEqual(plan["path_units"], [[4.0, 1.0], [4.5, 1.5], [4.5, 2.5], [4.0, 3.0]])
+        self.assertEqual(plan["paths"], [plan["path_units"]])
+        self.assertIn("e2", plan["notes"][0])
+
+    def test_the_starting_position_routes_between_the_pieces(self):
+        plan = self.player.plan_test_move("g1f3", occupied="start")
+        self.assertGreaterEqual(plan["carries"], 1)
+        path = plan["paths"][-1]
+        self.assertEqual((path[0], path[-1]), ([6.0, 0.0], [5.0, 2.0]))
+        self.assertTrue(all(p[0] % 1 == 0.5 or p[1] % 1 == 0.5 for p in path[1:-1]), "along the lines between squares")
+        with self.assertRaisesRegex(pi_gantry.GantryError, "e7"):
+            self.player.plan_test_move("e2e7", occupied="start")   # e7 is taken in the starting position
+        self.assertEqual(self.player.plan_test_move("e2e7")["carries"], 1, "fine on an empty board")
+
+    def test_squares_are_checked(self):
+        for uci in ("e2e9", "i2e4", "e2", "e2e2", "", "e2-e4"):
+            with self.assertRaises(pi_gantry.GantryError):
+                self.player.plan_test_move(uci)
+
 
 if __name__ == "__main__":
     unittest.main()

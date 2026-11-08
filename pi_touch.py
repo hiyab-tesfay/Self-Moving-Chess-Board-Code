@@ -1009,6 +1009,12 @@ class TouchApp:
         self.gantry_readout: dict | None = None   # the last status the gantry reported
         self.gantry_problem: str | None = None    # why there is no gantry to control
         self.gantry_done = None                   # words for the screen once the running gantry action worked
+        self.gantry_test = False                  # Test move mode: the little board picks FROM and TO
+        self.gantry_test_from: str | None = None
+        self.gantry_test_to: str | None = None
+        self.gantry_test_start = False            # plan around the starting position (else an otherwise empty board)
+        self.gantry_test_plan: dict | None = None # GantryPlayer.plan_test_move's answer for FROM -> TO
+        self.gantry_test_confirm = False          # asking "Is a piece on e2 and e4 empty?" before Run move
         screen_width = 800 if args.windowed else root.winfo_screenwidth()
         screen_height = 480 if args.windowed else root.winfo_screenheight()
         self.compact = screen_width < 900 or screen_height < 600
@@ -1871,7 +1877,7 @@ class TouchApp:
                         self.executor.submit(self.discard_start, value)
                     continue
                 if tag == "gantry_progress":
-                    self.say(value, self.GOLD)   # the gantry's own words while it works; the screen stays busy
+                    self.gantry_say(value, self.GOLD)   # the gantry's own words while it works; the screen stays busy
                     continue
                 self.busy = False
                 if tag == "gantry_control":
@@ -2706,6 +2712,8 @@ class TouchApp:
             return   # mid-game the gantry belongs to the game
         self.gantry_problem = None
         self.gantry_confirm = False
+        self.gantry_test_reset(keep_board=False)
+        self.gantry_test = False
         self.gantry_readout = None
         self.gantry_screen_owned = False
         if self.gantry is None:
@@ -2843,6 +2851,151 @@ class TouchApp:
         self.run_gantry_action("Switching the motors off…", lambda gantry: gantry.motors_off(),
                                lambda _st: "Motors off: the carriage can be pushed by hand. Set home before moving again.")
 
+    # Test move: the little board picks FROM then TO (a third tap starts over), the path is planned at once (pure
+    # planning, no link) and drawn; Trace path drives the empty magnet along it, Run move really carries the piece
+    # (after "Is a piece on e2 and e4 empty?"). Done goes back to the normal panel.
+
+    def gantry_test_reset(self, keep_board: bool = True) -> None:
+        self.gantry_test_from = self.gantry_test_to = None
+        self.gantry_test_plan = None
+        self.gantry_test_confirm = False
+        if not keep_board:
+            self.gantry_test_start = False
+
+    def gantry_test_open(self) -> None:
+        if self.busy or self.gantry is None or self.gantry_screen is None:
+            return
+        self.gantry_confirm = False
+        self.gantry_test = True
+        self.gantry_test_reset(keep_board=False)
+        self.build_gantry_buttons()
+        self.gantry_say("Test move: tap the square the piece is on, then the square it goes to.", self.GOLD)
+        self.refresh_gantry_screen()
+
+    def gantry_test_done(self) -> None:
+        if self.busy:
+            return
+        self.gantry_test = False
+        self.gantry_test_reset(keep_board=False)
+        self.build_gantry_buttons()
+        self.gantry_say("Test move closed.")
+        self.refresh_gantry_screen()
+
+    def gantry_test_clear(self) -> None:
+        if self.busy:
+            return
+        self.gantry_test_reset(keep_board=True)
+        self.build_gantry_buttons()
+        self.gantry_say("Cleared: tap the square the piece is on.")
+        self.refresh_gantry_screen()
+
+    def gantry_test_toggle_board(self) -> None:
+        if self.busy:
+            return
+        self.gantry_test_start = not self.gantry_test_start
+        self.gantry_test_confirm = False
+        self.build_gantry_buttons()
+        if self.gantry_test_from and self.gantry_test_to:
+            self.gantry_test_replan()
+        self.refresh_gantry_screen()
+
+    def gantry_test_occupied(self):
+        return "start" if self.gantry_test_start else None
+
+    def gantry_test_uci(self) -> str | None:
+        if self.gantry_test_from and self.gantry_test_to:
+            return self.gantry_test_from + self.gantry_test_to
+        return None
+
+    def gantry_test_tap(self, square: str) -> None:
+        if self.gantry_test_from is None or self.gantry_test_to is not None:
+            # first tap, or a third one: start over from this square
+            self.gantry_test_reset(keep_board=True)
+            self.gantry_test_from = square
+            self.gantry_say(f"From {square}: now tap the square it goes to.", self.GOLD)
+        elif square == self.gantry_test_from:
+            self.gantry_test_from = None
+            self.gantry_say("Tap the square the piece is on.", self.GOLD)
+        else:
+            self.gantry_test_to = square
+            self.gantry_test_replan()
+        if self.gantry_test_confirm:
+            self.gantry_test_confirm = False
+        self.build_gantry_buttons()
+        self.refresh_gantry_screen()
+
+    def gantry_test_replan(self) -> None:
+        """Plan FROM -> TO now (fast, no link): the path is drawn and Trace path / Run move become usable."""
+        self.gantry_test_plan = None
+        uci = self.gantry_test_uci()
+        planner = getattr(self.gantry, "plan_test_move", None)
+        if uci is None or planner is None:
+            return
+        try:
+            self.gantry_test_plan = planner(uci, self.gantry_test_occupied())
+        except GantryError as exc:
+            self.gantry_say(str(exc), self.RED)
+            return
+        except Exception as exc:   # noqa: BLE001 - a planning bug must not take the screen down
+            self.gantry_say(f"Could not plan {uci}: {exc}", self.RED)
+            return
+        board = "the starting position" if self.gantry_test_start else "an empty board"
+        self.gantry_say(f"{self.gantry_test_move_text()} on {board}. Trace path drives the empty magnet along it; "
+                        "Run move carries the piece.", self.GREEN)
+
+    def gantry_test_move_text(self) -> str:
+        if self.gantry_test_from is None:
+            return "Tap the piece's square"
+        if self.gantry_test_to is None:
+            return f"{self.gantry_test_from} → ?"
+        text = f"{self.gantry_test_from} → {self.gantry_test_to}"
+        plan = self.gantry_test_plan
+        if plan is not None:
+            n = int(plan.get("carries", 1))
+            text += f" · {n} carr{'y' if n == 1 else 'ies'}"
+        return text
+
+    def gantry_test_trace(self) -> None:
+        uci, occupied = self.gantry_test_uci(), self.gantry_test_occupied()
+        if uci is None or self.gantry_test_plan is None:
+            return
+        move = f"{uci[:2]} → {uci[2:]}"
+        self.run_gantry_action(f"Tracing {move} with the magnet off…",
+                               lambda gantry: gantry.test_move(uci, False, occupied),
+                               lambda st: f"Traced {move} with the magnet off. " + self.position_words(st))
+
+    def gantry_test_ask_run(self) -> None:
+        if self.busy or self.gantry_test_uci() is None or self.gantry_test_plan is None:
+            return
+        self.gantry_test_confirm = True
+        self.build_gantry_buttons()
+        self.refresh_gantry_screen()
+
+    def gantry_test_cancel_run(self) -> None:
+        self.gantry_test_confirm = False
+        self.build_gantry_buttons()
+        self.refresh_gantry_screen()
+
+    def gantry_test_run(self) -> None:
+        uci, occupied = self.gantry_test_uci(), self.gantry_test_occupied()
+        self.gantry_test_confirm = False
+        self.build_gantry_buttons()
+        if uci is None or self.gantry_test_plan is None:
+            self.refresh_gantry_screen()
+            return
+        move = f"{uci[:2]} → {uci[2:]}"
+        progress = self.gantry_progress()
+        self.run_gantry_action(f"Moving the piece {move}… keep hands clear of the board.",
+                               lambda gantry: gantry.test_move(uci, True, occupied, say=progress),
+                               lambda st: f"Moved {move}: magnet off, arm down. " + self.position_words(st))
+
+    def gantry_test_question(self) -> str:
+        uci = self.gantry_test_uci() or "????"
+        text = f"Is a piece on {uci[:2]} and {uci[2:]} empty?"
+        if self.gantry_test_start:
+            text += " (The other pieces in the starting position.)"
+        return text
+
     def set_gantry_step(self, step: str) -> None:
         self.gantry_step = step
         self.refresh_gantry_screen()
@@ -2891,7 +3044,8 @@ class TouchApp:
         # Left: the little board, White at the bottom like the game's board; tap a square to go there.
         left = tk.Frame(body, bg=self.BG)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        tk.Label(left, text="Tap a square to go there", bg=self.BG, fg=self.MUTED, font=small).pack(side="top")
+        self.gantry_board_hint = tk.Label(left, text="Tap a square to go there", bg=self.BG, fg=self.MUTED, font=small)
+        self.gantry_board_hint.pack(side="top")
         self.gantry_board = tk.Canvas(left, bg=self.BG, highlightthickness=0)
         self.gantry_board.pack(side="top", fill="both", expand=True)
         self.gantry_board.bind("<Configure>", lambda _event: self.draw_gantry_board())
@@ -2944,6 +3098,7 @@ class TouchApp:
                            bg=self.GREEN if accent else "#294943", fg=self.BG if accent else self.TEXT,
                            activebackground=self.GOLD, activeforeground=self.BG,
                            disabledforeground="#5f7a73", wraplength=200 if self.compact else 300)
+        button.gantry_label = label    # what refresh_gantry_screen goes by (also without a display)
         self.gantry_buttons.append(button)
         return button
 
@@ -2953,7 +3108,30 @@ class TouchApp:
             if child in self.gantry_buttons:
                 self.gantry_buttons.remove(child)
             child.destroy()
-        if self.gantry_confirm:
+        self.gantry_test_label = None
+        small = ("DejaVu Sans", 9 if self.compact else 11)
+        if self.gantry_test and self.gantry_test_confirm:
+            tk.Label(right, text="Run the move?", bg=self.BG, fg=self.TEXT,
+                     font=("DejaVu Sans", 11 if self.compact else 14, "bold"), anchor="w").pack(fill="x")
+            tk.Label(right, text=self.gantry_test_question() + " The magnet picks it up and carries it.",
+                     bg=self.BG, fg=self.MUTED, font=small, justify="left",
+                     wraplength=200 if self.compact else 300, anchor="w").pack(fill="x", pady=(2, 6))
+            entries = (("Yes, run it", self.gantry_test_run, True),
+                       ("Cancel", self.gantry_test_cancel_run, False))
+        elif self.gantry_test:
+            tk.Label(right, text="TEST MOVE", bg=self.BG, fg=self.TEXT,
+                     font=("DejaVu Sans", 11 if self.compact else 14, "bold"), anchor="w").pack(fill="x")
+            self.gantry_test_label = tk.Label(right, text=self.gantry_test_move_text(), bg=self.BG, fg=self.GOLD,
+                                              font=small, anchor="w", justify="left",
+                                              wraplength=200 if self.compact else 300)
+            self.gantry_test_label.pack(fill="x", pady=(0, 2))
+            board = "Board: start position" if self.gantry_test_start else "Board: empty"
+            entries = ((board, self.gantry_test_toggle_board, False),
+                       ("Trace path", self.gantry_test_trace, False),
+                       ("Run move", self.gantry_test_ask_run, True),
+                       ("Clear", self.gantry_test_clear, False),
+                       ("Done", self.gantry_test_done, False))
+        elif self.gantry_confirm:
             tk.Label(right, text="Make this spot home?", bg=self.BG, fg=self.TEXT,
                      font=("DejaVu Sans", 11 if self.compact else 14, "bold"), anchor="w").pack(fill="x")
             tk.Label(right, text="Only after homing with the carriage pushed into the true corner, then jogging to "
@@ -2969,6 +3147,7 @@ class TouchApp:
                        ("Set start here", self.gantry_set_start, False),
                        ("Return home", self.gantry_return_home, False),
                        ("Motors off", self.gantry_motors_off, False),
+                       ("Test move", self.gantry_test_open, False),
                        ("Back", self.close_gantry_panel, True))
         for label, command, accent in entries:
             self.gantry_button(right, label, command, accent=accent).pack(
@@ -2979,11 +3158,12 @@ class TouchApp:
             return
         usable = not self.busy and self.gantry is not None
         for button in self.gantry_buttons:
-            label = button.cget("text")
-            if label == "Back":
+            label = getattr(button, "gantry_label", None)
+            label = label if isinstance(label, str) else str(button.cget("text"))
+            if label in ("Back", "Cancel", "Clear", "Done") or label.startswith("Board: "):
                 enabled = not self.busy
-            elif label == "Cancel":
-                enabled = not self.busy
+            elif label in ("Trace path", "Run move"):
+                enabled = usable and self.gantry_test_plan is not None
             else:
                 enabled = usable
             button.configure(state="normal" if enabled else "disabled")
@@ -2991,6 +3171,11 @@ class TouchApp:
             chosen = key == self.gantry_step
             button.configure(bg=self.GOLD if chosen else "#294943", fg=self.BG if chosen else self.TEXT)
         self.gantry_readout_label.configure(text=self.gantry_readout_text())
+        hint = getattr(self, "gantry_board_hint", None)
+        if hint is not None:
+            hint.configure(text="Tap FROM, then TO" if self.gantry_test else "Tap a square to go there")
+        if getattr(self, "gantry_test_label", None) is not None:
+            self.gantry_test_label.configure(text=self.gantry_test_move_text())
         self.draw_gantry_board()
 
     def gantry_board_geometry(self) -> tuple[float, float, float]:
@@ -3017,6 +3202,8 @@ class TouchApp:
         for col, file in enumerate("abcdefgh"):
             canvas.create_text(left + (col + .5) * step, top + 8 * step + 9, text=file, fill=self.MUTED,
                                font=("DejaVu Sans", 8))
+        if self.gantry_test:
+            self.draw_gantry_test(canvas, left, top, step)
         st = self.gantry_readout
         if st and st.get("units") is not None:
             ux, uy = st["units"]
@@ -3026,13 +3213,45 @@ class TouchApp:
             canvas.create_line(cx - r * 1.4, cy, cx + r * 1.4, cy, fill="#d04a3c", width=2)
             canvas.create_line(cx, cy - r * 1.4, cx, cy + r * 1.4, fill="#d04a3c", width=2)
 
+    def draw_gantry_test(self, canvas, left: float, top: float, step: float) -> None:
+        """Test move: FROM and TO outlined, and the planned path (every carry) as a line with a start dot and an arrow."""
+        for square, color in ((self.gantry_test_from, "#e0a526"), (self.gantry_test_to, "#3c7fd0")):
+            if square:
+                col, row = "abcdefgh".index(square[0]), 8 - int(square[1])
+                x, y = left + col * step, top + row * step
+                canvas.create_rectangle(x + 2, y + 2, x + step - 2, y + step - 2, outline=color, width=3)
+        plan = self.gantry_test_plan
+        if not plan:
+            return
+
+        def at(point):
+            return left + (float(point[0]) + .5) * step, top + (7 - float(point[1]) + .5) * step
+
+        paths = plan.get("paths") or [plan.get("path_units") or []]
+        reasons = list(plan.get("reasons") or ["move"] * len(paths))
+        for index, path in enumerate(paths):
+            coords = [c for point in path for c in at(point)]
+            if len(coords) < 4:
+                continue
+            moving = index >= len(reasons) or reasons[index] == "move"
+            color = "#1f5fb0" if moving else "#8a5fc0"   # the move itself; a carry that makes room / puts back
+            canvas.create_line(*coords, fill=color, width=3, arrow="last", arrowshape=(10, 12, 4),
+                               capstyle="round", joinstyle="round")
+            sx, sy = coords[0], coords[1]
+            r = max(3.0, step * .12)
+            canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill=color, outline=color)
+
     def tap_gantry_board(self, event) -> None:
         if self.busy or self.gantry is None:
             return
         left, top, step = self.gantry_board_geometry()
         col, row = int((event.x - left) // step), int((event.y - top) // step)
         if 0 <= col < 8 and 0 <= row < 8:
-            self.gantry_go_to(f"{'abcdefgh'[col]}{8 - row}")
+            square = f"{'abcdefgh'[col]}{8 - row}"
+            if self.gantry_test:
+                self.gantry_test_tap(square)
+            else:
+                self.gantry_go_to(square)
 
     def close(self) -> None:
         self.closed = True
