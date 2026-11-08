@@ -62,18 +62,22 @@ class ManualControlTests(unittest.TestCase):
     def file(self) -> dict:
         return json.loads(self.config_path.read_text())
 
-    def test_before_homing_only_away_from_the_corner_and_nothing_that_needs_home(self):
+    def test_before_homing_every_direction_jogs_and_nothing_that_needs_home(self):
         st = self.player.status()
         self.assertFalse(st["homed"])
         self.assertAt(st, 0.0, 420.0)       # a restarted board counts 0,0: beside a8, as the Pi counts
-        for dx, dy in ((-5, 0), (0, 5)):    # towards the a8 corner: ◀ and ▲
-            with self.assertRaisesRegex(pi_gantry.GantryError, "Not homed"):
-                self.player.jog(dx, dy)
-        self.assertAt(self.player.jog(5, -5), 5.0, 415.0)
+        # Not homed: every direction works (towards the a8 corner too), so a person can steer onto the home spot.
+        # Each jog first calls the spot the middle of the travel (235, 210), then moves by the step.
+        self.assertAt(self.player.jog(-5, 0), 230.0, 210.0)
+        self.assertAt(self.player.jog(0, 5), 235.0, 215.0)
+        self.assertAt(self.player.jog(5, -5), 240.0, 205.0)
+        self.assertFalse(self.player.status()["homed"], "jogging never claims a home")
         for action in (self.player.center, self.player.return_home, self.player.set_start_here,
                        lambda: self.player.go_to_square("e4")):
             with self.assertRaisesRegex(pi_gantry.GantryError, "Not homed"):
                 action()
+        st = self.player.set_home_here()    # steered onto the home spot: home it there
+        self.assertTrue(st["homed"])
 
     def test_home_center_jog_and_go_to(self):
         st = self.player.set_home_here()

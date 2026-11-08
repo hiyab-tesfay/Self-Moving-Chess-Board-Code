@@ -252,23 +252,27 @@ class GantryPlayer:
 
     def jog(self, dx: float, dy: float) -> dict:
         """Move by dx, dy mm (as the Pi counts: +X towards the h-file, +Y towards rank 8). Homed: the target is
-        kept inside the travel (a jog past the frame stops at its edge). Not homed: only away from the home corner
-        (+X, and +Y or, with home beside a8, -Y), the only moves the firmware allows before homing."""
+        kept inside the travel (a jog past the frame stops at its edge). Not homed: every direction works, so a
+        person can steer the carriage onto the home spot: the spot is first called the middle of the travel (G92;
+        the firmware only refuses targets outside its travel), and the jog runs at the slower unhomed speed
+        (config unhomed_jog_speed_mm_s, default 15 mm/s) because nothing stops it at the frame."""
         def work(gantry):
             st = self._usable(gantry.status(), homed=False)
             if not st["homed"]:
-                toward_corner_y = dy > 0 if gantry.link.flip_y is not None else dy < 0
-                if dx < 0 or toward_corner_y:
-                    raise self.gd.GantryError("Not homed: before homing the gantry only moves away from the home corner "
-                                              f"({self._away_words()}). Set home first.")
-                tx, ty = st["x"] + dx, st["y"] + dy
-            else:
+                if st["state"] == "Alarm":     # "not homed" after a restart
+                    gantry.command("$X")
                 travel = self.gd.BoardMap(self.config).travel
-                tx = min(max(st["x"] + dx, 0.0), travel[0])
-                ty = min(max(st["y"] + dy, 0.0), travel[1])
-                if abs(tx - st["x"]) < 0.01 and abs(ty - st["y"]) < 0.01:
-                    raise self.gd.GantryError("The carriage is already at the edge of its travel that way.")
-            return self._move(gantry, st, tx, ty, "jog", check=st["homed"])
+                mid_x, mid_y = travel[0] / 2.0, travel[1] / 2.0       # the middle: the same spot with Y mirrored
+                gantry.command(f"G92 X{mid_x:.3f} Y{mid_y:.3f}")
+                st = self._usable(gantry.status(), homed=False)
+                speed = float(self.config.get("unhomed_jog_speed_mm_s", 15.0))
+                return self._move(gantry, st, st["x"] + dx, st["y"] + dy, "jog", check=False, speed=speed)
+            travel = self.gd.BoardMap(self.config).travel
+            tx = min(max(st["x"] + dx, 0.0), travel[0])
+            ty = min(max(st["y"] + dy, 0.0), travel[1])
+            if abs(tx - st["x"]) < 0.01 and abs(ty - st["y"]) < 0.01:
+                raise self.gd.GantryError("The carriage is already at the edge of its travel that way.")
+            return self._move(gantry, st, tx, ty, "jog", check=True)
         return self._manual(work)
 
     def center(self) -> dict:
@@ -405,7 +409,8 @@ class GantryPlayer:
     def _away_words(self) -> str:
         return "right ▶ or down ▼" if self.gd.y_flip_mm(self.config) is not None else "right ▶ or up ▲"
 
-    def _move(self, gantry, st: dict, x: float, y: float, what: str, check: bool = True) -> dict:
+    def _move(self, gantry, st: dict, x: float, y: float, what: str, check: bool = True,
+              speed: float | None = None) -> dict:
         """The empty magnet (magnet off, arm down) to x, y at the travel speed; waits until it is there."""
         if check:
             self.gd.BoardMap(self.config).check(x, y, what)
@@ -419,7 +424,7 @@ class GantryPlayer:
                 gantry.wait_idle(settle + 5, "the arm going down")
         if st["state"] == "Alarm":       # "not homed" after a restart: $X lets it jog away from the corner
             gantry.command("$X")
-        speed = float(self.config.get("travel_speed_mm_s", 60.0))
+        speed = float(speed if speed is not None else self.config.get("travel_speed_mm_s", 60.0))
         distance = ((x - st["x"]) ** 2 + (y - st["y"]) ** 2) ** 0.5
         if distance >= 0.01:
             gantry.command(f"G1 X{x:.3f} Y{y:.3f} F{speed * 60:.0f}")
