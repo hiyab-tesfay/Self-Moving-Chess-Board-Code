@@ -87,7 +87,8 @@ class ManualControlTests(unittest.TestCase):
         corner = st["from_corner"]
         self.assertAlmostEqual(corner["mm"][0], 53.0, delta=self.STEP)
         self.assertAlmostEqual(corner["mm"][1], 26.0, delta=self.STEP)
-        per_mm = 200 * 1 / 41.0                            # full steps per turn x microsteps / mm per turn
+        turn = self.player.config["mm_per_turn"]
+        per_mm = 200 * 1 / float(turn[0] if isinstance(turn, list) else turn)   # full steps per turn x microsteps / mm per turn
         self.assertAlmostEqual(corner["steps"][0], 53.0 * per_mm, delta=1.5)
         self.assertAlmostEqual(corner["steps"][1], 26.0 * per_mm, delta=1.5)
         self.player.motors_off()                           # pushed back into the corner by hand ...

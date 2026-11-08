@@ -3,10 +3,10 @@
   "port": "/dev/ttyUSB0",
   "baud": 115200,
   "mm_per_turn": [
-    41.0,
-    41.0
+    38.68,
+    38.68
   ],
-  "_mm_per_turn_comment": "Carriage travel for one motor turn, X and Y, measured on 2026-11-06 (one-turn buttons in the console). The firmware counts real mm with $100 = full_steps_per_turn x microsteps / mm_per_turn[0]; the Pi and the console send it on every connection. microsteps 1: the DRV8825 M0-M2 pins are not wired (full steps).",
+  "_mm_per_turn_comment": "Carriage travel for one motor turn, X and Y. 41.0 (one-turn buttons, 2026-11-06) moved about 3 mm short on a 53 mm square step (2026-11-07: told 53, went about 50), so 41 x 50/53 = 38.68. If a long move still ends short or long, scale again: new = old x (real distance / asked distance). The firmware counts real mm with $100 = full_steps_per_turn x microsteps / mm_per_turn[0] (200/38.68 = 5.17 steps per mm); the Pi and the console send it on every connection. Changing it makes the board forget its position once: set home again after the first connection. microsteps 1: the DRV8825 M0-M2 pins are not wired (full steps).",
   "full_steps_per_turn": 200,
   "microsteps": 1,
   "magnet_home_mm": [
