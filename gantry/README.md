@@ -57,8 +57,10 @@ Before the first carry, find your arm's angles with `pi/arm_cal.py` (see Servo).
 The current setup uses `swap_xy: false` and `home_square: "a2"`. X runs along the files and Y along
 the ranks. For manual homing, place the magnet beneath the centre of a2 and press **Set home here**;
 the carriage stays there while its coordinates are assigned. **Return home** returns to a2 with the
-arm down. `home_beside: "a8"` still describes the motor direction from the frame corner. After changing
-the axis mapping, discard the old remembered position and home at a2 once before moving.
+arm down. `home_beside: "a1"` leaves the motor's Y direction unmirrored, so a2 → a4 moves toward rank 4.
+`manual_home_on_connect: true` requires you to press **Set home here** after each dashboard connection;
+the dashboard never restores a saved home automatically. After a direction change, position the magnet
+beneath a2 and set home again before moving. Check a short Y+ jog with the arm down before a full carry.
 
 ## The numbers
 

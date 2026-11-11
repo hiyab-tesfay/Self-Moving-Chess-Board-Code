@@ -1,11 +1,28 @@
 """The X/Y swap on the link (config "swap_xy"): what the Pi means by X reaches the board's Y motor and back."""
 import os
 import unittest
+from unittest import mock
 
 import gantry_driver as gd
 
 
 class SwapLineTests(unittest.TestCase):
+    def test_current_a2_to_a4_move_increases_motor_y(self):
+        config = gd.load_config(gd.HERE / "gantry_config.json")
+        self.assertEqual(config["home_beside"], "a1")
+        self.assertFalse(config["swap_xy"])
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GANTRY_HOME_BESIDE", None)
+            os.environ.pop("GANTRY_SWAP_XY", None)
+            board = gd.BoardMap(config)
+            self.assertEqual(gd.home_xy(config), board.square_mm("a2"))
+            wire = []
+            for square in ("a2", "a4"):
+                x, y = board.square_mm(square)
+                line = f"G1 X{x:.3f} Y{y:.3f}"
+                wire.append(gd.swap_line(gd.flip_line(line, gd.y_flip_mm(config)), gd.swap_xy_flag(config)))
+            self.assertEqual(wire, ["G1 X42.000 Y102.000", "G1 X42.000 Y208.000"])
+
     def test_moves_and_g92_exchange_words(self):
         self.assertEqual(gd.swap_line("G1 X10.000 Y20.500 F2400", True), "G1 Y10.000 X20.500 F2400")
         self.assertEqual(gd.swap_line("G92 X5 Y7", True), "G92 Y5 X7")

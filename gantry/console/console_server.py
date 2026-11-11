@@ -380,7 +380,15 @@ class Console:
     def restore_position(self) -> str:
         """After the link is configured: a restarted board is put back at its remembered spot ($HM, G92) when the
         file can be trusted; a board that kept running keeps its own count (gantry_driver.restore_position)."""
-        if self.link is None or self.memory is None:
+        if self.link is None:
+            return "none"
+        if self.config.get("manual_home_on_connect", False):
+            square = self.config.get("home_square")
+            where = f"beneath the centre of {square}" if square else "at the configured home spot"
+            self.position_unsure("manual home required after connecting")
+            self.say("warn", f"Place the magnet {where}, then press Set home here. No position was restored automatically.")
+            return "manual"
+        if self.memory is None:
             return "none"
         outcome, text = gd.restore_position(self.memory, self.config, self.exchange, self.query_status,
                                             logging.getLogger("console"), self.link.steps_per_mm)
@@ -701,8 +709,9 @@ class Console:
         if st["state"] == "Alarm" and st["reason"] not in ("", "not homed"):
             raise gd.GantryError(f"The board is in alarm: {st['reason']}. Check it, then Unlock and home.")
         if homed and (not st["homed"] or self.position_lost):
-            raise gd.GantryError("Not homed. Push the carriage into the bottom-left corner and press Set home here "
-                                 "(or Bump home).")
+            square = self.config.get("home_square")
+            where = f"beneath the centre of {square}" if square else "at the configured home spot"
+            raise gd.GantryError(f"Not homed. Place the magnet {where} and press Set home here.")
         if st["state"] not in ("Idle", "Alarm"):
             raise gd.GantryError(f"The board is busy ({st['state']}).")
         return st
@@ -1956,6 +1965,7 @@ class Console:
                              "home_beside": "a8" if gd.y_flip_mm(self.config) is not None else "a1",
                              "home_square": self.config.get("home_square"), "home_xy": self.home_xy(),
                              "swap_xy": gd.swap_xy_flag(self.config),
+                             "manual_home_on_connect": bool(self.config.get("manual_home_on_connect", False)),
                              "columns": {str(k): v for k, v in self.map.columns.items() if k < 0 or k > 7},
                              "park_rows": [self.map.park_rows[i] for i in sorted(self.map.park_rows)],
                              "reach": self.geometry.reach_mm, "lanes": bl.usable_lanes(self.config),

@@ -634,6 +634,7 @@ function renderControls() {
   const g = S.geometry, toSketch = (x, y) => `${(x + g.home[0]).toFixed(1)}, ${(y + g.home[1]).toFixed(1)}`;
   $("#homeinstruction").textContent = g.home_square ? `2. place the magnet beneath the centre of ${g.home_square}` : "2. place the magnet at the configured home spot";
   $("#homemanual").title = g.home_square ? `Set this spot as ${g.home_square}'s centre; the carriage stays here` : "Assign this spot the configured home coordinates";
+  $("#posmem").title = g.manual_home_on_connect ? "Set home here manually after connecting; saved coordinates are not restored automatically" : "The saved position can be restored after the controller restarts";
   $("#boardnote").innerHTML = `a1's centre is at ${toSketch(g.a1[0], g.a1[1])} on the sketch (${g.a1[0].toFixed(1)}, ${g.a1[1].toFixed(1)} as the board counts);
     squares ${g.square}${g.square_y && g.square_y !== g.square ? " × " + g.square_y : ""} mm. Home${g.home_square ? ` (${esc(g.home_square)})` : ""} is at ${toSketch(...g.home_xy)} on the sketch.
     One motor turn: X ${g.mm_per_turn[0]} mm, Y ${g.mm_per_turn[1]} mm (${g.steps_per_mm} steps/mm). Docking lanes in use: ${g.lanes.length ? g.lanes.map((l) => l === "w" ? "left" : "right").join(" and ") : "none"}.`;

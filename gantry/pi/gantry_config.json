@@ -1,5 +1,5 @@
 {
-  "_comment": "The real board, measured 2026-11-07: 53 x 53 mm squares. With the carriage at home (beside a8) the magnet's centre is at a8's centre along Y and 42 mm short of it along X, so as the Pi counts (home_beside a8 mirrors Y) a8's centre is 42,420, a1's 42,49 and h8's 413,420. Files run along +X, ranks along +Y. (Sketch 5's 52.5 mm squares were not the board that was built.)",
+  "_comment": "The real board has 53 x 53 mm squares: a1's centre is 42,49, a2 is 42,102, and h8 is 413,420. Files run along +X and ranks along +Y. Manual home uses the centre of a2; the axis mapping and motor direction were corrected on 2026-11-11.",
   "port": "/dev/ttyUSB0",
   "baud": 115200,
   "mm_per_turn": [
@@ -62,10 +62,12 @@
   "_step_pulse_comment": "step_pulse_us, when set, is sent as $0 before each job (firmware 0.5+). Unset: the firmware's boot value, 1500 us (what moves the bench's motors; 333 steps/s, 68 mm/s at full steps with 41 mm per turn).",
   "max_carries_per_job": 40,
   "home_on_start": false,
+  "manual_home_on_connect": true,
+  "_manual_home_on_connect_comment": "Connecting the dashboard requires the user to set home at a2 before motion; saved coordinates are not restored automatically.",
   "home_square": "a2",
   "_home_square_comment": "Manual home is the magnet centred beneath the a2 pawn. Set home here assigns a2's calibrated coordinates without moving the carriage. home_beside still sets the motor direction from the frame corner.",
-  "home_beside": "a8",
-  "_home_beside_comment": "Which square the home corner is next to on the real board (2026-11-07: a8). With a8 the Pi mirrors Y on the USB link, so everything else still counts a1 at y 26.25; see gantry_driver.y_flip_mm.",
+  "home_beside": "a1",
+  "_home_beside_comment": "Motor direction setting: a1 leaves Y unmirrored so a2 to a4 increases motor Y. The old a8 mirror sent the pawn backward toward a1. Manual home remains a2 via home_square; this setting does not move that reference to a1.",
   "camera_cal_target": "piece",
   "camera_cal_piece_height_mm": 45.0,
   "camera_hfov_deg": 53.5,

@@ -38,7 +38,8 @@ class ConsoleMemoryTests(unittest.TestCase):
         self.env.start()
         self.settings = mock.patch.object(cs, "SETTINGS_FILE", Path(self.tmp.name) / "settings.json")
         self.settings.start()
-        config = dict(cs.gd.load_config(cs.gd.DEFAULT_CONFIG), mm_per_turn=[40.0, 40.0], microsteps=8)   # $100 = 40
+        config = dict(cs.gd.load_config(cs.gd.DEFAULT_CONFIG), mm_per_turn=[40.0, 40.0], microsteps=8,
+                      manual_home_on_connect=False)   # legacy automatic restoration is still opt-in
         self.c = cs.Console(config, sim_speed=40)
         self.c.settings.update(FAST, travel_speed=60.0, carry_speed=40.0)
 
@@ -95,6 +96,38 @@ class ConsoleMemoryTests(unittest.TestCase):
         self.assertIn("The power went off during a move, so the position is unknown: home once more.", self.texts())
         with self.assertRaises(cs.gd.GantryError):
             self.c.require(homed=True)
+
+    def test_manual_home_on_connect_does_not_restore_a_saved_position(self):
+        self.connect()
+        self.c.home_manual()
+        wait(self.c)
+        self.c.query_status()
+        self.assertTrue(self.saved()["trusted"])
+        self.c.disconnect()
+        self.c.config["manual_home_on_connect"] = True
+        since = self.c.log_id
+        self.connect()
+        self.assertTrue(self.c.position_lost)
+        sent = [e["text"] for e in self.c.view(since)["log"] if e["kind"] == "send"]
+        self.assertFalse(any(line == "$HM" or line.startswith("G92 ") for line in sent), sent)
+        with self.assertRaises(cs.gd.GantryError):
+            self.c.require(homed=True)
+        self.c.home_manual()
+        wait(self.c)
+        self.c.require(homed=True)
+
+    def test_manual_home_required_even_when_controller_is_already_homed(self):
+        self.connect()
+        self.c.home_manual()
+        wait(self.c)
+        self.c.config["manual_home_on_connect"] = True
+        since = self.c.log_id
+        self.assertEqual(self.c.restore_position(), "manual")
+        self.assertTrue(self.c.query_status()["homed"])
+        with self.assertRaises(cs.gd.GantryError):
+            self.c.require(homed=True)
+        sent = [e["text"] for e in self.c.view(since)["log"] if e["kind"] == "send"]
+        self.assertFalse(any(line == "$HM" or line.startswith("G92 ") for line in sent), sent)
 
     def test_a_stall_untrusts_the_position(self):
         self.connect()
