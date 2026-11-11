@@ -58,6 +58,22 @@ class PureTests(unittest.TestCase):
         with self.assertRaises(gd.GantryError):
             gd.home_spot_from_here({"homed": True, "x": -5.0, "y": 1.0}, a1)
 
+    def test_a2_home_is_the_square_centre_for_both_motor_directions(self):
+        for beside in ("a1", "a8"):
+            config = dict(CONFIG, home_beside=beside, home_square="a2", swap_xy=False)
+            with self.subTest(beside=beside):
+                self.assertEqual(gd.home_xy(config), (42.0, 102.0))
+                self.assertEqual(gd.home_spot_mm(config), (42.0, 318.0 if beside == "a8" else 102.0))
+
+    def test_square_home_tracks_calibration_and_rejects_bad_references(self):
+        config = dict(CONFIG, home_square="a2", a1_center_mm=[44.0, 50.0], home_spot_mm=SPOT)
+        self.assertEqual(gd.home_xy(config), (44.0, 103.0))
+        for square in ("a9", "a2 pawn", "../a2"):
+            with self.subTest(square=square), self.assertRaises(gd.GantryError):
+                gd.home_xy(dict(CONFIG, home_square=square))
+        with self.assertRaises(gd.GantryError):
+            gd.home_xy(dict(CONFIG, home_square="a2", a1_center_mm=[500.0, 49.0]))
+
     def test_update_config_file_keeps_the_old_file_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "gantry_config.json"
@@ -139,6 +155,15 @@ class PretendBoardTests(unittest.TestCase):
         st = gd.set_home_here(gantry, config)
         self.assertEqual((round(st["x"], 3), round(st["y"], 3)), (0.0, 420.0))
         self.assertEqual(self.physical(gantry), (0.0, 0.0))
+
+    def test_a2_home_sets_coordinates_without_a_motion_command(self):
+        config = dict(CONFIG, home_beside="a8", home_square="a2", swap_xy=False)
+        link, gantry = self.open(config)
+        with mock.patch.object(gantry, "command", wraps=gantry.command) as command:
+            st = gd.set_home_here(gantry, config)
+        self.assertEqual([call.args[0] for call in command.call_args_list], ["$HM", "G92 X42.000 Y102.000"])
+        self.assertEqual((st["x"], st["y"]), (42.0, 102.0))
+        self.assertEqual(self.physical(gantry), (42.0, 318.0))
 
     def test_a_spot_measured_from_the_corner_then_used(self):
         """Home in the true corner, jog to the new home spot, save it: homing there later gives the same count."""

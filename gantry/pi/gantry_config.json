@@ -62,6 +62,8 @@
   "_step_pulse_comment": "step_pulse_us, when set, is sent as $0 before each job (firmware 0.5+). Unset: the firmware's boot value, 1500 us (what moves the bench's motors; 333 steps/s, 68 mm/s at full steps with 41 mm per turn).",
   "max_carries_per_job": 40,
   "home_on_start": false,
+  "home_square": "a2",
+  "_home_square_comment": "Manual home is the magnet centred beneath the a2 pawn. Set home here assigns a2's calibrated coordinates without moving the carriage. home_beside still sets the motor direction from the frame corner.",
   "home_beside": "a8",
   "_home_beside_comment": "Which square the home corner is next to on the real board (2026-11-07: a8). With a8 the Pi mirrors Y on the USB link, so everything else still counts a1 at y 26.25; see gantry_driver.y_flip_mm.",
   "camera_cal_target": "piece",
@@ -75,8 +77,8 @@
   "_position_memory_comment": "Home once: the Pi remembers the carriage's spot in ~/.duen-gantry/position.json (GANTRY_STATE_DIR overrides) whenever the board reports Idle and homed, and marks it 'moving' before every move. When the ESP32 restarts (port opened, supply dip, Pi reboot) the console's Connect and the touch app's next job put it back ($HM, then G92 to the spot) instead of asking for a home, unless the power went off mid-move, the motors were switched off (M18), there was an alarm, a stall or a stop mid-move, or steps/mm or home_beside changed. keep_esp32_running: open the USB port with DTR/RTS held low so the ESP32 does not restart at all (flashing with esptool/arduino-cli resets it as before). park_at_start_after_job: after each job the empty magnet goes to start_mm (a8's centre, from the camera calibration); only when start_mm is saved.",
   "drag_lag_mm": 3.0,
   "_drag_lag_comment": "How far a dragged piece trails behind the magnet (2026-11-07: about 3 mm). Every carry leads the magnet by this much (gantry_driver.lag_compensated): past each corner and past the target centre along the way it came, then a swing onto the next line, so the PIECE rides the lines between squares and stops on the centre. 0 turns it off. If pieces stop short, raise it; if they overshoot, lower it.",
-  "swap_xy": true,
-  "_swap_xy_comment": "2026-11-07: a route 3 squares along the files went 3 along the ranks, so the motors are the other way round: the link exchanges X and Y on everything sent to and read from the ESP32 (gantry_driver.swap_line), after the a8 mirror. Everything on the Pi (planner, screen, jog arrows) still counts files along X. Changing it forgets the position: set home again once. If a direction then runs backwards, that is home_beside; tell Claude which.",
+  "swap_xy": false,
+  "_swap_xy_comment": "2026-11-11: disabled the previous X/Y swap to match the current wiring. X runs along files and Y along ranks. After changing this setting, discard the old position and set home beneath the a2 pawn again.",
   "servo_deg": {
     "up": 122,
     "down": 37

@@ -37,7 +37,7 @@ bash gantry/console/console.sh        # first run makes gantry/console/.venv (py
 
 It opens http://127.0.0.1:8788: pick the ESP32's port (`/dev/cu.usbserial-…` on a Mac,
 `/dev/ttyUSB0` on Linux), press **Connect**, then home (Motors off → push the carriage into the
-home corner beside a8 → **Set home here**). No board? `bash gantry/console/console.sh sim` runs
+reference beneath the centre of the **a2 pawn** → **Set home here**). No board? `bash gantry/console/console.sh sim` runs
 the same page against a pretend board (needs `g++` / `make` for the first build).
 
 **On the Pi (the ESP32 plugged into the Pi):** the page listens on the Pi's 127.0.0.1 only, so
@@ -53,6 +53,12 @@ game with the gantry (and the other way round). The settings that matter for a n
 `pi/gantry_config.json` (squares, `mm_per_turn`, `swap_xy`, `drag_lag_mm`, `servo_deg`); the
 firmware is flashed from the dashboard's **⚡ Flash** button (see Flashing).
 Before the first carry, find your arm's angles with `pi/arm_cal.py` (see Servo).
+
+The current setup uses `swap_xy: false` and `home_square: "a2"`. X runs along the files and Y along
+the ranks. For manual homing, place the magnet beneath the centre of a2 and press **Set home here**;
+the carriage stays there while its coordinates are assigned. **Return home** returns to a2 with the
+arm down. `home_beside: "a8"` still describes the motor direction from the frame corner. After changing
+the axis mapping, discard the old remembered position and home at a2 once before moving.
 
 ## The numbers
 

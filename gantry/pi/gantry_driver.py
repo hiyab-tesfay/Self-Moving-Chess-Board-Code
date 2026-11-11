@@ -921,8 +921,16 @@ def restore_position(memory: "PositionMemory | None", config: dict, command, sta
 def home_spot_mm(config: dict) -> tuple[float, float] | None:
     """config "home_spot_mm": [dx, dy], how far the spot where a person homes the carriage is from the frame's true
     corner, in mm along X and along Y AWAY from that corner (both >= 0). None (absent, null or 0,0): home is the
-    corner itself. Raises GantryError for a spot outside the travel."""
+    corner itself. home_square, when set, uses that square's calibrated centre instead of home_spot_mm.
+    Raises GantryError for an invalid square or a spot outside the travel."""
     spot = config.get("home_spot_mm")
+    square = str(config.get("home_square") or "").strip().lower()
+    if square:
+        if not re.fullmatch(r"[a-h][1-8]", square):
+            raise GantryError(f"home_square must be a square from a1 to h8, not {square!r}")
+        x, y = BoardMap(config).square_mm(square)
+        flip = y_flip_mm(config)
+        spot = (x, flip - y if flip is not None else y)
     if not spot:
         return None
     try:

@@ -1176,9 +1176,10 @@ class Console:
         self.position_lost = False
         self.query_status()
         corner = "beside a8" if self.link is not None and self.link.flip_y is not None else "the bottom-left corner, beside a1"
-        where = f"the home spot, {spot[0]:g} mm and {spot[1]:g} mm off the corner {corner}" if spot else f"the corner {corner}"
+        square = self.config.get("home_square")
+        where = f"the centre of {square}" if square else (f"the home spot, {spot[0]:g} mm and {spot[1]:g} mm off the corner {corner}" if spot else f"the corner {corner}")
         self.say("info", f"Home set: this spot is home ({where})")
-        if self.start_mm():
+        if self.start_mm() and not square:
             self.start("Go to start", self._go_start)
 
     def home_bump(self) -> None:
@@ -1197,9 +1198,7 @@ class Console:
 
     def home_xy(self) -> tuple[float, float]:
         """Home as this side counts: 0,0, or 0,travel when home is beside a8 (the link mirrors Y)."""
-        flip = self.link.flip_y if self.link is not None else None
-        dx, dy = gd.home_spot_mm(self.config) or (0.0, 0.0)
-        return dx, (flip - dy if flip is not None else dy)
+        return gd.home_xy(self.config)
 
     def _return_home(self) -> None:
         """Back to home from wherever the board's own step count says the carriage is, in one straight line
@@ -1955,6 +1954,8 @@ class Console:
                 "tune": self.tune_view(),
                 "geometry": {"square": self.map.square, "square_y": self.map.square_y, "a1": self.map.a1, "travel": self.map.travel,
                              "home_beside": "a8" if gd.y_flip_mm(self.config) is not None else "a1",
+                             "home_square": self.config.get("home_square"), "home_xy": self.home_xy(),
+                             "swap_xy": gd.swap_xy_flag(self.config),
                              "columns": {str(k): v for k, v in self.map.columns.items() if k < 0 or k > 7},
                              "park_rows": [self.map.park_rows[i] for i in sorted(self.map.park_rows)],
                              "reach": self.geometry.reach_mm, "lanes": bl.usable_lanes(self.config),

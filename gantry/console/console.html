@@ -159,8 +159,8 @@
       <div class="note" id="fwline"></div>
       <div class="row">
         <button class="btn" id="motorsoff" title="M18: the drivers let go so you can push the carriage">1. Motors off</button>
-        <span class="muted">2. push the carriage into the home corner (beside a8 on this board)</span>
-        <button class="btn gold" id="homemanual" title="$HM: this spot is 0,0">3. Set home here</button>
+        <span class="muted" id="homeinstruction">2. place the magnet at the configured home reference</span>
+        <button class="btn gold" id="homemanual" title="Assign this spot the configured home coordinates">3. Set home here</button>
       </div>
       <div class="row">
         <span class="muted" id="posmem" title="Homed once, the spot is remembered on this computer: after the board restarts, Connect puts it back without homing"></span>
@@ -463,8 +463,7 @@ function renderBanners() {
       <button class="btn" onclick="api('/api/resolve',{action:'before'})">I put the pieces back as before</button>
       <button class="btn" onclick="api('/api/resolve',{action:'after'})">I finished the move by hand</button></div></div>`);
   if (S.connected && S.status && (!S.status.homed || S.position_lost) && !(S.task && /hom/i.test(S.task.name)))
-    out.push(`<div class="banner warn">${S.position_lost ? "Position lost" : "Not homed"}: press <b>Motors off</b>, push the carriage into the
-      bottom-left corner, then <b>Set home here</b>.</div>`);
+    out.push(`<div class="banner warn">${S.position_lost ? "Position lost" : "Not homed"}: press <b>Motors off</b>, place the magnet ${S.geometry.home_square ? `beneath the centre of <b>${esc(S.geometry.home_square)}</b>` : "at the configured home spot"}, then <b>Set home here</b>.</div>`);
   if (S.status && S.status.state === "Hold") out.push(`<div class="banner bad">Stopped. Check the board, then press <b>Unlock</b>.</div>`);
   if (S.status && S.status.state === "Alarm" && S.status.reason && S.status.reason !== "not homed")
     out.push(`<div class="banner bad">Alarm: ${esc(S.status.reason)}. Check the board, press <b>Unlock</b>, then home it.</div>`);
@@ -553,7 +552,11 @@ function renderBoard() {
       <line x1="${x - 14}" y1="${sy(y)}" x2="${x + 14}" y2="${sy(y)}" stroke="#b3261e" stroke-width="1.2"/>
       <line x1="${x}" y1="${sy(y) - 14}" x2="${x}" y2="${sy(y) + 14}" stroke="#b3261e" stroke-width="1.2"/></g>`);
   }
-  parts.push(g.home_beside === "a8"
+  if (g.home_square) {
+    const [hx, hy] = g.home_xy;
+    parts.push(`<circle cx="${hx}" cy="${sy(hy)}" r="15" fill="none" stroke="#c9a227" stroke-width="2" pointer-events="none"><title>Home: ${esc(g.home_square)}</title></circle>`);
+    parts.push(`<text x="2" y="-4" font-size="8" fill="#6d6080">home: ${esc(g.home_square)} centre</text>`);
+  } else parts.push(g.home_beside === "a8"
     ? `<text x="2" y="-4" font-size="8" fill="#6d6080">home (top-left, beside a8)</text>`
     : `<text x="2" y="${H + 10}" font-size="8" fill="#6d6080">home 0,0 (bottom-left)</text>`);
   setHTML($("#board"), parts.join(""));
@@ -629,8 +632,10 @@ function renderControls() {
   $("#forgetpos").disabled = busy || !pm.remembered;
   document.querySelectorAll("[data-j]").forEach((b) => (b.disabled = !c || busy));
   const g = S.geometry, toSketch = (x, y) => `${(x + g.home[0]).toFixed(1)}, ${(y + g.home[1]).toFixed(1)}`;
+  $("#homeinstruction").textContent = g.home_square ? `2. place the magnet beneath the centre of ${g.home_square}` : "2. place the magnet at the configured home spot";
+  $("#homemanual").title = g.home_square ? `Set this spot as ${g.home_square}'s centre; the carriage stays here` : "Assign this spot the configured home coordinates";
   $("#boardnote").innerHTML = `a1's centre is at ${toSketch(g.a1[0], g.a1[1])} on the sketch (${g.a1[0].toFixed(1)}, ${g.a1[1].toFixed(1)} as the board counts);
-    squares ${g.square}${g.square_y && g.square_y !== g.square ? " × " + g.square_y : ""} mm. At home the magnet is at ${toSketch(0, 0)} on the sketch.
+    squares ${g.square}${g.square_y && g.square_y !== g.square ? " × " + g.square_y : ""} mm. Home${g.home_square ? ` (${esc(g.home_square)})` : ""} is at ${toSketch(...g.home_xy)} on the sketch.
     One motor turn: X ${g.mm_per_turn[0]} mm, Y ${g.mm_per_turn[1]} mm (${g.steps_per_mm} steps/mm). Docking lanes in use: ${g.lanes.length ? g.lanes.map((l) => l === "w" ? "left" : "right").join(" and ") : "none"}.`;
   const start = S.start_mm || (S.camera_cal && S.camera_cal.start_mm) || g.start_mm;
   $("#startnote").textContent = Array.isArray(start) && start.length >= 2 ? `start: a8 centre at ${(+start[0]).toFixed(1)}, ${(+start[1]).toFixed(1)}` : "";

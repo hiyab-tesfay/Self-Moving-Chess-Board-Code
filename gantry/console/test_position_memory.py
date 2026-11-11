@@ -158,7 +158,7 @@ class ConsoleHomeSpotTests(unittest.TestCase):
                       mock.patch.object(cs, "SETTINGS_FILE", Path(tmp.name) / "settings.json")):
             patch.start()
             self.addCleanup(patch.stop)
-        config = dict(cs.gd.load_config(cs.gd.HERE / "gantry_config.json"), home_spot_mm=[4.0, 6.0], start_mm=None)
+        config = dict(cs.gd.load_config(cs.gd.HERE / "gantry_config.json"), home_square=None, home_spot_mm=[4.0, 6.0], start_mm=None)
         c = cs.Console(config, sim_speed=40)
         c.connect("sim")
         wait(c)
@@ -180,3 +180,31 @@ class ConsoleHomeSpotTests(unittest.TestCase):
         finally:
             wait(c)
             c.disconnect()
+
+    def test_a2_manual_home_stays_at_the_pawn_even_with_a_saved_start(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+                "GANTRY_SIM_STATE": str(Path(tmp) / "sim.json"), "GANTRY_STATE_DIR": tmp,
+                "GANTRY_HOME_BESIDE": "a8", "GANTRY_SWAP_XY": "0"}), mock.patch.object(
+                cs, "SETTINGS_FILE", Path(tmp) / "settings.json"):
+            config = dict(cs.gd.load_config(cs.gd.HERE / "gantry_config.json"),
+                          home_square="a2", swap_xy=False, start_mm=[100.0, 200.0])
+            c = cs.Console(config, sim_speed=40)
+            c.connect("sim")
+            wait(c)
+            try:
+                since = c.log_id
+                c.home_manual()
+                self.assertIsNone(c.task, "manual home must not drive to a different saved start")
+                st = c.query_status()
+                want = c.map.square_mm("a2")
+                self.assertAlmostEqual(st["x"], want[0], delta=0.25)
+                self.assertAlmostEqual(st["y"], want[1], delta=0.25)
+                view = c.view(since)
+                self.assertEqual(view["geometry"]["home_square"], "a2")
+                self.assertEqual(tuple(view["geometry"]["home_xy"]), want)
+                self.assertFalse(view["geometry"]["swap_xy"])
+                sent = [e["text"] for e in view["log"] if e["kind"] == "send"]
+                self.assertFalse(any(line.startswith(("G0 ", "G1 ")) for line in sent), sent)
+            finally:
+                wait(c)
+                c.disconnect()
