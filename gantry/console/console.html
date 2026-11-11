@@ -160,7 +160,9 @@
       <div class="row">
         <button class="btn" id="motorsoff" title="M18: the drivers let go so you can push the carriage">1. Motors off</button>
         <span class="muted" id="homeinstruction">2. place the magnet at the configured home reference</span>
-        <button class="btn gold" id="homemanual" title="Assign this spot the configured home coordinates">3. Set home here</button>
+        <button class="btn gold" id="homemanual" title="At e2: start a new two-point calibration without moving">Set Home 1 — e2</button>
+        <button class="btn gold" id="home2" title="Jog onto e7's centre, then save this second point without moving">Set Home 2 — e7</button>
+        <span class="muted" id="homepointsnote">Place the magnet at e2, set Home 1, then jog to e7 and set Home 2.</span>
       </div>
       <div class="row">
         <span class="muted" id="posmem" title="Homed once, the spot is remembered on this computer: after the board restarts, Connect puts it back without homing"></span>
@@ -633,7 +635,9 @@ function renderControls() {
   document.querySelectorAll("[data-j]").forEach((b) => (b.disabled = !c || busy));
   const g = S.geometry, toSketch = (x, y) => `${(x + g.home[0]).toFixed(1)}, ${(y + g.home[1]).toFixed(1)}`;
   $("#homeinstruction").textContent = g.home_square ? `2. place the magnet beneath the centre of ${g.home_square}` : "2. place the magnet at the configured home spot";
-  $("#homemanual").title = g.home_square ? `Set this spot as ${g.home_square}'s centre; the carriage stays here` : "Assign this spot the configured home coordinates";
+  $("#homemanual").title = "At e2: save Home 1 and start a new two-point calibration. The carriage stays here.";
+  $("#home2").disabled = !c || busy || !S.home_points?.home1_ready || !S.status?.homed || !!S.position_lost;
+  $("#homepointsnote").textContent = S.home_points?.home2_saved ? "Home 1 (e2) and Home 2 (e7) saved." : S.home_points?.home1_ready ? "Home 1 saved. Jog to e7, then set Home 2." : "Place the magnet at e2 and set Home 1. Both buttons save without moving.";
   $("#posmem").title = g.manual_home_on_connect ? "Set home here manually after connecting; saved coordinates are not restored automatically" : "The saved position can be restored after the controller restarts";
   $("#boardnote").innerHTML = `a1's centre is at ${toSketch(g.a1[0], g.a1[1])} on the sketch (${g.a1[0].toFixed(1)}, ${g.a1[1].toFixed(1)} as the board counts);
     squares ${g.square}${g.square_y && g.square_y !== g.square ? " × " + g.square_y : ""} mm. Home${g.home_square ? ` (${esc(g.home_square)})` : ""} is at ${toSketch(...g.home_xy)} on the sketch.
@@ -815,7 +819,8 @@ $("#flashbtn").onclick = () => {
   api("/api/flash", { port });
 };
 $("#motorsoff").onclick = $("#p_off").onclick = () => api("/api/motors-off");
-$("#homemanual").onclick = () => api("/api/home", { mode: "manual" });
+$("#homemanual").onclick = () => api("/api/home1", {});
+$("#home2").onclick = () => api("/api/home2", {});
 $("#homebump").onclick = () => { if (confirm("Bump homing drives into the bottom-left corner until the motors stall against the frame. Clear the way first. Go?")) api("/api/home", { mode: "bump" }); };
 $("#unlock").onclick = () => api("/api/unlock");
 document.querySelectorAll("[data-j]").forEach((b) => (b.onclick = () => {

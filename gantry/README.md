@@ -54,6 +54,10 @@ game with the gantry (and the other way round). The settings that matter for a n
 firmware is flashed from the dashboard's **⚡ Flash** button (see Flashing).
 Before the first carry, find your arm's angles with `pi/arm_cal.py` (see Servo).
 
+For the two-point setup, place the magnet beneath **e2** and press **Set Home 1 — e2**. This starts
+a new calibration. Jog the empty magnet onto **e7** and press **Set Home 2 — e7**. Both buttons save
+the current position without moving the carriage; e2 stays the home reference.
+
 The current setup uses `swap_xy: false` and `home_square: "e2"`. X runs along the files and Y along
 the ranks. For manual homing, place the magnet beneath the centre of e2 and press **Set home here**;
 the carriage stays there while its coordinates are assigned. **Return home** returns to e2 with the
