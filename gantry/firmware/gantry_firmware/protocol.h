@@ -33,6 +33,9 @@
 //   G4 P..              dwell P seconds;   G92 X.. Y..  call this spot these coordinates
 //   M3 / M5             magnet on / off (M3 needs: homed, still, arm up, and MAGNET_MIN_OFF_MS since M5)
 //   M7 / M8             servo arm up (magnet to the board) / down (clear of it); ok and nothing without a servo
+//   M9                  servo arm limp (0.8.1): no pulses until the next M7/M8, so it can be moved by hand and a
+//                       jammed arm stops straining. Status shows |Servo:free. The board also starts limp, and stays limp
+//                       through alarms, homing and M5 (0.8.2) until an M7/M8 or a lift.
 //   M17 / M18           motors on (they enable themselves on the first move) / off now
 //   !                   stop at once, drop the sequence, magnet off, arm down (then $X)
 //   $$                  settings;  $I  version
@@ -104,6 +107,7 @@ struct Peripherals {
   virtual void magnet(bool on) = 0;
   virtual bool magnet_on() = 0;
   virtual void servo(int angle) { (void)angle; }   // boards without a servo leave this alone
+  virtual void servo_release() {}                  // M9 (0.8.1): no pulses, the arm goes limp
 };
 
 struct Writer {
@@ -174,6 +178,10 @@ class Protocol {
     servo_retract_ = retract_deg;
     servo_settle_ms_ = settle_ms;
   }
+
+  // 0.8.1: the board starts with the arm limp (the .ino calls this); tests and the pretend board leave it held.
+  void set_servo_free(bool free) { servo_free_ = free && servo_present_; }
+  bool servo_free() const { return servo_free_; }
 
   // The safety numbers from config.h. 0 switches a guard off.
   void set_guards(uint32_t magnet_max_on_ms, uint32_t magnet_min_off_ms, uint32_t host_timeout_ms) {
@@ -297,6 +305,7 @@ class Protocol {
     if (!strcmp(line, "M5")) { reply(magnet_command(false, now_us)); return; }
     if (!strcmp(line, "M7")) { reply(servo_command(true)); return; }
     if (!strcmp(line, "M8")) { reply(servo_command(false)); return; }
+    if (!strcmp(line, "M9")) { reply(servo_release_command()); return; }
     if (!strcmp(line, "M17")) { reply(OK); return; }   // motors enable themselves on the first move
     if (!strcmp(line, "M18")) {
       if (m_.moving()) { reply(ERR_BUSY); return; }
@@ -445,8 +454,14 @@ class Protocol {
     }
   }
 
-  void set_servo_up(bool up) {
-    if (!servo_present_ || up == servo_up_) return;
+  // Safety lowerings (alarm, hold, homing, M5...) leave a limp arm limp: driving it from an unknown
+  // angle is what jammed it (0.8.1 drove it to down on every boot, from the not-homed alarm).
+  // Only a lift, or an explicit M7/M8 (engage), takes hold again.
+  void set_servo_up(bool up, bool engage = false) {
+    if (!servo_present_) return;
+    if (servo_free_ && !up && !engage) return;
+    if (up == servo_up_ && !servo_free_) return;
+    servo_free_ = false;
     servo_up_ = up;
     p_.servo(up ? servo_extend_ : servo_retract_);
   }
@@ -469,11 +484,21 @@ class Protocol {
 
   // M7 / M8 from the host. Without a servo both are accepted and do nothing, so a driver can
   // send M8 "just in case" to any board.
+  // M9 from the host: the arm goes limp (no pulses) until the next M7/M8. Not mid-sequence.
+  int servo_release_command() {
+    if (!servo_present_) return OK;
+    if (busy()) return ERR_BUSY;
+    servo_up_ = false;
+    servo_free_ = true;
+    p_.servo_release();
+    return OK;
+  }
+
   int servo_command(bool up) {
     if (!servo_present_) return OK;
     if (busy()) return ERR_BUSY;
     if (up && (m_.state() == ALARM || m_.state() == HOLD)) return ERR_ALARM;
-    set_servo_up(up);
+    set_servo_up(up, true);
     return OK;
   }
 
@@ -702,7 +727,7 @@ class Protocol {
     reply(code);
   }
 
-  // $S=up,down[,settle]: the arm's angles in degrees (0-180) and its settle time in ms (0-3000), so
+  // $S=up,down[,settle]: the arm's angles in degrees (-20..200 real degrees since 0.8.6, 0-180 = 500-2500 us; 0-180 = 1100-1900 us) and its settle time in ms (0-3000), so
   // they can be found on the real arm without a reflash. Only with the arm down and the board still;
   // the arm goes to the new down angle at once. A reset goes back to config.h.
   int set_servo_angles(const char* text) {
@@ -720,13 +745,13 @@ class Protocol {
       c = end + 1;
     }
     if (n < 2) return ERR_NUMBER;
-    if (v[0] < 0 || v[0] > 180 || v[1] < 0 || v[1] > 180 || v[2] < 0 || v[2] > 3000) return ERR_RANGE;
+    if (v[0] < SERVO_MIN_DEG || v[0] > SERVO_MAX_DEG || v[1] < SERVO_MIN_DEG || v[1] > SERVO_MAX_DEG || v[2] < 0 || v[2] > 3000) return ERR_RANGE;
     if (busy()) return ERR_BUSY;
     if (servo_up_) return ERR_SERVO_UP;
     servo_extend_ = (int)v[0];
     servo_retract_ = (int)v[1];
     servo_settle_ms_ = (uint32_t)v[2];
-    p_.servo(servo_retract_);
+    if (!servo_free_) p_.servo(servo_retract_);   // limp (0.8.1): just store them; the next M8 goes there
     return OK;
   }
 
@@ -834,7 +859,7 @@ class Protocol {
     else
       n = snprintf(buf, sizeof buf, "<%s|MPos:%s,%s|Mag:%d|Homed:%d", name, x, y, p_.magnet_on() ? 1 : 0, m_.homed() ? 1 : 0);
     if (n < 0) n = 0;
-    if (servo_present_) n += snprintf(buf + n, sizeof buf - n, "|Servo:%s", servo_up_ ? "up" : "down");
+    if (servo_present_) n += snprintf(buf + n, sizeof buf - n, "|Servo:%s", servo_free_ ? "free" : servo_up_ ? "up" : "down");
     if (prog_active_) n += snprintf(buf + n, sizeof buf - n, "|Prog:%d/%d", prog_at_, prog_len_);
     if (host_lost_) n += snprintf(buf + n, sizeof buf - n, "|Host:lost");
     snprintf(buf + n, sizeof buf - n, ">\n");
@@ -884,6 +909,7 @@ class Protocol {
   int servo_extend_, servo_retract_;
   uint32_t servo_settle_ms_;
   bool servo_up_;
+  bool servo_free_ = false;   // 0.8.1: limp (M9, or at power-up): no pulses until the next M7/M8
   uint32_t magnet_max_on_us_, magnet_min_off_us_, host_timeout_us_;
   uint32_t magnet_on_at_, magnet_off_at_;
   bool magnet_was_on_;

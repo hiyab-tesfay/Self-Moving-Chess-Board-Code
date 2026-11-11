@@ -119,15 +119,24 @@
 // ESP32 dying on 2026-11-06. The servo takes 5 V from the supply's 5 V rail (or a BEC), never from the ESP32's 3.3 V pin.
 // `$S=up,down[,settle]` changes them at run time (0.7.2), so they can be found on the arm itself;
 // a reset goes back to these.
-#define SERVO_EXTEND_DEG 180   // = 1900 us with the range below: the top of the bench sketch that works
-#define SERVO_RETRACT_DEG 0     // = 1100 us: the bottom of it
+#define SERVO_EXTEND_DEG 95    // 0.8.5: 5 deg either side of the centre (1500 us) until $S sets the calibrated
+#define SERVO_RETRACT_DEG 85   // angles (the Pi sends them on connect): small enough to hit nothing
 #define SERVO_SETTLE_MS 3000      // the full 0-180 sweep takes 2.9 s at SERVO_SWEEP_DEG_PER_S; time for the arm to arrive before the magnet switches or the carriage moves
 // 0-180 deg here is 1100-1900 us (2026-11-07), not the full 500-2500: the user's bench sketch that moves
 // this MG90S without trouble sweeps only 1100-1900 us, 5 us every 20 ms, "to avoid driving into the
 // mechanical end stops". The old 0 deg = 500 us drove it into its end stop: it stalled, drew most of
 // an amp from the USB (the servo is on VIN) and the USB link dropped.
-#define SERVO_MIN_PULSE_US 1100
-#define SERVO_MAX_PULSE_US 1900
+// 0.8.5 (2026-11-10): REAL degrees. 0-180 = 500-2500 us (11.1 us per deg), 90 = 1500 us = the centre the horn
+// was refitted at. Until 0.8.4 one "degree" was 4.44 us, about 0.4 of a real one, so +-90 in the
+// calibration tool was only about +-36 real degrees. The end stops are kept off by the calibrated $S angles.
+#define SERVO_MIN_PULSE_US 500
+#define SERVO_MAX_PULSE_US 2500
+// 0.8.3: angles go past 0-180 on the same scale (4.44 us per deg), for a horn mounted off the end of the range.
+// The pulse never leaves SERVO_PULSE_FLOOR_US..SERVO_PULSE_CEIL_US, the MG90's rated ~500-2500 us.
+#define SERVO_MIN_DEG -20    // 0.8.6: past both nominal ends (500 / 2500 us), for a servo that turns further
+#define SERVO_MAX_DEG 200    // than its rating; -20 = 278 us, 200 = 2722 us. Past its internal stop it only buzzes.
+#define SERVO_PULSE_FLOOR_US 270
+#define SERVO_PULSE_CEIL_US 2730
 // How the arm is driven (0.7.2, servo_arm.h): the pulse sweeps to a new angle at SERVO_SWEEP_DEG_PER_S
 // (90 deg in 0.25 s, inside SERVO_SETTLE_MS) instead of jumping (0 jumps). The magnet is a PERMANENT
 // magnet that the arm lifts (no electromagnet on this build), so the arm is held down too
@@ -135,7 +144,7 @@
 // the pulses that long after the arm is down, only for an arm that cannot be pulled up. What keeps the
 // MG90 from stalling is the two angles: up stops just short of the board, down short of the frame
 // ($S=up,down while watching the arm).
-#define SERVO_SWEEP_DEG_PER_S 62    // 180 deg (800 us) in 2.9 s, about the bench sketch's 5 us per 20 ms (3.2 s)
+#define SERVO_SWEEP_DEG_PER_S 62    // real deg since 0.8.5: 180 deg in 2.9 s (was 180 * 0.4 real deg), about the bench sketch's 5 us per 20 ms (3.2 s)
 #define SERVO_RELEASE_DOWN_MS 0
 
 // ----------------------------------------------------------------------------- the board, as the firmware knows it
@@ -238,7 +247,8 @@
 // $X or $H, so a person checks the board before the next job.
 #define HOST_TIMEOUT_MS 20000
 
-// Power-up. Every output is put in its safe state (drivers disabled, magnet off, servo up) before
+// Power-up. Every output is put in its safe state (drivers disabled, magnet off, servo limp: no pulses until the
+// first M7/M8, 0.8.1, so a restart never drives the arm into an end of its travel) before
 // anything else, and commands are accepted only after BOOT_SETTLE_MS, so a Pi that is still
 // talking when the ESP32 resets cannot start a move on a half-initialised board.
 #define BOOT_SETTLE_MS 500
@@ -256,4 +266,4 @@
 #else
 #define SERIAL_LINE_MAX 192
 #endif
-#define FIRMWARE_VERSION "duen-gantry 0.8.0"
+#define FIRMWARE_VERSION "duen-gantry 0.8.6"

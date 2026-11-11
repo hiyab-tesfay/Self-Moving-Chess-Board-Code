@@ -160,6 +160,7 @@ class GantryPlayer:
             self.link = self.gd.Link(self.port, int(self.config.get("baud", 115200)), log,
                                      keep_running=self.config.get("keep_esp32_running"))
             self.link.flip_y = flip_y   # home beside a8: every Y mirrored, from the first status on
+            self.link.swap_xy = self.gd.swap_xy_flag(self.config)   # X and Y motors exchanged (config swap_xy)
         except self.gd.GantryError as exc:
             raise GantryError(str(exc)) from None
         except Exception as exc:
@@ -467,6 +468,7 @@ class GantryPlayer:
         if self.manual is None or self.manual.link is not self.link:
             gantry = self.gd.Gantry(self.link, log)
             self.link.flip_y = self.gd.y_flip_mm(self.config)
+            self.link.swap_xy = self.gd.swap_xy_flag(self.config)
             gantry.set_motion(self.config)
             if not self.gd.uses_gcode(self.config):
                 gantry.set_step_pulse(self.config)

@@ -93,6 +93,8 @@ struct FakePeripherals : Peripherals {
     event_us.push_back(hal ? hal->t : 0);
   }
   bool magnet_on() override { return on; }
+  int releases = 0;
+  void servo_release() override { releases++; events.push_back({"arm free", motion ? motion->position_mm(Y) : 0.0}); event_us.push_back(hal ? hal->t : 0); }
   void servo(int want) override {
     angle = want;
     events.push_back({want == SERVO_EXTEND_DEG ? "arm up" : "arm down", motion ? motion->position_mm(Y) : 0.0});
@@ -531,7 +533,13 @@ static void test_servo_arm_drive() {
   held.go(180, t);
   for (int i = 0; i < 2000; i++) { t += 1000; held.tick(t, i > 1000); }
   CHECK(held.angle() == 180.0f && g_pulses.back() == 2500 && held.pulsing(), "sweep 0 jumps, release 0 never lets go");
-  CHECK(arm.pulse_for(-5) == 500 && arm.pulse_for(200) == 2500 && arm.pulse_for(90) == 1500, "pulse widths clamp to 0-180 deg");
+  CHECK(arm.pulse_for(-5) == 444 && arm.pulse_for(200) == 2722 && arm.pulse_for(90) == 1500, "a 500-2500 range, same scale past its ends: %u %u", arm.pulse_for(-5), arm.pulse_for(200));
+  gantry::ServoArm mg(record_pulse, 1100, 1900, 0.0f, 0, 0);   // 0.8.3: the real range, past both ends
+  CHECK(mg.pulse_for(0) == 1100 && mg.pulse_for(180) == 1900 && mg.pulse_for(90) == 1500, "0-180 unchanged");
+  gantry::ServoArm real(record_pulse, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 0.0f, 0, 0);   // 0.8.5: real degrees
+  CHECK(real.pulse_for(0) == 500 && real.pulse_for(90) == 1500 && real.pulse_for(180) == 2500, "0/90/180 = 500/1500/2500 us");
+  CHECK(real.pulse_for(-20) == 278 && real.pulse_for(200) == 2722, "0.8.6: past both ends: %u %u", real.pulse_for(-20), real.pulse_for(200));
+  CHECK(real.pulse_for(-90) == 278 && real.pulse_for(300) == 2722, "and no further: %u %u", real.pulse_for(-90), real.pulse_for(300));
 }
 
 // $S=up,down[,settle] (0.7.2): the arm's angles found on the real arm, without a reflash.
@@ -551,7 +559,10 @@ static void test_servo_angles() {
   CHECK(send("$S=85,15,600") == "ok\n", "with a settle time");
   send("$$");
   CHECK(r.out.text.find("$S=85,15,600 (") != std::string::npos, "settle set: %s", r.out.text.c_str());
-  CHECK(send("$S=200,0").rfind("error:13", 0) == 0, "angles stop at 180: %s", r.out.text.c_str());
+  CHECK(send("$S=201,0").rfind("error:13", 0) == 0, "angles stop at 200: %s", r.out.text.c_str());
+  CHECK(send("$S=0,-21").rfind("error:13", 0) == 0, "and at -20: %s", r.out.text.c_str());
+  CHECK(send("$S=195,-15") == "ok\n" && per.angle == -15, "negative down and past-180 up (0.8.3): %d", per.angle);
+  CHECK(send("$S=85,15,600") == "ok\n", "back to the earlier angles");
   CHECK(send("$S=90,0,5000").rfind("error:13", 0) == 0, "settle stops at 3000 ms: %s", r.out.text.c_str());
   CHECK(send("$S=80").rfind("error:2", 0) == 0, "both angles needed: %s", r.out.text.c_str());
   CHECK(send("$S=A,B").rfind("error:2", 0) == 0, "numbers only: %s", r.out.text.c_str());
@@ -561,6 +572,59 @@ static void test_servo_angles() {
   CHECK(r.out.text.find("$S=85,15,600 (") != std::string::npos, "refusals change nothing: %s", r.out.text.c_str());
   Rig plain(false);
   CHECK(plain.send("$S=80,10").rfind("error:1", 0) == 0, "no $S without a servo: %s", plain.out.text.c_str());
+}
+
+// 0.8.1: M9 lets the arm go limp, the board starts limp, and leaving limp never sweeps through another angle.
+static void test_servo_release() {
+  g_pulses.clear();
+  gantry::ServoArm arm(record_pulse, 1100, 1900, 62.0f, 0, 0);
+  uint32_t t = 1000;
+  arm.begin_free();
+  for (int i = 0; i < 500; i++) { t += 1000; arm.tick(t, true); }
+  CHECK(g_pulses.empty() && !arm.pulsing() && arm.free(), "power-up: no pulses at all (%zu)", g_pulses.size());
+  arm.go(45, t);
+  CHECK(g_pulses.size() == 1 && g_pulses[0] == arm.pulse_for(45), "from limp straight to 45 deg, not via 0: %u", g_pulses[0]);
+  for (int i = 0; i < 500; i++) { t += 1000; arm.tick(t, true); }
+  CHECK(g_pulses.back() == arm.pulse_for(45) && arm.pulsing() && !arm.free(), "then held at 45: %u", g_pulses.back());
+  arm.release();
+  CHECK(g_pulses.back() == 0 && !arm.pulsing() && arm.free(), "release: pulses stop at once");
+  for (int i = 0; i < 500; i++) { t += 1000; arm.tick(t, false); }
+  CHECK(g_pulses.back() == 0 && !arm.pulsing(), "and stay stopped");
+  g_pulses.clear();
+  arm.go(120, t);
+  CHECK(g_pulses.size() == 1 && g_pulses[0] == arm.pulse_for(120), "out of limp again: straight to 120 deg: %u", g_pulses[0]);
+
+  Rig r(true);
+  Protocol& p = r.p;
+  FakePeripherals& per = r.per;
+  r.send("$X");
+  r.home();
+  CHECK(r.send("M9") == "ok\n" && p.servo_free(), "M9 when idle");
+  r.send("?");
+  CHECK(r.out.text.find("|Servo:free") != std::string::npos, "status says free: %s", r.out.text.c_str());
+  int before = (int)per.events.size();
+  CHECK(r.send("$S=120,40") == "ok\n" && (int)per.events.size() == before, "$S while limp only stores the angles");
+  CHECK(r.send("M8") == "ok\n" && per.angle == 40 && !p.servo_free(), "M8 takes hold at the new down: %d", per.angle);
+  r.send("?");
+  CHECK(r.out.text.find("|Servo:down") != std::string::npos, "status down: %s", r.out.text.c_str());
+  CHECK(r.send("M9") == "ok\n" && per.releases == 2 && p.servo_free() && !p.servo_up(), "M9 lets go");
+  CHECK(r.send("M7") == "ok\n" && per.angle == 120 && p.servo_up(), "M7 from limp: up at 120: %d", per.angle);
+  CHECK(r.send("M9") == "ok\n" && !p.servo_up() && per.releases == 3, "M9 from up lets go too");
+  CHECK(r.send("M5") == "ok\n" && p.servo_free() && per.angle == 120, "M5 while limp: stays limp (0.8.2)");
+  CHECK(r.send("M8") == "ok\n" && per.angle == 40 && !p.servo_free(), "M8 takes hold at down: %d", per.angle);
+  CHECK(r.send("M7") == "ok\n" && r.send("M5") == "ok\n" && per.angle == 40 && !p.servo_free(), "M5 (magnet off) brings a held arm back down: %d", per.angle);
+  // The 0.8.1 bug: a limp board in the not-homed alarm drove the arm to down on every loop.
+  Rig a(true);
+  a.p.set_servo_free(true);
+  int ev = (int)a.per.events.size();
+  for (int i = 0; i < 50; i++) a.p.run(1000u + 1000u * i);
+  CHECK(a.p.servo_free() && (int)a.per.events.size() == ev, "alarm at power-up: the limp arm is not driven (%d events)", (int)a.per.events.size() - ev);
+  CHECK(a.send("!") == "ok\n" && a.p.servo_free(), "hold keeps it limp");
+  CHECK(a.send("$X") == "ok\n" && a.p.servo_free(), "unlock keeps it limp");
+  a.home();
+  CHECK(a.p.servo_free(), "homing keeps it limp");
+  Rig plain(false);
+  CHECK(plain.send("M9") == "ok\n" && plain.per.releases == 0, "M9 without a servo: ok, nothing");
 }
 
 static void test_servo_sequence() {
@@ -1112,6 +1176,7 @@ int main() {
   test_servo_sequence();
   test_servo_angles();
   test_servo_arm_drive();
+  test_servo_release();
   test_magnet_guards();
   test_host_lost_finishes_the_carry_then_makes_the_board_safe();
   test_step_pulse_caps_the_rate();

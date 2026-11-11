@@ -74,5 +74,13 @@
   "park_at_start_after_job": true,
   "_position_memory_comment": "Home once: the Pi remembers the carriage's spot in ~/.duen-gantry/position.json (GANTRY_STATE_DIR overrides) whenever the board reports Idle and homed, and marks it 'moving' before every move. When the ESP32 restarts (port opened, supply dip, Pi reboot) the console's Connect and the touch app's next job put it back ($HM, then G92 to the spot) instead of asking for a home, unless the power went off mid-move, the motors were switched off (M18), there was an alarm, a stall or a stop mid-move, or steps/mm or home_beside changed. keep_esp32_running: open the USB port with DTR/RTS held low so the ESP32 does not restart at all (flashing with esptool/arduino-cli resets it as before). park_at_start_after_job: after each job the empty magnet goes to start_mm (a8's centre, from the camera calibration); only when start_mm is saved.",
   "drag_lag_mm": 3.0,
-  "_drag_lag_comment": "How far a dragged piece trails behind the magnet (2026-11-07: about 3 mm). Every carry leads the magnet by this much (gantry_driver.lag_compensated): past each corner and past the target centre along the way it came, then a swing onto the next line, so the PIECE rides the lines between squares and stops on the centre. 0 turns it off. If pieces stop short, raise it; if they overshoot, lower it."
+  "_drag_lag_comment": "How far a dragged piece trails behind the magnet (2026-11-07: about 3 mm). Every carry leads the magnet by this much (gantry_driver.lag_compensated): past each corner and past the target centre along the way it came, then a swing onto the next line, so the PIECE rides the lines between squares and stops on the centre. 0 turns it off. If pieces stop short, raise it; if they overshoot, lower it.",
+  "swap_xy": true,
+  "_swap_xy_comment": "2026-11-07: a route 3 squares along the files went 3 along the ranks, so the motors are the other way round: the link exchanges X and Y on everything sent to and read from the ESP32 (gantry_driver.swap_line), after the a8 mirror. Everything on the Pi (planner, screen, jog arrows) still counts files along X. Changing it forgets the position: set home again once. If a direction then runs backwards, that is home_beside; tell Claude which.",
+  "servo_deg": {
+    "up": 122,
+    "down": 37
+  },
+  "servo_settle_ms": 3000,
+  "_servo_deg_comment": "Board degrees (firmware 0.8.6+: real degrees, 0-180 = 500-2500 us). Calibrated 2026-11-10 with arm_cal.py after the horn was refitted (user's 0 spot = board 112)."
 }

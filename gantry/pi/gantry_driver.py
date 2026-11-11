@@ -704,6 +704,34 @@ def flip_line(text: str, flip_y: float | None) -> str:
     return text
 
 
+_X_OR_Y_WORD = re.compile(r"([XY])(-?\d+(?:\.\d*)?)")
+_TRAVEL_SETTING = re.compile(r"^\$(130|131)=")
+
+
+def swap_xy_flag(config: dict | None = None) -> bool:
+    """Config "swap_xy": the motor the firmware calls X moves the carriage along the ranks and its Y along the files
+    (2026-11-07: asked for 3 squares along X, it went 3 along Y). GANTRY_SWAP_XY=1/0 overrides (tests)."""
+    env = os.environ.get("GANTRY_SWAP_XY")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes")
+    return bool(config.get("swap_xy", False)) if config is not None else _config_flag("swap_xy")
+
+
+def swap_line(text: str, swap: bool) -> str:
+    """A line to or from the board with X and Y exchanged (see swap_xy_flag): G0/G1/G92 words, the status's MPos and
+    the travel settings $130/$131. Exchanging twice gives the line back, so the same call serves both directions."""
+    if not swap:
+        return text
+    if text.startswith("<"):
+        return _MPOS.sub(lambda m: f"MPos:{m.group(2)},{m.group(1)}", text, count=1)
+    if _TRAVEL_SETTING.match(text):
+        return _TRAVEL_SETTING.sub(lambda m: "$131=" if m.group(1) == "130" else "$130=", text, count=1)
+    head = text.split(" ", 1)[0].upper()
+    if head in FLIP_COMMANDS:
+        return _X_OR_Y_WORD.sub(lambda m: ("Y" if m.group(1) == "X" else "X") + m.group(2), text)
+    return text
+
+
 # ----------------------------------------------------------------------------- remembering the position
 
 STATE_FILE_NAME = "position.json"
@@ -832,8 +860,8 @@ class PositionMemory:
         return {"remembered": False, "saved": saved, "reason": why, "text": f"position not remembered ({why})"}
 
 
-def home_beside_name(flip_y) -> str:
-    return "a1" if flip_y is None else "a8"
+def home_beside_name(flip_y, swap: bool = False) -> str:
+    return ("a1" if flip_y is None else "a8") + (" axes swapped" if swap else "")
 
 
 def restore_position(memory: "PositionMemory | None", config: dict, command, status, log=logging.getLogger("gantry"),
@@ -865,7 +893,7 @@ def restore_position(memory: "PositionMemory | None", config: dict, command, sta
     if data.get("steps_per_mm") is None or abs(float(data["steps_per_mm"]) - want_spm) > 1e-4:
         return "none", (f"The position was remembered at {data.get('steps_per_mm')} steps/mm, the board now uses "
                         f"{want_spm:g}: home once more.")
-    beside = home_beside_name(y_flip_mm(config))
+    beside = home_beside_name(y_flip_mm(config), swap_xy_flag(config))
     if data.get("home_beside") != beside:
         return "none", f"The position was remembered with home beside {data.get('home_beside')}, now {beside}: home once more."
     x, y = float(data["x"]), float(data["y"])
@@ -936,6 +964,7 @@ def set_home_here(target, config: dict) -> dict:
     memory records. Returns that status."""
     gantry = target if isinstance(target, Gantry) else Gantry(target)
     gantry.link.flip_y = y_flip_mm(config)
+    gantry.link.swap_xy = swap_xy_flag(config)
     x, y = home_xy(config)
     gantry.command("$HM")
     if home_spot_mm(config):
@@ -985,6 +1014,8 @@ class Link:
         self.pretend = port == "sim"   # the pretend board may always be homed: nothing can hit anything
         # Home beside a8 (config "home_beside": "a8"): the travel along Y, else None. See flip_line().
         self.flip_y: float | None = None
+        # Config "swap_xy": the board's X motor drives the Pi's Y and the other way round (swap_line), after the mirror.
+        self.swap_xy: bool = swap_xy_flag()
         self.memory: PositionMemory | None = PositionMemory.for_port(port, log) if memory == "auto" else memory
         self.steps_per_mm: float | None = None      # $100 as last sent or reported
         self.travel: list[float | None] = [None, None]
@@ -1118,7 +1149,7 @@ class Link:
         elif (st["state"] == "Idle" and st["homed"] and self.doubt is None and self.batch_depth == 0
               and self.steps_per_mm is not None):
             self.memory.settled(st["x"], st["y"], self.steps_per_mm,
-                                self.travel if None not in self.travel else None, home_beside_name(self.flip_y))
+                                self.travel if None not in self.travel else None, home_beside_name(self.flip_y, self.swap_xy))
 
     def _pump(self, source) -> None:
         buf = b""
@@ -1146,7 +1177,7 @@ class Link:
             self._watch_sent(text)
         except Exception:      # the memory must never stop a command (above all "!")
             self.log.exception("position memory")
-        text = flip_line(text, self.flip_y)
+        text = swap_line(flip_line(text, self.flip_y), self.swap_xy)
         if self.process:
             self.process.stdin.write(text + "\n")
             self.process.stdin.flush()
@@ -1161,7 +1192,7 @@ class Link:
             return None
         if line is None:
             raise GantryError("the connection to the board closed")
-        line = flip_line(line, self.flip_y)
+        line = flip_line(swap_line(line, self.swap_xy), self.flip_y)
         try:
             self._watch_status(line)
         except Exception:
@@ -1391,6 +1422,12 @@ class Gantry:
                 if line.startswith("$100") or "unknown" not in str(exc):
                     raise
                 self.log.info("the firmware has no %s (before 0.7): it keeps its own travel", line.split("=")[0])
+        servo = board_layout.servo_line(config)
+        if servo:
+            try:
+                self.command(servo)
+            except GantryError as exc:   # the arm is up, or firmware before 0.7.2: keep going, say so
+                self.log.warning("the board refused %s (%s): the arm keeps its current angles", servo, exc)
 
     def set_step_pulse(self, config: dict) -> None:
         """Firmware 0.5+: the STEP pulse length ($0) from config["step_pulse_us"], when set. The firmware boots with
@@ -1454,7 +1491,7 @@ def load_config(path: Path) -> dict:
 
 def uses_gcode(config: dict) -> bool:
     """Plain G-code planned here; also whenever home is beside a8, since the firmware's CARRY counts from a1."""
-    return str(config.get("protocol", "duen")).lower() == "grbl" or y_flip_mm(config) is not None
+    return str(config.get("protocol", "duen")).lower() == "grbl" or y_flip_mm(config) is not None or swap_xy_flag(config)
 
 
 def simple_move_job(uci: str, piece: str = "?", occupied=None) -> dict:
@@ -1498,6 +1535,7 @@ def run_job(job: dict, config: dict, link: Link, log=logging.getLogger("gantry")
     """
     lines = plan_job(job, config)
     link.flip_y = y_flip_mm(config)
+    link.swap_xy = swap_xy_flag(config)
     gantry = Gantry(link, log)
     gantry.check_safe()
     gantry.set_motion(config)            # GRBL reads $100 / $130 / $131 the same way
@@ -1706,6 +1744,7 @@ def main(argv=None) -> int:
 
         link = Link(port, int(config.get("baud", 115200)), log, keep_running=bool(config.get("keep_esp32_running", False)))
         link.flip_y = y_flip_mm(config)
+        link.swap_xy = swap_xy_flag(config)
         try:
             if jobs is not None:
                 state = run_jobs(jobs, config, link, log)

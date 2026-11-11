@@ -116,6 +116,21 @@ def motion_lines(config: dict) -> list[str]:
     return [f"$100={steps_per_mm(config):.5f}", f"$130={tx:g}", f"$131={ty:g}"]
 
 
+def servo_line(config: dict) -> str | None:
+    """$S=up,down,settle from config "servo_deg" ({"up": deg, "down": deg}) and "servo_settle_ms" (default 3000),
+    sent on every connect so the arm's angles survive an ESP32 restart (the firmware forgets $S and goes back to
+    config.h's). None when the config has no servo_deg."""
+    deg = config.get("servo_deg")
+    if not deg:
+        return None
+    up, down = int(round(float(deg["up"]))), int(round(float(deg["down"])))
+    settle = int(round(float(config.get("servo_settle_ms", 3000))))
+    for v in (up, down):
+        if not -20 <= v <= 200:   # firmware 0.8.6+: real degrees, 0-180 = 500-2500 us, 90 = centre: same scale past both ends (0 = 1100 us, 180 = 1900 us)
+            raise ValueError(f"servo_deg angles are -20..200, not {v}")
+    return f"$S={up},{down},{max(0, min(settle, 3000))}"
+
+
 def lanes(config: dict) -> dict[str, float]:
     """The x of each configured docking lane's first column, machine mm: {"w": 0.0, "b": 470.0}."""
     park = machine(config).get("park_columns_mm") or {}

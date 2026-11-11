@@ -94,6 +94,11 @@ struct BoardPeripherals : gantry::Peripherals {
     (void)angle;
 #endif
   }
+  void servo_release() override {
+#if PIN_SERVO >= 0
+    arm.release();
+#endif
+  }
 };
 
 struct SerialWriter : gantry::Writer {
@@ -174,8 +179,8 @@ void setup() {
   peripherals.magnet(false);
 #if PIN_SERVO >= 0
   servo_begin();
-  arm.start(90, micros());                  // like the bench sketch: start at the middle (1500 us),
-  arm.go(SERVO_RETRACT_DEG, micros());      // then sweep slowly down
+  arm.begin_free();   // 0.8.1: no pulses until the first M7/M8; until 0.8.0 it drove to SERVO_RETRACT_DEG here,
+                      // which jammed an arm whose travel does not reach that angle on every restart
 #endif
   set_microstep_pins();
   if (PIN_X_MIN >= 0) pinMode(PIN_X_MIN, INPUT_PULLUP);
@@ -184,6 +189,7 @@ void setup() {
   // 2. The numbers the protocol enforces.
   protocol.set_carry(CARRY_SPEED_MM_S, GRAB_MS, RELEASE_MS);
   protocol.set_servo(PIN_SERVO >= 0, SERVO_EXTEND_DEG, SERVO_RETRACT_DEG, SERVO_SETTLE_MS);
+  protocol.set_servo_free(true);
   protocol.set_guards(MAGNET_MAX_ON_MS, MAGNET_MIN_OFF_MS, HOST_TIMEOUT_MS);
 
   // 3. Settle, then listen. Anything the Pi sent while the ESP32 was resetting is dropped.

@@ -26,6 +26,19 @@ rsync -az --delete "${KEEP[@]+"${KEEP[@]}"}" \
   --exclude 'deploy_pi.sh' --exclude 'pi_terminal.sh' --exclude 'console/camera_cal/' \
   "$HERE/" "$PI:chess-gantry/gantry/"
 
+# A kept Pi config still gets the Mac's motion keys (axis swap, drag lag, mm per turn); the Pi's copy is backed up first.
+if [ ${#KEEP[@]} -gt 0 ]; then
+  echo "== merging the Mac's motion keys into the Pi's kept gantry_config.json"
+  ssh "$PI" "cp ~/chess-gantry/gantry/pi/gantry_config.json ~/chess-gantry-backups/gantry_config-before-merge-$STAMP.json && python3 -c '
+import json, os, sys
+p = os.path.expanduser(\"~/chess-gantry/gantry/pi/gantry_config.json\")
+mac = json.load(sys.stdin); pi = json.load(open(p))
+for k in (\"swap_xy\", \"_swap_xy_comment\", \"drag_lag_mm\", \"_drag_lag_comment\", \"mm_per_turn\", \"_mm_per_turn_comment\", \"servo_deg\", \"servo_settle_ms\", \"_servo_deg_comment\"):
+    if k in mac: pi[k] = mac[k]
+json.dump(pi, open(p, \"w\"), indent=2); print(\"merged\")
+'" < "$HERE/pi/gantry_config.json"
+fi
+
 echo "== building the pretend board on the Pi (for 'connect sim'), and checking the Python side"
 ssh "$PI" 'cd ~/chess-gantry/gantry && (command -v g++ >/dev/null && make -s -C firmware/host virtual_gantry && echo "pretend board built" || echo "no g++: connect sim will not work, the real board will")
 PY=~/chess-board-pi-only/.venv/bin/python

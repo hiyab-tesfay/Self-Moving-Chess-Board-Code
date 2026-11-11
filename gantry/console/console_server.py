@@ -332,6 +332,7 @@ class Console:
                                                   else " (an ESP32 restarts when its port opens, about 2 s)"))
             link = gd.Link(port, int(self.config.get("baud", 115200)), log=logging.getLogger("link"), keep_running=keep)
             link.flip_y = gd.y_flip_mm(self.config)   # home beside a8: the link mirrors Y (gantry_driver.flip_line)
+            link.swap_xy = gd.swap_xy_flag(self.config)
             self.link, self.port = link, port
             self.memory = link.memory
             for line in link.boot_lines:
@@ -522,6 +523,13 @@ class Console:
             self.board_settings[key] = float(value)
             if key == "$100":
                 self.position_lost = True
+        servo = bl.servo_line(self.config)
+        if servo:
+            try:
+                self.exchange(servo)
+                self.say("info", f"Arm angles from the config: {servo} (up, down, settle ms)")
+            except Refused as exc:
+                self.say("warn", f"The board refused {servo} ({exc}): the arm keeps its current angles")
                 self.say("warn", f"Steps per mm set to {float(value):.4f} ({bl.mm_per_turn(self.config)[0]:g} mm per motor turn): "
                                  "the board forgot where it is. A remembered position is put back next when it can be; "
                                  "otherwise push the carriage into the home corner and Set home here.")

@@ -4,6 +4,8 @@ This branch contains the code to run the camera-based chess game on a Raspberry 
 
 The program does not control motors or identify piece types from images. Moves with identical occupancy patterns, including promotions and some captures, require a manual choice. The camera and calibration still need to be tested with your actual board and lighting.
 
+**Gantry (the magnet that moves the pieces):** the code is in `gantry/`. To run the gantry dashboard yourself (connect, home, jog, arm, chess moves, Tune), see **Quick start: the gantry dashboard** in [gantry/README.md](gantry/README.md): `bash gantry/console/console.sh` with the ESP32 on USB, or `bash gantry/console/console.sh sim` without one.
+
 ## Install on the Pi
 
 Use 64-bit Raspberry Pi OS, Python 3.10 or newer, and a Pi camera or USB webcam. Install Stockfish and, for a Pi camera, the camera tools:

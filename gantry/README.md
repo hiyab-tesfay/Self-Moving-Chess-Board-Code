@@ -21,6 +21,39 @@ Nothing here has run on the real frame yet. Everything has run on a pretend boar
 (`firmware/host/`), which uses the real motion and protocol code with the pins replaced by
 counters, driven by the real Pi code.
 
+## Quick start: the gantry dashboard
+
+The dashboard (`console/console_server.py` + `console/console.html`) is a web page that drives the
+gantry: connect, home, jog, arm up / down, magnet, chess moves, free carries, Tune the squares,
+and the camera check. Run it on any computer with the ESP32 on USB, or on the Pi.
+
+**On your own computer (Mac or Linux), ESP32 plugged in by USB:**
+
+```bash
+git clone -b pi-gantry-touchscreen https://github.com/hiyab-tesfay/Self-Moving-Chess-Board-Code.git
+cd Self-Moving-Chess-Board-Code
+bash gantry/console/console.sh        # first run makes gantry/console/.venv (python-chess, pyserial)
+```
+
+It opens http://127.0.0.1:8788: pick the ESP32's port (`/dev/cu.usbserial-…` on a Mac,
+`/dev/ttyUSB0` on Linux), press **Connect**, then home (Motors off → push the carriage into the
+home corner beside a8 → **Set home here**). No board? `bash gantry/console/console.sh sim` runs
+the same page against a pretend board (needs `g++` / `make` for the first build).
+
+**On the Pi (the ESP32 plugged into the Pi):** the page listens on the Pi's 127.0.0.1 only, so
+reach it through an SSH tunnel from your computer:
+
+```bash
+ssh smart@chessboard.local 'cd ~/chess-gantry/gantry/console && setsid nohup ~/chess-board-pi-only/.venv/bin/python console_server.py --http 8788 > ~/.local/state/console_server.log 2>&1 < /dev/null &'
+ssh -N -L 8788:127.0.0.1:8788 smart@chessboard.local    # leave running, then open http://localhost:8788
+```
+
+Only one program can have the ESP32 open: close the dashboard before the touch screen starts a
+game with the gantry (and the other way round). The settings that matter for a new board are in
+`pi/gantry_config.json` (squares, `mm_per_turn`, `swap_xy`, `drag_lag_mm`, `servo_deg`); the
+firmware is flashed from the dashboard's **⚡ Flash** button (see Flashing).
+Before the first carry, find your arm's angles with `pi/arm_cal.py` (see Servo).
+
 ## The numbers
 
 Motor: 1.8° NEMA 17, 200 full steps per turn, 13 N·cm (18.4 oz·in) short body, about 1 A per
@@ -180,8 +213,20 @@ Servo library on AVR). Since 0.7.2 (`servo_arm.h`) the pulse **sweeps** to a new
 360°/s (90° in 0.25 s) instead of jumping, so the servo never starts at full current, and the
 arm is held at both ends (a limp arm could be pulled up toward the pieces).
 
-- `SERVO_EXTEND_DEG` / `SERVO_RETRACT_DEG` (defaults 90 / 0) are placeholders **to set on the
-  real arm**: with the board homed, send `$S=up,down` (0.7.2; `$S=up,down,settle` sets the settle
+- **Angles are real degrees since 0.8.5**: 0–180 = 500–2500 µs, 90 = 1500 µs = the centre; 0.8.6
+  allows −20…200 (278–2722 µs) for a servo that turns past its rating. (Until 0.8.4 a "degree" was
+  4.44 µs, about 0.4 of a real one.) The board **boots limp** (0.8.1+, no pulses until an `M7`/`M8`
+  or a carry lifts the arm), stays limp through alarms, homing and `M5` (0.8.2), and `M9` lets go.
+- **Calibrating the arm**: with the ESP32 on the Pi and nothing else holding the port, run
+  `~/chess-board-pi-only/.venv/bin/python ~/chess-gantry/gantry/pi/arm_cal.py [start] [--zero RAW]`:
+  arrows step 1° / 5°, `h` holds, `f` lets go, `u` / `b` mark up and down, `t` tests, `s` saves
+  `servo_deg` into `pi/gantry_config.json` (the Pi sends it as `$S=up,down,settle` on every
+  connect). `--zero RAW` counts from that board angle. If the arm's range sits off the end of the
+  servo's 180°, move the horn on the spline (hold the servo at the middle of the range you need,
+  refit the horn with the arm there): no pulse can turn the shaft past its internal stop.
+  This build: `servo_deg` up 122, down 37.
+- `SERVO_EXTEND_DEG` / `SERVO_RETRACT_DEG` (defaults 95 / 85 since 0.8.5, 5° either side of centre)
+  are placeholders until `$S` arrives; **to set them by hand on the real arm**: with the board homed, send `$S=up,down` (0.7.2; `$S=up,down,settle` sets the settle
   ms too) from the console's command box, then `M7` and `M8`, and adjust until extended stops
   1–2 mm under the board top and retracted clears the pull on the thickest piece, **neither
   pressing against anything**: a servo held against a stop stalls at most of an amp. `$S` is
