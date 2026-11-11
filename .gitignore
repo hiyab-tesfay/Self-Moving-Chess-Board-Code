@@ -2,3 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
+photos/
+output/
+calibration/
+markers/

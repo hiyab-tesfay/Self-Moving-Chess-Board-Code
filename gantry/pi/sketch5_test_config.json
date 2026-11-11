@@ -1,0 +1,78 @@
+{
+  "_comment": "The board as Sketch 5 of the Fusion 'Chess Board Design' draws it (the photo of 2026-11-05, measured 2026-11-06). Sketch 5 is the 470 x 420 mm rectangle that the magnet's CENTRE can travel; its bottom-left corner is home (both carriages pushed into the bottom-left corner) and 0,0 here. Inside it: an 8 x 8 board of 52.5 mm squares filling the full 420 mm height, centred across with 25 mm each side, so a1's centre is at (51.25, 26.25) and h8's at (418.75, 393.75); a docking column of 17 circles (24.7 mm apart) on each of the rectangle's side edges, x 0 and x 470. Files run along +X, ranks along +Y.",
+  "port": "/dev/ttyUSB0",
+  "baud": 115200,
+  "mm_per_turn": [
+    41.0,
+    41.0
+  ],
+  "_mm_per_turn_comment": "Carriage travel for one motor turn, X and Y, measured on 2026-11-06 (one-turn buttons in the console). The firmware counts real mm with $100 = full_steps_per_turn x microsteps / mm_per_turn[0]; the Pi and the console send it on every connection. microsteps 1: the DRV8825 M0-M2 pins are not wired (full steps).",
+  "full_steps_per_turn": 200,
+  "microsteps": 1,
+  "magnet_home_mm": [
+    0.0,
+    0.0
+  ],
+  "_magnet_home_comment": "Where the magnet's centre sits on the sketch at home. 0,0: Sketch 5 already traces the magnet itself, so the magnet's 60 mm offset from the Y gantry's left edge is built into the sketch (it is why the frame is wider than the sketch). If the board check shows every square off by the same amount, change this (or use 'a1 is here' in the console).",
+  "square_mm": 52.5,
+  "a1_center_mm": [
+    51.25,
+    26.25
+  ],
+  "park_columns_mm": {
+    "w": [
+      0.0
+    ],
+    "b": [
+      470.0
+    ]
+  },
+  "park_rows_mm": [
+    12.35,
+    61.76,
+    111.18,
+    160.59,
+    210.0,
+    259.41,
+    308.82,
+    358.24,
+    407.65
+  ],
+  "_park_comment": "The sketch has 17 circles a side, 24.7 mm apart, from y 12.35 to 407.65; the widest piece is 27 mm, so every other circle is a slot (9 a side, 49.4 mm apart).",
+  "travel_mm": [
+    470.0,
+    420.0
+  ],
+  "_travel_comment": "Sketch 5's far corner: the magnet travels 470 x 420 mm from home ($130, $131).",
+  "docking_lanes": [
+    "w",
+    "b"
+  ],
+  "_docking_comment": "Captured white pieces go to the left column (w, x 0), black ones to the right (b, x 470); when one is full the other takes them.",
+  "piece_mm": 27.0,
+  "piece_sizes_mm": {
+    "p": 23.0,
+    "n": 25.0,
+    "b": 25.0,
+    "r": 25.0,
+    "q": 27.0,
+    "k": 27.0
+  },
+  "clearance_mm": 3.0,
+  "lane_clearance_mm": 1.0,
+  "travel_speed_mm_s": 60.0,
+  "carry_speed_mm_s": 40.0,
+  "accel_mm_s2": 400.0,
+  "grab_settle_s": 0.3,
+  "release_settle_s": 0.2,
+  "servo": true,
+  "servo_settle_s": 3.0,
+  "protocol": "duen",
+  "path_smoothing": true,
+  "_step_pulse_comment": "step_pulse_us, when set, is sent as $0 before each job (firmware 0.5+). Unset: the firmware's boot value, 1500 us (what moves the bench's motors; 333 steps/s, 68 mm/s at full steps with 41 mm per turn).",
+  "max_carries_per_job": 40,
+  "home_on_start": false,
+  "home_beside": "a8",
+  "_home_beside_comment": "Which square the home corner is next to on the real board (2026-11-07: a8). With a8 the Pi mirrors Y on the USB link, so everything else still counts a1 at y 26.25; see gantry_driver.y_flip_mm.",
+  "_fixture_comment": "Frozen copy of gantry_config.json as Sketch 5 drew the board (52.5 mm squares, docking lanes at x 0 and 470), 2026-11-07. The older tests check the planner, firmware lines and console against this fixed layout; the real board (53 mm squares, edge routes) is in gantry_config.json and has its own tests."
+}

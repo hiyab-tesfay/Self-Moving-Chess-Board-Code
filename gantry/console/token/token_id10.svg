@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="90.0mm" height="100.0mm" viewBox="0 0 90.0 100.0">
+<rect width="90.0" height="100.0" fill="white"/>
+<circle cx="22.5" cy="22.5" r="15.0" fill="white" stroke="#999" stroke-width="0.2" stroke-dasharray="1 1"/>
+<rect x="12.5000" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="15.8333" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="25.8333" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="15.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="15.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="15.8333" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="15.8333" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="25.8333" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<text x="22.5" y="40.5" font-family="sans-serif" font-size="2.2" text-anchor="middle" fill="#666">ArUco 4x4 id 10 - 20 mm</text>
+<circle cx="67.5" cy="22.5" r="15.0" fill="white" stroke="#999" stroke-width="0.2" stroke-dasharray="1 1"/>
+<rect x="57.5000" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="60.8333" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="70.8333" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="12.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="15.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="15.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="19.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="22.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="60.8333" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="25.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="60.8333" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="70.8333" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="29.1667" width="3.3433" height="3.3433" fill="black"/>
+<text x="67.5" y="40.5" font-family="sans-serif" font-size="2.2" text-anchor="middle" fill="#666">ArUco 4x4 id 10 - 20 mm</text>
+<circle cx="22.5" cy="62.5" r="15.0" fill="white" stroke="#999" stroke-width="0.2" stroke-dasharray="1 1"/>
+<rect x="12.5000" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="15.8333" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="25.8333" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="55.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="55.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="15.8333" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="12.5000" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="15.8333" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="19.1667" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="22.5000" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="25.8333" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="29.1667" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<text x="22.5" y="80.5" font-family="sans-serif" font-size="2.2" text-anchor="middle" fill="#666">ArUco 4x4 id 10 - 20 mm</text>
+<circle cx="67.5" cy="62.5" r="15.0" fill="white" stroke="#999" stroke-width="0.2" stroke-dasharray="1 1"/>
+<rect x="57.5000" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="60.8333" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="70.8333" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="52.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="55.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="55.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="59.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="62.5000" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="60.8333" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="65.8333" width="3.3433" height="3.3433" fill="black"/>
+<rect x="57.5000" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="60.8333" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="64.1667" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="67.5000" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="70.8333" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<rect x="74.1667" y="69.1667" width="3.3433" height="3.3433" fill="black"/>
+<text x="67.5" y="80.5" font-family="sans-serif" font-size="2.2" text-anchor="middle" fill="#666">ArUco 4x4 id 10 - 20 mm</text>
+<rect x="20.0" y="88.0" width="50.0" height="1.5" fill="black"/>
+<rect x="19.85" y="86.5" width="0.3" height="3" fill="black"/>
+<rect x="29.85" y="86.5" width="0.3" height="3" fill="black"/>
+<rect x="39.85" y="86.5" width="0.3" height="3" fill="black"/>
+<rect x="49.85" y="86.5" width="0.3" height="3" fill="black"/>
+<rect x="59.85" y="86.5" width="0.3" height="3" fill="black"/>
+<rect x="69.85" y="86.5" width="0.3" height="3" fill="black"/>
+<text x="45.0" y="93.5" font-family="sans-serif" font-size="2.6" text-anchor="middle">this bar must measure 50 mm - print at 100% / actual size</text>
+</svg>

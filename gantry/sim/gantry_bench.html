@@ -1,0 +1,636 @@
+<!-- DUEN Gantry Bench: a test board in the gantry's millimetres. Open this file in a browser, or publish it
+     as a page; it is written as page content (no html/head/body wrapper) so it can be published as-is. -->
+<title>DUEN Gantry Bench</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: the board drawn to the gantry's millimetres on the left, the bench controls, status and the
+     serial log on the right; one column on a phone. */
+  :root {
+    --bg: #f6efe0;          /* cream */
+    --panel: #fdf8ec;
+    --fg: #2b1f4a;          /* DUEN purple */
+    --muted: #6d6383;
+    --line: #d9cdb4;
+    --accent: #c99a2e;      /* gold */
+    --accent-ink: #2b1f4a;
+    --light-sq: #efe3c6;
+    --dark-sq: #b89a63;
+    --lane: #e4d6b4;
+    --white-piece: #fffaf0;
+    --black-piece: #3a2a5e;
+    --path: #c99a2e;
+    --ok: #3f8f5a;
+    --warn: #c2602a;
+    --font-ui: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "IBM Plex Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1d1535; --panel: #261c45; --fg: #f3ecdc; --muted: #b7acd0; --line: #3f3366;
+      --accent: #e0b44a; --accent-ink: #1d1535; --light-sq: #cdb98f; --dark-sq: #7e6446; --lane: #342a56;
+      --white-piece: #fff6e0; --black-piece: #15102a; --path: #e0b44a; --ok: #6fc48b; --warn: #e5885a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1d1535; --panel: #261c45; --fg: #f3ecdc; --muted: #b7acd0; --line: #3f3366;
+    --accent: #e0b44a; --accent-ink: #1d1535; --light-sq: #cdb98f; --dark-sq: #7e6446; --lane: #342a56;
+    --white-piece: #fff6e0; --black-piece: #15102a; --path: #e0b44a; --ok: #6fc48b; --warn: #e5885a;
+    color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 15px; line-height: 1.45;
+         padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+         padding-block: 18px 32px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; margin-bottom: 14px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0; letter-spacing: 0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  .bench { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 860px) { .bench { grid-template-columns: 1fr; } }
+  .boardwrap { min-width: 0; }
+  svg { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+  .panel { min-width: 0; display: grid; gap: 14px; }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; min-width: 0; }
+  .box h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button { font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 5px; border: 1px solid var(--line); background: var(--panel);
+           color: var(--fg); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; }
+  input[type=range] { width: 120px; accent-color: var(--accent); }
+  .status { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-variant-numeric: tabular-nums; }
+  .status dt { color: var(--muted); } .status dd { margin: 0; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); }
+  .pill.on { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .pill.off { color: var(--muted); }
+  .pill.warn { background: var(--warn); color: #fff; border-color: var(--warn); }
+  .moves { font-family: var(--font-mono); font-size: 13px; line-height: 1.6; max-height: 120px; overflow: auto; }
+  .moves span { display: inline-block; margin-right: 10px; }
+  pre.log { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; margin: 0; max-height: 300px; overflow: auto;
+            white-space: pre-wrap; word-break: break-word; }
+  pre.log .cmd { color: var(--fg); font-weight: 500; }
+  pre.log .trace { color: var(--muted); }
+  pre.log .note { color: var(--warn); }
+  .promo { display: none; gap: 6px; } .promo.show { display: flex; }
+  .legend { color: var(--muted); font-size: 13px; }
+  .numbers { font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<header>
+  <h1>DUEN Gantry Bench</h1>
+  <p>Click a piece, then a square. The carriage plans the path the Pi would send and plays it out to the millimetre.</p>
+</header>
+
+<div class="bench">
+  <div class="boardwrap">
+    <svg id="board" viewBox="0 0 470 420" role="img" aria-label="The chess board and the two docking lanes, drawn in millimetres of gantry travel"></svg>
+    <p class="legend">Travel 470 × 420 mm, origin bottom-left. Squares 50 mm, a1 centre at (60, 35). Captured pieces are taken off by the person: the board waits, the camera checks on each Check, then the gantry moves. The docking lanes at x = 17.5 and 452.5 mm stay in the firmware for a later version. Dotted line: the planned path, through the lanes between squares. Widths: pawn 23, knight/bishop/rook 25, queen/king 27 mm.</p>
+  </div>
+
+  <div class="panel">
+    <div class="box">
+      <h2>Play</h2>
+      <div class="row">
+        <button id="btn-random" class="primary">Random move</button>
+        <button id="btn-auto">Auto-play</button>
+        <button id="btn-undo">Undo</button>
+        <button id="btn-reset">New game · reset board</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>Speed <input id="speed" type="range" min="1" max="20" value="4"> <span id="speed-label" class="numbers">4×</span></label>
+        <label><input id="instant" type="checkbox"> Skip animation</label>
+      </div>
+      <div class="row promo" id="promo">
+        <span>Promote to</span>
+        <button data-p="q">Queen</button><button data-p="r">Rook</button><button data-p="b">Bishop</button><button data-p="n">Knight</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <h2>Scenarios</h2>
+      <div class="row">
+        <button data-scn="knight">Knight through the lanes</button>
+        <button data-scn="capture">Capture → person removes</button>
+        <button data-scn="castle">Castling</button>
+        <button data-scn="enpassant">En passant</button>
+        <button data-scn="promote">Promotion</button>
+        <button data-scn="longgame">Long game (30 random moves)</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <h2>Status</h2>
+      <dl class="status">
+        <dt>Game</dt><dd id="st-game">White to move</dd>
+        <dt>Gantry</dt><dd><span id="st-gantry" class="pill off">Idle</span> <span id="st-magnet" class="pill off">Magnet off</span> <span id="st-servo" class="pill off">Servo down</span></dd>
+        <dt>Carriage</dt><dd id="st-pos" class="numbers">X 0.0 Y 0.0 mm · 0 / 0 steps</dd>
+        <dt>Docked</dt><dd id="st-docked" class="numbers">White lane 0 · Black lane 0</dd>
+        <dt>Last job</dt><dd id="st-job" class="numbers">—</dd>
+      </dl>
+      <div class="moves" id="moves"></div>
+    </div>
+
+    <div class="box">
+      <h2>What the Pi sends the ESP32</h2>
+      <pre class="log" id="log"></pre>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script>
+(function () {
+  'use strict';
+  // ---------------------------------------------------------------- the board in millimetres (gantry_config.json)
+  const SQ = 50, A1 = [60, 35], LANE_X = { w: 17.5, b: 452.5 }, ROW0 = 17.5, PITCH = 35, SLOTS = 12;
+  const TRAVEL = [470, 420], STEPS_PER_MM = 40;
+  const V_TRAVEL = 120, V_CARRY = 60, ACCEL = 800;              // mm/s, mm/s²
+  const GRAB_MS = 300, RELEASE_MS = 200, SERVO_MS = 300;
+  const WIDTH = { p: 23, n: 25, b: 25, r: 25, q: 27, k: 27 };
+  const AIR_LANE = 1.0, AIR_OPEN = 3.0;                        // mm of air beside the carried piece
+  const FILES = 'abcdefgh';
+  const GLYPH = { P: '♙', N: '♘', B: '♗', R: '♖', Q: '♕', K: '♔',
+                  p: '♟', n: '♞', b: '♝', r: '♜', q: '♛', k: '♚' };
+  const NAME = { p: 'pawn', n: 'knight', b: 'bishop', r: 'rook', q: 'queen', k: 'king' };
+
+  function isSlot(place) { return place.indexOf(':') > 0; }
+  function mm(place) {
+    if (isSlot(place)) {
+      const lane = place[0], index = parseInt(place.slice(2), 10);
+      const column = Math.floor(index / SLOTS);                        // a 13th piece goes to a second lane further out
+      const x = lane === 'w' ? LANE_X.w - column * PITCH : LANE_X.b + column * PITCH;
+      return [x, ROW0 + PITCH * (index % SLOTS)];
+    }
+    return [A1[0] + SQ * FILES.indexOf(place[0]), A1[1] + SQ * (parseInt(place[1], 10) - 1)];
+  }
+  function sqmm(x, y) { return [A1[0] + SQ * x, A1[1] + SQ * y]; }    // square units (a1 = 0,0; lanes at .5) to mm
+  function fmt(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+  function reachable(p) { return p[0] >= 0 && p[0] <= TRAVEL[0] && p[1] >= 0 && p[1] <= TRAVEL[1]; }
+
+  // ---------------------------------------------------------------- where every physical piece is (carry_plan.Layout)
+  function layoutFromGame(game) {
+    const pieces = {};
+    const rows = game.board();
+    for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+      const p = rows[r][c];
+      if (p) pieces[FILES[c] + (8 - r)] = p.color === 'w' ? p.type.toUpperCase() : p.type;
+    }
+    return pieces;
+  }
+  function freeSlot(pieces, symbol) {
+    const lane = symbol === symbol.toUpperCase() ? 'w' : 'b';
+    for (let i = 0; i < SLOTS * 2; i++) if (!pieces[lane + ':' + i]) return lane + ':' + i;
+    throw new Error('no free docking slot');
+  }
+  function docked(pieces, symbol) {
+    const slots = Object.keys(pieces).filter(n => isSlot(n) && pieces[n] === symbol);
+    slots.sort((a, b) => a[0] === b[0] ? parseInt(a.slice(2), 10) - parseInt(b.slice(2), 10) : a[0] < b[0] ? -1 : 1);
+    return slots[0] || null;
+  }
+  function carry(pieces, from, to) {
+    const piece = pieces[from]; delete pieces[from]; pieces[to] = piece;
+    return { op: 'carry', piece, from, to };
+  }
+  function dock(pieces, square) { return carry(pieces, square, freeSlot(pieces, pieces[square])); }
+
+  // A person takes a captured piece off the board; the gantry waits until the camera has seen the square empty.
+  function remove(pieces, square) {
+    const piece = pieces[square]; delete pieces[square];
+    return { op: 'remove', piece, square };
+  }
+  // The carries for a move the gantry plays. `move` is chess.js's verbose move (flags: c capture, e en passant,
+  // k/q castling, p promotion). Updates `pieces`. Captured pieces are never docked: the person removes them.
+  function planMove(pieces, move) {
+    const steps = [];
+    const rank = move.from[1];
+    if (move.flags.includes('e')) steps.push(remove(pieces, move.to[0] + rank));
+    else if (move.flags.includes('c')) steps.push(remove(pieces, move.to));
+    if (move.flags.includes('k') || move.flags.includes('q')) {
+      const king = move.flags.includes('k');
+      steps.push(carry(pieces, move.from, move.to));
+      steps.push(carry(pieces, (king ? 'h' : 'a') + rank, (king ? 'f' : 'd') + rank));
+    } else if (move.promotion) {
+      steps.push(carry(pieces, move.from, move.to));
+      pieces[move.to] = move.color === 'w' ? move.promotion.toUpperCase() : move.promotion;
+      steps.push({ op: 'note', message: 'The pawn on ' + move.to + ' now counts as a ' + NAME[move.promotion] + '; swap it by hand if you have a spare piece.' });
+    } else steps.push(carry(pieces, move.from, move.to));
+    return steps;
+  }
+  // The reset: strays go home by gantry where their home square is free; anything else, and every piece the
+  // person took during the game, is put back by hand.
+  function planReset(pieces) {
+    const home = layoutFromGame(new Chess());
+    const steps = [];
+    for (const sq of Object.keys(pieces).sort()) {
+      if (home[sq] === pieces[sq]) continue;
+      const target = Object.keys(home).find(h => home[h] === pieces[sq] && !pieces[h]);
+      if (target) steps.push(carry(pieces, sq, target)); else steps.push(remove(pieces, sq));
+    }
+    for (const sq of Object.keys(home).sort()) {
+      if (!pieces[sq]) { steps.push({ op: 'place', piece: home[sq], square: sq }); pieces[sq] = home[sq]; }
+    }
+    return steps;
+  }
+
+  // ---------------------------------------------------------------- path finding with piece widths (board_paths.py)
+  // Nodes: a half-step grid over the board (whole = square centres, .5 = lanes between squares, one lane beyond
+  // each edge) plus the docking slots. An edge is open when the carried piece's edge keeps 1 mm of air from
+  // every other piece along a lane and 3 mm elsewhere. A* by millimetres.
+  function distSeg(p, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = dx * dx + dy * dy;
+    const t = len ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len)) : 0;
+    return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+  }
+  function buildGraph() {
+    const nodes = [], index = {};
+    function add(key, pos, lane) { index[key] = nodes.length; nodes.push({ key, pos, lane, adj: [] }); }
+    for (let i = -1; i <= 15; i++) for (let j = -1; j <= 15; j++) add('g' + i + ',' + j, sqmm(i / 2, j / 2), i % 2 !== 0 || j % 2 !== 0);
+    for (const lane of ['w', 'b']) for (let s = 0; s < SLOTS; s++) add(lane + ':' + s, mm(lane + ':' + s), true);
+    function link(a, b) { const ia = index[a], ib = index[b]; if (ia === undefined || ib === undefined) return; nodes[ia].adj.push(ib); nodes[ib].adj.push(ia); }
+    for (let i = -1; i <= 15; i++) for (let j = -1; j <= 15; j++) {
+      link('g' + i + ',' + j, 'g' + (i + 1) + ',' + j); link('g' + i + ',' + j, 'g' + i + ',' + (j + 1));
+      const whole = i % 2 === 0 && j % 2 === 0, cross = i % 2 !== 0 && j % 2 !== 0;
+      if (whole || cross) { link('g' + i + ',' + j, 'g' + (i + 1) + ',' + (j + 1)); link('g' + i + ',' + j, 'g' + (i + 1) + ',' + (j - 1)); }
+    }
+    for (const lane of ['w', 'b']) {
+      const edgeI = lane === 'w' ? -1 : 15;
+      for (let s = 0; s < SLOTS; s++) {
+        if (s) link(lane + ':' + s, lane + ':' + (s - 1));
+        const y = mm(lane + ':' + s)[1];
+        for (let j = -1; j <= 15; j++) if (Math.abs(sqmm(0, j / 2)[1] - y) <= PITCH * 0.75) link(lane + ':' + s, 'g' + edgeI + ',' + j);
+      }
+    }
+    return { nodes, index };
+  }
+  const GRAPH = buildGraph();
+  function nodeOf(place) {
+    if (isSlot(place)) return GRAPH.index[place];
+    return GRAPH.index['g' + (2 * FILES.indexOf(place[0])) + ',' + (2 * (parseInt(place[1], 10) - 1))];
+  }
+  function findPath(pieces, from, to) {
+    const carried = WIDTH[pieces[from].toLowerCase()];
+    const others = Object.keys(pieces).filter(n => n !== from).map(n => ({ pos: mm(n), w: WIDTH[pieces[n].toLowerCase()] }));
+    const start = nodeOf(from), goal = nodeOf(to), N = GRAPH.nodes;
+    if (start === undefined || goal === undefined) return null;
+    const goalPos = N[goal].pos;
+    const g = new Map([[start, 0]]), came = new Map(), open = [[Math.hypot(...goalPos.map((v, k) => v - N[start].pos[k])), start]], closed = new Set();
+    function edgeOpen(a, b) {
+      if (!reachable(N[b].pos)) return false;
+      const air = (N[a].lane || N[b].lane) ? AIR_LANE : AIR_OPEN;
+      for (const o of others) if (distSeg(o.pos, N[a].pos, N[b].pos) < (carried + o.w) / 2 + air) return false;
+      return true;
+    }
+    while (open.length) {
+      open.sort((x, y) => x[0] - y[0]);
+      const [, cur] = open.shift();
+      if (cur === goal) {
+        const path = [N[cur].pos]; let k = cur;
+        while (came.has(k)) { k = came.get(k); path.push(N[k].pos); }
+        return simplify(path.reverse());
+      }
+      if (closed.has(cur)) continue; closed.add(cur);
+      for (const nb of N[cur].adj) {
+        if (closed.has(nb) || !edgeOpen(cur, nb)) continue;
+        const cost = g.get(cur) + Math.hypot(N[nb].pos[0] - N[cur].pos[0], N[nb].pos[1] - N[cur].pos[1]);
+        if (cost < (g.get(nb) ?? Infinity)) { g.set(nb, cost); came.set(nb, cur); open.push([cost + Math.hypot(goalPos[0] - N[nb].pos[0], goalPos[1] - N[nb].pos[1]), nb]); }
+      }
+    }
+    return null;
+  }
+  function simplify(path) {
+    const out = [path[0]];
+    for (let i = 1; i < path.length - 1; i++) {
+      const a = out[out.length - 1], b = path[i], c = path[i + 1];
+      if (Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) > 1e-6) out.push(b);
+    }
+    out.push(path[path.length - 1]);
+    return out;
+  }
+
+  // ---------------------------------------------------------------- a job: carries with their paths and the serial lines
+  function moveTime(d, v) { return d > v * v / ACCEL ? d / v + v / ACCEL : 2 * Math.sqrt(d / ACCEL); }
+  function pieceName(symbol) { return (symbol === symbol.toUpperCase() ? 'white ' : 'black ') + NAME[symbol.toLowerCase()]; }
+  function buildJob(label, steps, piecesBefore) {
+    const pieces = Object.assign({}, piecesBefore);
+    const carries = [], lines = [], notes = [];
+    for (const step of steps) {
+      if (step.op === 'note') { notes.push(step.message); lines.push({ kind: 'note', text: '# ' + step.message }); continue; }
+      if (step.op === 'remove') {
+        // The Pi sends nothing for this: it asks the person, and checks with the camera on every Check, until the square is empty.
+        lines.push({ kind: 'note', text: '# wait: take the ' + pieceName(step.piece) + ' off ' + step.square + ', then Check (camera must see it empty)' });
+        carries.push({ op: 'remove', piece: step.piece, square: step.square });
+        delete pieces[step.square];
+        continue;
+      }
+      if (step.op === 'place') {
+        lines.push({ kind: 'note', text: '# by hand: put a ' + pieceName(step.piece) + ' on ' + step.square });
+        carries.push({ op: 'place', piece: step.piece, square: step.square });
+        pieces[step.square] = step.piece;
+        continue;
+      }
+      const path = findPath(pieces, step.from, step.to);
+      const straight = [mm(step.from), mm(step.to)];
+      const usable = path || straight;
+      if (!path) notes.push('No clear path for ' + step.from + '→' + step.to + ' at these widths: the Pi would move a blocker aside first. Shown straight.');
+      // The firmware reads every token after CARRY as a place: a square, a slot, or "x,y" in SQUARE units
+      // (a1 = 0,0; x.5 = the lane between squares). The ESP32 turns those into millimetres itself.
+      const via = usable.slice(1, -1);
+      const sq = p => (((p[0] - A1[0]) / SQ).toFixed(1).replace(/\.0$/, '') + ',' + ((p[1] - A1[1]) / SQ).toFixed(1).replace(/\.0$/, ''));
+      lines.push({ kind: 'cmd', text: 'CARRY ' + step.from + ' ' + (via.length ? via.map(sq).join(' ') + ' ' : '') + step.to });
+      carries.push({ op: 'carry', piece: step.piece, from: step.from, to: step.to, path: usable, planned: !!path });
+      delete pieces[step.from]; pieces[step.to] = step.piece;
+    }
+    return { label, carries, lines, notes, after: pieces };
+  }
+
+  // ---------------------------------------------------------------- the bench state
+  const el = id => document.getElementById(id);
+  const svg = el('board');
+  let game, pieces, carriage = { pos: [0, 0], magnet: false, servo: false, steps: [0, 0], busy: false }, selected = null, pendingPromotion = null;
+  let autoPlay = false, lastJobText = '—', history = [];     // history: [{move, pieces before}]
+  const speed = () => parseInt(el('speed').value, 10);
+
+  if (typeof Chess === 'undefined') {
+    el('log').textContent = 'chess.js did not load, so moves cannot be checked. Reload the page.';
+  }
+  function newGame() { game = new Chess(); pieces = layoutFromGame(game); history = []; selected = null; }
+
+  // ---- drawing
+  const NS = 'http://www.w3.org/2000/svg';
+  function node(tag, attrs, text) { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); if (text != null) n.textContent = text; return n; }
+  const Y = y => TRAVEL[1] - y;
+  function drawStatic() {
+    svg.innerHTML = '';
+    const back = node('g', { id: 'static' });
+    back.appendChild(node('rect', { x: 0, y: 0, width: TRAVEL[0], height: TRAVEL[1], fill: 'var(--panel)' }));
+    for (let x = 0; x < 8; x++) for (let y = 0; y < 8; y++) {
+      const [cx, cy] = sqmm(x, y);
+      back.appendChild(node('rect', { x: cx - SQ / 2, y: Y(cy) - SQ / 2, width: SQ, height: SQ, fill: (x + y) % 2 ? 'var(--light-sq)' : 'var(--dark-sq)', 'data-sq': FILES[x] + (y + 1), class: 'sq' }));
+    }
+    for (let x = 0; x < 8; x++) back.appendChild(node('text', { x: sqmm(x, 0)[0], y: Y(A1[1] - SQ / 2) + 9, 'text-anchor': 'middle', 'font-size': 8, fill: 'var(--muted)', 'font-family': 'var(--font-mono)' }, FILES[x]));
+    for (let y = 0; y < 8; y++) back.appendChild(node('text', { x: A1[0] - SQ / 2 - 4, y: Y(sqmm(0, y)[1]) + 3, 'text-anchor': 'end', 'font-size': 8, fill: 'var(--muted)', 'font-family': 'var(--font-mono)' }, String(y + 1)));
+    for (const lane of ['w', 'b']) for (let s = 0; s < SLOTS; s++) {
+      const [x, y] = mm(lane + ':' + s);
+      back.appendChild(node('circle', { cx: x, cy: Y(y), r: 14, fill: 'var(--lane)', stroke: 'var(--line)', 'stroke-width': 0.6 }));
+      back.appendChild(node('text', { x, y: Y(y) + 2.5, 'text-anchor': 'middle', 'font-size': 6, fill: 'var(--muted)', 'font-family': 'var(--font-mono)' }, lane + ':' + s));
+    }
+    svg.appendChild(back);
+    svg.appendChild(node('g', { id: 'hl' }));
+    svg.appendChild(node('g', { id: 'path' }));
+    svg.appendChild(node('g', { id: 'pieces' }));
+    svg.appendChild(node('g', { id: 'carriage' }));
+    svg.addEventListener('click', onBoardClick);
+  }
+  function drawPieces(moving) {
+    const g = el('pieces'); g.innerHTML = '';
+    for (const name of Object.keys(pieces)) {
+      if (moving && moving.name === name) continue;
+      drawPiece(g, pieces[name], mm(name), name);
+    }
+    if (moving) drawPiece(g, moving.piece, moving.pos, moving.name, true);
+  }
+  function drawPiece(g, symbol, pos, name, lifted) {
+    const white = symbol === symbol.toUpperCase(), r = WIDTH[symbol.toLowerCase()] / 2;
+    const grp = node('g', { 'data-piece': name, style: 'cursor:pointer' });
+    grp.appendChild(node('circle', { cx: pos[0], cy: Y(pos[1]), r, fill: white ? 'var(--white-piece)' : 'var(--black-piece)', stroke: lifted ? 'var(--accent)' : (white ? '#8a7a55' : '#000'), 'stroke-width': lifted ? 1.6 : 0.8 }));
+    grp.appendChild(node('text', { x: pos[0], y: Y(pos[1]) + 6.5, 'text-anchor': 'middle', 'font-size': 18, fill: white ? '#2b1f4a' : '#f3ecdc' }, GLYPH[symbol]));
+    g.appendChild(grp);
+  }
+  function drawHighlights() {
+    const g = el('hl'); g.innerHTML = '';
+    if (!selected) return;
+    const [sx, sy] = mm(selected);
+    g.appendChild(node('rect', { x: sx - SQ / 2, y: Y(sy) - SQ / 2, width: SQ, height: SQ, fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.5 }));
+    for (const m of game.moves({ square: selected, verbose: true })) {
+      const [tx, ty] = mm(m.to);
+      g.appendChild(node('circle', { cx: tx, cy: Y(ty), r: 6, fill: 'var(--accent)', opacity: 0.75, 'data-target': m.to, style: 'cursor:pointer' }));
+    }
+  }
+  function drawPath(path) {
+    const g = el('path'); g.innerHTML = '';
+    if (!path) return;
+    g.appendChild(node('polyline', { points: path.map(p => p[0] + ',' + Y(p[1])).join(' '), fill: 'none', stroke: 'var(--path)', 'stroke-width': 1.8, 'stroke-dasharray': '4 3', 'stroke-linejoin': 'round' }));
+    for (const p of path.slice(1, -1)) g.appendChild(node('circle', { cx: p[0], cy: Y(p[1]), r: 2.2, fill: 'var(--path)' }));
+  }
+  function drawCarriage() {
+    const g = el('carriage'); g.innerHTML = '';
+    const [x, y] = carriage.pos;
+    g.appendChild(node('line', { x1: x, y1: 0, x2: x, y2: TRAVEL[1], stroke: 'var(--muted)', 'stroke-width': 0.4, opacity: 0.5 }));
+    g.appendChild(node('line', { x1: 0, y1: Y(y), x2: TRAVEL[0], y2: Y(y), stroke: 'var(--muted)', 'stroke-width': 0.4, opacity: 0.5 }));
+    g.appendChild(node('circle', { cx: x, cy: Y(y), r: carriage.servo ? 17 : 12, fill: 'none', stroke: carriage.magnet ? 'var(--warn)' : 'var(--fg)', 'stroke-width': carriage.servo ? 2.2 : 1.2 }));
+    g.appendChild(node('circle', { cx: x, cy: Y(y), r: 1.8, fill: carriage.magnet ? 'var(--warn)' : 'var(--fg)' }));
+    el('st-pos').textContent = 'X ' + fmt(x) + ' Y ' + fmt(y) + ' mm · ' + carriage.steps[0] + ' / ' + carriage.steps[1] + ' steps';
+    setPill('st-gantry', carriage.busy ? 'Moving' : 'Idle', carriage.busy ? 'on' : 'off');
+    setPill('st-magnet', carriage.magnet ? 'Magnet on' : 'Magnet off', carriage.magnet ? 'warn' : 'off');
+    setPill('st-servo', carriage.servo ? 'Servo up' : 'Servo down', carriage.servo ? 'on' : 'off');
+  }
+  function setPill(id, text, cls) { const p = el(id); p.textContent = text; p.className = 'pill ' + cls; }
+  function drawStatus() {
+    let text;
+    if (game.in_checkmate()) text = (game.turn() === 'w' ? 'Black' : 'White') + ' wins by checkmate';
+    else if (game.in_stalemate()) text = 'Draw by stalemate';
+    else if (game.in_threefold_repetition()) text = 'Draw by repetition';
+    else if (game.insufficient_material()) text = 'Draw, insufficient material';
+    else if (game.in_draw()) text = 'Draw';
+    else text = (game.turn() === 'w' ? 'White' : 'Black') + ' to move' + (game.in_check() ? ' · check' : '');
+    el('st-game').textContent = text;
+    const w = Object.keys(pieces).filter(n => n.startsWith('w:')).length, b = Object.keys(pieces).filter(n => n.startsWith('b:')).length;
+    el('st-docked').textContent = 'White lane ' + w + ' · Black lane ' + b;
+    el('st-job').textContent = lastJobText;
+    const hist = game.history();
+    el('moves').innerHTML = hist.map((san, i) => (i % 2 ? '' : '<b>' + (i / 2 + 1) + '.</b> ') + '<span>' + san + '</span>').join('');
+    el('moves').scrollTop = 1e6;
+    el('btn-undo').disabled = carriage.busy || !history.length;
+    el('btn-random').disabled = carriage.busy || game.game_over();
+    el('btn-reset').disabled = carriage.busy;
+  }
+  function log(lines) {
+    const pre = el('log');
+    for (const l of lines) { const s = document.createElement('span'); s.className = l.kind; s.textContent = l.text + '\n'; pre.appendChild(s); }
+    while (pre.childNodes.length > 400) pre.removeChild(pre.firstChild);
+    pre.scrollTop = pre.scrollHeight;
+  }
+
+  // ---- animation of one job, step by step, the way the firmware runs a CARRY
+  function wait(ms) { return new Promise(r => setTimeout(r, el('instant').checked ? 0 : ms / speed())); }
+  function travelTo(target, v, moving) {
+    return new Promise(resolve => {
+      const start = carriage.pos.slice(), d = Math.hypot(target[0] - start[0], target[1] - start[1]);
+      const total = moveTime(d, v) * 1000 / speed();
+      const dsteps = [Math.round(Math.abs(target[0] - start[0]) * STEPS_PER_MM), Math.round(Math.abs(target[1] - start[1]) * STEPS_PER_MM)];
+      if (el('instant').checked || total < 1) { carriage.pos = target.slice(); if (moving) moving.pos = target.slice(); carriage.steps = dsteps; drawPieces(moving); drawCarriage(); return resolve(); }
+      const t0 = performance.now();
+      (function frame(now) {
+        const u = Math.min(1, (now - t0) / total), s = u < 0.5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u);   // a trapezoid, roughly
+        carriage.pos = [start[0] + (target[0] - start[0]) * s, start[1] + (target[1] - start[1]) * s];
+        carriage.steps = dsteps.map(n => Math.round(n * s));
+        if (moving) moving.pos = carriage.pos.slice();
+        drawPieces(moving); drawCarriage();
+        if (u < 1) requestAnimationFrame(frame); else resolve();
+      })(t0);
+    });
+  }
+  async function runJob(job) {
+    carriage.busy = true; drawStatus(); drawCarriage();
+    log([{ kind: 'trace', text: '# job ' + job.label }].concat(job.lines));
+    let seconds = 0;
+    let moved = 0;
+    for (const c of job.carries) {
+      if (c.op === 'remove') {
+        // The board waits here: the person takes the piece off and taps Check; the camera confirms before anything moves.
+        setPill('st-gantry', 'Waiting: remove ' + c.square, 'warn');
+        await wait(1500);
+        delete pieces[c.square]; drawPieces(null);
+        log([{ kind: 'trace', text: '# camera: ' + c.square + ' is empty, carrying on' }]);
+        seconds += 1.5;
+        continue;
+      }
+      if (c.op === 'place') { pieces[c.square] = c.piece; drawPieces(null); await wait(600); continue; }
+      moved += 1;
+      drawPath(c.path);
+      const from = c.path[0], traces = [];
+      seconds += moveTime(Math.hypot(from[0] - carriage.pos[0], from[1] - carriage.pos[1]), V_TRAVEL);
+      await travelTo(from, V_TRAVEL, null);
+      carriage.servo = true; drawCarriage(); traces.push('# SERVO up X=' + fmt(from[0]) + ' Y=' + fmt(from[1])); await wait(SERVO_MS); seconds += SERVO_MS / 1000;
+      carriage.magnet = true; drawCarriage(); traces.push('# MAG on X=' + fmt(from[0]) + ' Y=' + fmt(from[1])); await wait(GRAB_MS); seconds += GRAB_MS / 1000;
+      const moving = { name: c.from, piece: c.piece, pos: from.slice() };
+      delete pieces[c.from];
+      for (let i = 1; i < c.path.length; i++) {
+        seconds += moveTime(Math.hypot(c.path[i][0] - c.path[i - 1][0], c.path[i][1] - c.path[i - 1][1]), V_CARRY);
+        await travelTo(c.path[i], V_CARRY, moving);
+        traces.push('# MOVE steps=' + carriage.steps[0] + ',' + carriage.steps[1] + ' to X=' + fmt(c.path[i][0]) + ' Y=' + fmt(c.path[i][1]));
+      }
+      pieces[c.to] = c.piece;
+      carriage.magnet = false; drawCarriage(); traces.push('# MAG off X=' + fmt(c.path.at(-1)[0]) + ' Y=' + fmt(c.path.at(-1)[1])); await wait(RELEASE_MS); seconds += RELEASE_MS / 1000;
+      carriage.servo = false; drawCarriage(); traces.push('# SERVO down'); await wait(SERVO_MS); seconds += SERVO_MS / 1000;
+      drawPieces(null);
+      log(traces.map(t => ({ kind: 'trace', text: t })));
+      if (!c.planned) log([{ kind: 'note', text: '# no clear path at these widths; straight line shown' }]);
+    }
+    for (const n of job.notes) log([{ kind: 'note', text: '# ' + n }]);
+    log([{ kind: 'trace', text: 'ok  (about ' + seconds.toFixed(1) + ' s on the real gantry, ' + moved + ' carr' + (moved === 1 ? 'y' : 'ies') + ')' }]);
+    lastJobText = job.label + ' · ' + moved + ' carr' + (moved === 1 ? 'y' : 'ies') + ' · ~' + seconds.toFixed(1) + ' s';
+    drawPath(null);
+    carriage.busy = false; drawStatus(); drawCarriage();
+  }
+
+  // ---- playing moves
+  async function playMove(from, to, promotion) {
+    if (carriage.busy) return false;
+    const move = game.move({ from, to, promotion });
+    if (!move) return false;
+    const before = Object.assign({}, pieces);
+    const steps = planMove(Object.assign({}, pieces), move);
+    const job = buildJob(move.san, steps, pieces);
+    history.push({ before });
+    selected = null; drawHighlights();
+    await runJob(job);
+    pieces = job.after;        // what the layout says now matches what was animated
+    drawPieces(null); drawStatus();
+    return true;
+  }
+  async function randomMove() {
+    const moves = game.moves({ verbose: true });
+    if (!moves.length) return false;
+    const m = moves[Math.floor(Math.random() * moves.length)];
+    return playMove(m.from, m.to, m.promotion);
+  }
+  async function undo() {
+    if (carriage.busy || !history.length) return;
+    const entry = history.pop();
+    const target = entry.before;
+    const steps = [];
+    const work = Object.assign({}, pieces);
+    // Carry back what moved; a piece the person took has to be put back by hand.
+    Object.keys(work).sort().forEach(n => { if (target[n] !== work[n]) { const home = Object.keys(target).find(sq => target[sq] === work[n] && !work[sq]); if (home) steps.push(carry(work, n, home)); else steps.push(remove(work, n)); } });
+    Object.keys(target).sort().forEach(n => { if (!work[n]) { steps.push({ op: 'place', piece: target[n], square: n }); work[n] = target[n]; } });
+    game.undo();
+    await runJob(buildJob('undo', steps, pieces));
+    pieces = layoutFromGame(game);
+    drawPieces(null); drawStatus();
+  }
+  async function resetBoard() {
+    if (carriage.busy) return;
+    autoPlay = false; el('btn-auto').textContent = 'Auto-play';
+    const steps = planReset(Object.assign({}, pieces));
+    const job = buildJob('reset', steps, pieces);
+    game = new Chess(); history = []; selected = null; drawHighlights();
+    if (job.carries.length) await runJob(job); else log([{ kind: 'trace', text: '# reset: every piece is already home, nothing to carry' }]);
+    pieces = layoutFromGame(game);
+    drawPieces(null); drawStatus();
+  }
+
+  function onBoardClick(ev) {
+    if (carriage.busy || typeof Chess === 'undefined') return;
+    const target = ev.target.closest('[data-target]'), piece = ev.target.closest('[data-piece]'), sq = ev.target.closest('[data-sq]');
+    const dest = target ? target.getAttribute('data-target') : piece ? piece.getAttribute('data-piece') : sq ? sq.getAttribute('data-sq') : null;
+    if (!dest || isSlot(dest)) return;
+    if (selected) {
+      const legal = game.moves({ square: selected, verbose: true }).find(m => m.to === dest);
+      if (legal) {
+        if (legal.promotion) { pendingPromotion = { from: selected, to: dest }; el('promo').classList.add('show'); return; }
+        playMove(selected, dest); return;
+      }
+    }
+    const p = game.get(dest);
+    selected = p && p.color === game.turn() ? dest : null;
+    drawHighlights();
+  }
+  el('promo').addEventListener('click', ev => {
+    const b = ev.target.closest('button'); if (!b || !pendingPromotion) return;
+    el('promo').classList.remove('show');
+    const { from, to } = pendingPromotion; pendingPromotion = null;
+    playMove(from, to, b.getAttribute('data-p'));
+  });
+  el('btn-random').addEventListener('click', () => randomMove());
+  el('btn-undo').addEventListener('click', () => undo());
+  el('btn-reset').addEventListener('click', () => resetBoard());
+  el('btn-auto').addEventListener('click', async () => {
+    autoPlay = !autoPlay; el('btn-auto').textContent = autoPlay ? 'Stop auto-play' : 'Auto-play';
+    while (autoPlay && !game.game_over()) { if (!(await randomMove())) break; await wait(400); }
+    if (game.game_over()) { autoPlay = false; el('btn-auto').textContent = 'Auto-play'; log([{ kind: 'note', text: '# game over: ' + el('st-game').textContent + '. On the real board the pieces now go home.' }]); }
+  });
+  el('speed').addEventListener('input', () => { el('speed-label').textContent = speed() + '×'; });
+
+  // ---- scenarios: set the position up without the gantry (instantly), then play the move of interest with it
+  const SCENARIOS = {
+    knight: { setup: [], play: ['g1', 'f3'] },
+    capture: { setup: ['e2e4', 'd7d5'], play: ['e4', 'd5'] },
+    castle: { setup: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5'], play: ['e1', 'g1'] },
+    enpassant: { setup: ['e2e4', 'a7a6', 'e4e5', 'd7d5'], play: ['e5', 'd6'] },
+    promote: { fen: '4k3/P7/8/8/8/8/8/4K3 w - - 0 1', play: ['a7', 'a8', 'q'] },
+  };
+  async function runScenario(name) {
+    if (carriage.busy) return;
+    if (name === 'longgame') {
+      await resetBoard();
+      el('instant').checked = true;
+      for (let i = 0; i < 30 && !game.game_over(); i++) await randomMove();
+      el('instant').checked = false;
+      return;
+    }
+    const s = SCENARIOS[name];
+    game = new Chess(); history = [];
+    if (s.fen) game.load(s.fen);
+    for (const uci of s.setup || []) game.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
+    pieces = layoutFromGame(game);
+    Object.assign(pieces, s.dockedExtra || {});
+    drawPieces(null); drawStatus();
+    log([{ kind: 'trace', text: '# scenario ' + name + ': position set up by hand' }]);
+    await playMove(s.play[0], s.play[1], s.play[2]);
+  }
+  document.querySelectorAll('[data-scn]').forEach(b => b.addEventListener('click', () => runScenario(b.getAttribute('data-scn'))));
+
+  // ---- go
+  if (typeof Chess !== 'undefined') {
+    newGame();
+    drawStatic(); drawPieces(null); drawCarriage(); drawStatus();
+    carriage.pos = [0, 0]; drawCarriage();
+    log([{ kind: 'trace', text: '$B=50,60,35,17.5,452.5,17.5,35   (the board geometry the Pi sends at connect)' }, { kind: 'trace', text: '$H                                (home: carriage to the bottom-left corner)' }, { kind: 'trace', text: 'ok' }]);
+  }
+})();
+</script>
