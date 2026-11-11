@@ -964,14 +964,19 @@ class Console:
                 if src not in after.pieces:
                     raise gd.GantryError(f"the console has no piece on {src} (the board layout and the game disagree; "
                                          "use Free mode or New game)")
-                taken = cp.removal(self.game, move)
-                slot = self.best_slot(after, taken[0]) if taken else None
-                steps = after.plan_computer(self.game, move, slot)
+                manual_black = self.config.get("manual_black_moves", False) and self.game.turn == chess.BLACK
+                if manual_black:
+                    after.apply_human(self.game, move)
+                    steps = []
+                else:
+                    taken = cp.removal(self.game, move)
+                    slot = self.best_slot(after, taken[0]) if taken else None
+                    steps = after.plan_computer(self.game, move, slot)
                 game_after = self.game.copy()
                 san = self.game.san(move)
                 game_after.push(move)
                 label = move.uci()
-                extra = {"san": san, "uci": move.uci()}
+                extra = {"san": san, "uci": move.uci(), "manual_only": bool(manual_black)}
             try:
                 preview = self.make_preview("free" if mode == "free" else "move", label, steps, before, after, game_after, extra)
             except gd.GantryError as exc:
@@ -1018,6 +1023,13 @@ class Console:
                 raise gd.GantryError("nothing to undo")
             last = self.history[-1]
             before, after = self.layout.copy(), self.layout.copy()
+            if last.get("manual_only", False):
+                after = last["layout_before"].copy()
+                preview = self.make_preview("undo", f"undo {last['label']}", [], before, after, last["game_before"],
+                                            {"san": f"undo {last['san']}", "manual_only": True})
+                preview["job_steps"] = []
+                self.preview = preview
+                return preview
             steps: list[dict] = []
             for step in reversed(last["job_steps"]):
                 if step["op"] == "carry":
@@ -1056,7 +1068,7 @@ class Console:
             if preview["layout_at"] != self.layout.pieces:
                 self.preview = None
                 raise gd.GantryError("the board changed since this plan; make the move again")
-            if by_hand:
+            if by_hand or preview.get("manual_only", False):
                 self._commit(preview)
                 self.say("info", f"{preview['san']}: played without the gantry (you moved the pieces)")
                 return
@@ -1116,7 +1128,8 @@ class Console:
         self.layout = preview["after"].copy()
         if kind == "move" or kind == "free":
             self.history.append({"label": preview["label"], "san": preview["san"], "job_steps": preview["job_steps"],
-                                 "game_before": self.game.copy()})
+                                 "game_before": self.game.copy(), "layout_before": preview["before"].copy(),
+                                 "manual_only": preview.get("manual_only", False)})
             self.game = preview["game_after"]
         elif kind == "undo":
             self.history.pop()
@@ -2100,7 +2113,10 @@ class Handler(BaseHTTPRequestHandler):
     def _auto(self, preview: dict, allowed: bool = True) -> dict:
         c = self.console
         ran = False
-        if allowed and c.settings["auto_run"] and c.link is not None:
+        if preview.get("manual_only", False):
+            c.run_preview(by_hand=True)
+            ran = True
+        elif allowed and c.settings["auto_run"] and c.link is not None:
             c.run_preview()
             ran = True
         return {"ran": ran, "san": preview["san"], "carries": preview["carries"], "seconds": preview["seconds"]}

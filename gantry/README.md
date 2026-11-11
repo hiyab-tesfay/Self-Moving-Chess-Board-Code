@@ -62,6 +62,10 @@ arm down. `home_beside: "a1"` leaves the motor's Y direction unmirrored, so a2 �
 the dashboard never restores a saved home automatically. After a direction change, position the magnet
 beneath a2 and set home again before moving. Check a short Y+ jog with the arm down before a full carry.
 
+In dashboard Chess mode, move Black's pieces by hand, then select the same move on the page to record it.
+`manual_black_moves: true` keeps the gantry still for Black, including captures, castling and promotions.
+White's moves still use the gantry. Free mode remains available for direct carries of either colour.
+
 ## The numbers
 
 Motor: 1.8° NEMA 17, 200 full steps per turn, 13 N·cm (18.4 oz·in) short body, about 1 A per

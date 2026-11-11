@@ -63,6 +63,8 @@
   "max_carries_per_job": 40,
   "home_on_start": false,
   "manual_home_on_connect": true,
+  "manual_black_moves": true,
+  "_manual_black_moves_comment": "In dashboard Chess mode, Black is moved by hand. Selecting Black's move records it immediately without gantry motion; White remains controlled by the gantry. Free mode is unchanged.",
   "_manual_home_on_connect_comment": "Connecting the dashboard requires the user to set home at a2 before motion; saved coordinates are not restored automatically.",
   "home_square": "a2",
   "_home_square_comment": "Manual home is the magnet centred beneath the a2 pawn. Set home here assigns a2's calibrated coordinates without moving the carriage. home_beside still sets the motor direction from the frame corner.",
