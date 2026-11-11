@@ -37,7 +37,7 @@ bash gantry/console/console.sh        # first run makes gantry/console/.venv (py
 
 It opens http://127.0.0.1:8788: pick the ESP32's port (`/dev/cu.usbserial-…` on a Mac,
 `/dev/ttyUSB0` on Linux), press **Connect**, then home (Motors off → push the carriage into the
-reference beneath the centre of the **a2 pawn** → **Set home here**). No board? `bash gantry/console/console.sh sim` runs
+reference beneath the centre of the **e2 pawn** → **Set home here**). No board? `bash gantry/console/console.sh sim` runs
 the same page against a pretend board (needs `g++` / `make` for the first build).
 
 **On the Pi (the ESP32 plugged into the Pi):** the page listens on the Pi's 127.0.0.1 only, so
@@ -54,13 +54,13 @@ game with the gantry (and the other way round). The settings that matter for a n
 firmware is flashed from the dashboard's **⚡ Flash** button (see Flashing).
 Before the first carry, find your arm's angles with `pi/arm_cal.py` (see Servo).
 
-The current setup uses `swap_xy: false` and `home_square: "a2"`. X runs along the files and Y along
-the ranks. For manual homing, place the magnet beneath the centre of a2 and press **Set home here**;
-the carriage stays there while its coordinates are assigned. **Return home** returns to a2 with the
+The current setup uses `swap_xy: false` and `home_square: "e2"`. X runs along the files and Y along
+the ranks. For manual homing, place the magnet beneath the centre of e2 and press **Set home here**;
+the carriage stays there while its coordinates are assigned. **Return home** returns to e2 with the
 arm down. `home_beside: "a1"` leaves the motor's Y direction unmirrored, so a2 → a4 moves toward rank 4.
 `manual_home_on_connect: true` requires you to press **Set home here** after each dashboard connection;
 the dashboard never restores a saved home automatically. After a direction change, position the magnet
-beneath a2 and set home again before moving. Check a short Y+ jog with the arm down before a full carry.
+beneath e2 and set home again before moving. Check a short Y+ jog with the arm down before a full carry.
 
 In dashboard Chess mode, move Black's pieces by hand, then select the same move on the page to record it.
 `manual_black_moves: true` keeps the gantry still for Black, including captures, castling and promotions.

@@ -15,7 +15,7 @@ class SwapLineTests(unittest.TestCase):
             os.environ.pop("GANTRY_HOME_BESIDE", None)
             os.environ.pop("GANTRY_SWAP_XY", None)
             board = gd.BoardMap(config)
-            self.assertEqual(gd.home_xy(config), board.square_mm("a2"))
+            self.assertEqual(gd.home_xy(config), board.square_mm(config["home_square"]))
             wire = []
             for square in ("a2", "a4"):
                 x, y = board.square_mm(square)
