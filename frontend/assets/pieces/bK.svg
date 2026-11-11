@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect x="44" y="69" width="12" height="15" rx="2" fill="#442074" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M24 63 A26 33 0 0 1 76 63 Z" fill="#442074" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M43 32 C40 42 40 52 40 62 M57 32 C60 42 60 52 60 62" fill="none" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+  <rect x="14" y="62" width="72" height="8" rx="4" fill="#442074" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+  <line x1="50" y1="8" x2="50" y2="24" fill="none" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+  <line x1="43" y1="16" x2="57" y2="16" fill="none" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+  <line x1="30" y1="84" x2="70" y2="84" fill="none" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+  <rect x="22" y="88" width="56" height="7" rx="3" fill="#442074" stroke="#f4c040" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

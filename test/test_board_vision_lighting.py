@@ -46,7 +46,7 @@ class LightingCorrectionTest(unittest.TestCase):
         starting_board = chess.Board()
         lit_starting = under_light(board_photo(starting_board), offset=30, slope=14, gain=1.08)
         calibration, reference, _ = calibrate(empty, lit_starting, CORNERS)
-        self.assertEqual(calibration.scoring, "local_lighting_v1")
+        self.assertEqual(calibration.scoring, "robust_occupancy_v2")
 
         starting_observation, _ = observe(reference, lit_starting, calibration, CORNERS)
         self.assertFalse(starting_observation.uncertain)

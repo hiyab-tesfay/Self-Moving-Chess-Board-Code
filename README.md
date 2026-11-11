@@ -1,8 +1,85 @@
-# Raspberry Pi chessboard camera game
+# Chessboard Lab — desktop, web, and automatic chessboard
 
-This branch contains the code to run the camera-based chess game on a Raspberry Pi. You play White against a local Stockfish engine. The camera detects which squares are occupied; `python-chess` tracks piece identities and checks move legality. After Stockfish announces Black's move, move that piece on the physical board and let the camera verify the result.
+Play against Stockfish at three difficulty levels in a desktop chessboard simulator. The application code and interface are written in Python with Tkinter. It uses the pure-Python `chess` package for legal moves and a local Stockfish executable for computer moves. Playing does not need an internet connection.
 
-The program does not control motors or identify piece types from images. Moves with identical occupancy patterns, including promotions and some captures, require a manual choice. The camera and calibration still need to be tested with your actual board and lighting.
+## Setup
+
+You need Python 3.10+ with Tkinter and a Stockfish executable. On macOS, install Stockfish with `brew install stockfish`. On Ubuntu or Raspberry Pi OS, use `sudo apt install stockfish`. If Stockfish is somewhere else, set `STOCKFISH_PATH` to its executable path.
+
+Create a virtual environment and install the Python chess rules library:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python simulator.py
+```
+
+On Windows, replace `.venv/bin/python` with `.venv\Scripts\python.exe`. Install the Stockfish executable for Windows and set `STOCKFISH_PATH` to its full path. Dependencies and Stockfish need to be installed once; the simulator then runs offline.
+
+Choose Beginner, Intermediate, or Advanced and select **Start game**. You play White. Click a white piece and then a highlighted square. Promotion opens a piece picker. Changing the selected level applies when you select **New game**.
+
+## Difficulty
+
+| Level | Stockfish `Skill Level` | Thinking time per move |
+| --- | ---: | ---: |
+| Beginner | 0 | 0.15 seconds |
+| Intermediate | 8 | 0.50 seconds |
+| Advanced | 20 | 1.40 seconds |
+
+These are relative settings, not Elo guarantees. The values are in `chess_game.py`. Stockfish uses the [UCI engine protocol](https://python-chess.readthedocs.io/en/stable/engine.html) through `python-chess`.
+
+## Verify
+
+```sh
+.venv/bin/python -m unittest discover -s test -p 'test_*.py'
+```
+
+The simulator covers the computer mode from the project breakdown. Motor control, sensors, and remote-player mode are separate integrations. Stockfish is a compiled engine, so the executable is the one non-Python component required to play against Stockfish.
+
+## Web frontend
+
+After installing the Python dependencies and Stockfish above, run:
+
+```sh
+.venv/bin/python frontend/server.py
+```
+
+Open http://127.0.0.1:8000 for the animated landing page, then choose
+**Play chess** (or open http://127.0.0.1:8000/play.html directly).
+To serve on a Raspberry Pi's local network, run
+`.venv/bin/python frontend/server.py --host 0.0.0.0` and open
+http://chessboard.local:8000 from a device on the same network.
+The web interface includes both piece styles and connects to the Python backend
+for Stockfish games. Keep this local development server on a trusted network.
+
+## Folder layout
+
+- `backend/`: shared Python chess rules and Stockfish integration.
+- `desktop/`: Tkinter desktop interface (`python -m desktop.simulator`).
+- `frontend/`: landing page, browser game, assets, and its Python HTTP/API server.
+  `index.html` opens the landing page; `play.html` opens the existing game.
+  `assets/vendor/` includes the locally served Three.js runtime and its license.
+- `frontend/test/`: JavaScript move-generation and chess rules checks.
+- `test/`: Python rules and Stockfish integration checks.
+- `CAD Files/`: existing mechanical-design files.
+
+The root `chess_game.py` and `simulator.py` remain as compatibility entry points
+so existing imports and the original launch command continue to work.
+Raspberry Pi camera, touchscreen, and gantry instructions follow below.
+
+Run the browser rules checks with Node.js:
+
+```sh
+node frontend/test/perft.js
+```
+
+---
+
+## Raspberry Pi camera and touchscreen
+
+The Pi applications run the camera-based chess game on a Raspberry Pi. You play White against a local Stockfish engine. The camera detects which squares are occupied; `python-chess` tracks piece identities and checks move legality. After Stockfish announces Black's move, move that piece on the physical board and let the camera verify the result.
+
+Camera-only play uses manual piece movement. The gantry dashboard controls the motors separately; the camera does not identify piece types from images. Moves with identical occupancy patterns, including promotions and some captures, require a manual choice. The camera and calibration still need to be tested with your actual board and lighting.
 
 **Gantry (the magnet that moves the pieces):** the code is in `gantry/`. To run the gantry dashboard yourself (connect, home, jog, arm, chess moves, Tune), see **Quick start: the gantry dashboard** in [gantry/README.md](gantry/README.md): `bash gantry/console/console.sh` with the ESP32 on USB, or `bash gantry/console/console.sh sim` without one.
 

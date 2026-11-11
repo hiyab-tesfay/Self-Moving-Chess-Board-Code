@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DUEN Chess</title>
+  <meta name="description" content="DUEN self-moving chess board: play Stockfish or a friend in the browser.">
+  <meta name="theme-color" content="#241440">
+  <link rel="icon" href="assets/pieces/wR.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="sidenav">
+  <a class="logo" href="./">
+    <img src="assets/pieces/wR.svg" alt="">
+    <span>DUEN<small>Chess</small></span>
+  </a>
+  <ul class="nav-items">
+    <li class="active"><a href="#"><img src="assets/pieces/wP.svg" alt=""><span>Play</span></a></li>
+    <li><a href="#"><img src="assets/pieces/wN.svg" alt=""><span>Puzzles</span></a></li>
+    <li><a href="#"><img src="assets/pieces/wB.svg" alt=""><span>Learn</span></a></li>
+    <li><a href="#"><img src="assets/pieces/wQ.svg" alt=""><span>Watch</span></a></li>
+    <li><a href="#"><img src="assets/pieces/wK.svg" alt=""><span>Social</span></a></li>
+  </ul>
+  <div class="nav-footer">
+    <button id="sound-toggle" class="nav-btn" type="button" title="Toggle sound">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+      <span>Sound</span>
+    </button>
+    <a class="nav-btn" href="https://github.com/hiyab-tesfay/Self-Moving-Chess-Board-Code" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span>Source</span>
+    </a>
+  </div>
+</nav>
+
+<main class="layout">
+  <section class="board-column">
+    <div class="piece-style-control">
+      <span id="piece-style-label">Chess pieces</span>
+      <div class="piece-style-options" role="group" aria-labelledby="piece-style-label">
+        <button type="button" data-piece-style="duen" aria-pressed="true">DUEN</button>
+        <button type="button" data-piece-style="regular" aria-pressed="false">Regular</button>
+      </div>
+    </div>
+    <div class="player-bar" id="player-top">
+      <div class="avatar"></div>
+      <div class="player-meta">
+        <div class="player-name"></div>
+        <div class="captured"></div>
+      </div>
+      <div class="clock">10:00</div>
+    </div>
+
+    <div class="board-frame">
+      <div class="frame-inner">
+        <div class="ranks" id="ranks"></div>
+        <div class="files" id="files"></div>
+        <div class="board-wrap">
+          <div id="board" class="board">
+            <div class="squares" id="squares"></div>
+            <div class="pieces" id="pieces"></div>
+            <div class="promo hidden" id="promo"></div>
+          </div>
+          <div class="toast hidden" id="toast"></div>
+        </div>
+      </div>
+      <div class="frame-bar">
+        <span class="gear" aria-hidden="true">&#x2699;&#xFE0E;</span>
+        <span class="brand">DUEN<small>UC Davis</small></span>
+        <span class="gear" aria-hidden="true">&#x2699;&#xFE0E;</span>
+      </div>
+    </div>
+
+    <div class="player-bar" id="player-bottom">
+      <div class="avatar"></div>
+      <div class="player-meta">
+        <div class="player-name"></div>
+        <div class="captured"></div>
+      </div>
+      <div class="clock">10:00</div>
+    </div>
+  </section>
+
+  <aside class="sidebar">
+    <!-- New game panel -->
+    <div class="panel" id="panel-new">
+      <div class="tabs">
+        <button class="tab active" type="button">New Game</button>
+        <button class="tab" type="button" disabled>Games</button>
+        <button class="tab" type="button" disabled>Players</button>
+      </div>
+
+      <div class="panel-body">
+        <div class="tc-picker">
+          <button class="tc-button" id="tc-button" type="button" aria-expanded="false">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+            <span id="tc-label">10 min</span>
+            <svg class="chev" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+          </button>
+          <div class="tc-menu hidden" id="tc-menu"></div>
+        </div>
+
+        <div class="level-row hidden" id="level-row">
+          <span class="label">Stockfish level</span>
+          <div class="level-pick" id="level-pick"></div>
+        </div>
+
+        <button class="btn-play" id="play-btn" type="button">Play</button>
+
+        <div class="backend-status" id="backend-status">Checking for the chess_game backend…</div>
+
+        <div class="color-row" id="color-row">
+          <span class="label">I play as</span>
+          <div class="color-pick" id="color-pick">
+            <button type="button" data-color="w" title="White"><img src="assets/pieces/wK.svg" alt="White"></button>
+            <button type="button" data-color="random" title="Random" class="on"><span class="q">?</span></button>
+            <button type="button" data-color="b" title="Black"><img src="assets/pieces/bK.svg" alt="Black"></button>
+          </div>
+        </div>
+
+        <ul class="mode-list">
+          <li>
+            <button type="button" id="play-friend">
+              <span class="mode-icon">🤝</span>
+              <span class="mode-text"><strong>Play a Friend</strong><small>Pass &amp; play on this device</small></span>
+            </button>
+          </li>
+          <li>
+            <button type="button" id="play-bot">
+              <span class="mode-icon">🤖</span>
+              <span class="mode-text"><strong id="play-bot-title">Play Stockfish</strong><small id="play-bot-sub">Through the chess_game backend</small></span>
+            </button>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- In-game panel -->
+    <div class="panel hidden" id="panel-game">
+      <div class="game-head">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+        <span id="game-title">10 min • Rapid</span>
+      </div>
+
+      <div class="moves" id="moves"></div>
+
+      <div class="confirm hidden" id="confirm">
+        <span id="confirm-text">Resign?</span>
+        <button type="button" id="confirm-yes" class="small-btn yes">Yes</button>
+        <button type="button" id="confirm-no" class="small-btn">No</button>
+      </div>
+
+      <div class="controls">
+        <div class="ctrl-group">
+          <button type="button" id="btn-draw" class="ctrl" title="Offer draw"><span class="half">½</span><span>Draw</span></button>
+          <button type="button" id="btn-resign" class="ctrl" title="Resign">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M14.4 6 14 4H5v17h2v-7h5.6l.4 2h7V6z"/></svg>
+            <span id="resign-label">Resign</span>
+          </button>
+          <button type="button" id="btn-takeback" class="ctrl" title="Take back">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+            <span>Takeback</span>
+          </button>
+        </div>
+        <div class="ctrl-group nav-group">
+          <button type="button" id="nav-first" class="ctrl icon" title="First move">⏮</button>
+          <button type="button" id="nav-prev" class="ctrl icon" title="Previous move">◀</button>
+          <button type="button" id="nav-next" class="ctrl icon" title="Next move">▶</button>
+          <button type="button" id="nav-last" class="ctrl icon" title="Last move">⏭</button>
+          <button type="button" id="btn-flip" class="ctrl icon" title="Flip board">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3 5 6.99h3V14h2V6.99h3L9 3z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="after-game hidden" id="after-game">
+        <button type="button" id="btn-rematch" class="btn-secondary">Rematch</button>
+        <button type="button" id="btn-newgame" class="btn-play small">New Game</button>
+      </div>
+      <div class="export-row">
+        <button type="button" id="btn-pgn" class="link-btn">Copy PGN</button>
+        <button type="button" id="btn-fen" class="link-btn">Copy FEN</button>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<!-- Game over modal -->
+<div class="modal hidden" id="modal">
+  <div class="modal-card">
+    <button type="button" class="modal-close" id="modal-close" aria-label="Close">×</button>
+    <div class="modal-header" id="modal-header">
+      <h2 id="modal-title">You Won!</h2>
+      <p id="modal-sub">by checkmate</p>
+    </div>
+    <div class="modal-players">
+      <div class="mp"><div class="avatar" id="modal-av-w"></div><span id="modal-name-w">White</span></div>
+      <div class="mp-score" id="modal-score">1 - 0</div>
+      <div class="mp"><div class="avatar" id="modal-av-b"></div><span id="modal-name-b">Black</span></div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="modal-rematch" class="btn-play">Rematch</button>
+      <button type="button" id="modal-new" class="btn-secondary">New Game</button>
+    </div>
+  </div>
+</div>
+
+<script src="chess.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

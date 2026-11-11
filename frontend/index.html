@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DUEN — Automatic Chess Board</title>
+<meta name="description" content="A physical game. A new way to move. Explore the DUEN automatic chess board.">
+<link rel="stylesheet" href="landing.css?v=quiet-stage-2">
+<script type="importmap">{"imports":{"three":"./assets/vendor/three.module.js","three/addons/":"./assets/vendor/addons/"}}</script>
+</head>
+<body>
+<header class="masthead"><a class="wordmark" href="./">DUEN<span>Automatic chess</span></a><nav><a href="https://github.com/kennynakao/chess-website" target="_blank" rel="noopener">View on GitHub <span aria-hidden="true">↗</span></a><a class="play-link" href="play.html">Play chess <span aria-hidden="true">↗</span></a></nav></header>
+<main>
+<section class="journey" aria-label="The pawn's journey">
+<div class="stage">
+<canvas id="scene" aria-label="A wooden pawn falls onto e2 and advances to e4 while the camera follows"></canvas>
+<div class="vignette"></div><div class="mist"></div>
+<div class="chapter intro"><p class="opening-note">The next move is yours.</p><h1>Automatic<br>Chess Board<span class="period">.</span></h1><p class="intro-copy">A familiar game. An entirely new kind of movement.<br>From the first thought to the first move, the board becomes part of the experience.</p></div>
+<div class="chapter descent"><p>Choose your move. Watch it become real.</p><h2>From your screen.<br>To the real world.</h2><p class="story-copy">Every square holds a possibility.<br>Every move brings the game to life.</p></div>
+<div class="chapter arrival"><h2>Let the board<br>make its move.</h2><p>The king’s pawn advances. Two squares. Endless possibilities.<br>Your opening move is only the beginning.</p><a class="light-button" href="play.html">Enter the game <span>↗</span></a></div>
+
+
+<p id="scene-fallback" hidden>The interactive scene is unavailable on this device. You can still explore and play.</p>
+</div>
+</section>
+<section class="details" id="details"><div class="details-top"><p>Designed at UC Davis</p><h2>Chess, with<br>a life of its own.</h2></div><div class="details-bottom"><p>A board built around the moment a piece moves. Explore the interface, play a game, or follow the engineering behind the project.</p><div class="links"><a href="play.html">Play a game <span>↗</span></a><a href="https://github.com/kennynakao/chess-website" target="_blank" rel="noopener">Explore the frontend <span>↗</span></a></div></div><footer><span>DUEN / Automatic Chess Board</span><span>Built to move.</span></footer></section>
+</main>
+<script type="module" src="landing.js?v=quiet-stage-2"></script>
+</body></html>
