@@ -4,7 +4,10 @@
 # (~/chess-board-pi-only/.venv: pyserial and python-chess are already in it).
 #   bash deploy_pi.sh                 deploy to smart@chessboard.local
 #   bash deploy_pi.sh user@host       somewhere else
+#   bash deploy_pi.sh --sim [host]    also build the pretend board on the Pi (only needed for 'connect sim')
 set -euo pipefail
+SIM=0
+if [ "${1:-}" = "--sim" ]; then SIM=1; shift; fi
 PI="${1:-smart@chessboard.local}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -39,9 +42,12 @@ json.dump(pi, open(p, \"w\"), indent=2); print(\"merged\")
 '" < "$HERE/pi/gantry_config.json"
 fi
 
-echo "== building the pretend board on the Pi (for 'connect sim'), and checking the Python side"
-ssh "$PI" 'cd ~/chess-gantry/gantry && (command -v g++ >/dev/null && make -s -C firmware/host virtual_gantry && echo "pretend board built" || echo "no g++: connect sim will not work, the real board will")
-PY=~/chess-board-pi-only/.venv/bin/python
-cd console && $PY -c "import serial, chess, console_server, gantry_term; print(\"python OK:\", serial.VERSION, chess.__version__)"
+if [ "$SIM" = 1 ]; then
+  echo "== building the pretend board on the Pi (for 'connect sim')"
+  ssh "$PI" 'cd ~/chess-gantry/gantry && (command -v g++ >/dev/null && make -s -C firmware/host virtual_gantry && echo "pretend board built" || echo "no g++: connect sim will not work, the real board will")'
+fi
+echo "== checking the Python side"
+ssh "$PI" 'PY=~/chess-board-pi-only/.venv/bin/python
+cd ~/chess-gantry/gantry/console && $PY -c "import serial, chess, console_server, gantry_term; print(\"python OK:\", serial.VERSION, chess.__version__)"
 ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || echo "no ESP32 on USB yet (plug it into the Pi)"'
 echo "== done. Open the terminal with: bash $HERE/pi_terminal.sh"
