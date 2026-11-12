@@ -197,7 +197,6 @@ class Console:
         self.tests: dict = {"distance": None, "ladder": None}
         self.log: deque = deque(maxlen=500)
         self.log_id = 0
-        self.home1_ready = False
         threading.Thread(target=self._poll, name="console-poll", daemon=True).start()
 
     # ------------------------------------------------------------------ log
@@ -1197,7 +1196,6 @@ class Console:
             hx, hy = self.home_xy()
             self.exchange(f"G92 X{hx:.3f} Y{hy:.3f}")  # Link.write mirrors Y beside a8
         self.position_lost = False
-        self.home1_ready = self.config.get("home_square") == "e2"
         self.query_status()
         corner = "beside a8" if self.link is not None and self.link.flip_y is not None else "the bottom-left corner, beside a1"
         square = self.config.get("home_square")
@@ -1205,25 +1203,6 @@ class Console:
         self.say("info", f"Home set: this spot is home ({where})")
         if self.start_mm() and not square:
             self.start("Go to start", self._go_start)
-
-    def set_home1(self) -> None:
-        """Start the two-point calibration at e2; assign coordinates without motion."""
-        if self.task:
-            raise Busy(f"busy: {self.task['name']}")
-        if self.config.get("home_square") != "e2":
-            raise gd.GantryError("Home 1 uses e2: set home_square to e2 first.")
-        self.require(homed=False)
-        self._save_tuning({"e2": [0.0, 0.0]}, "Home 1: starting a new e2/e7 calibration")
-        self.home_manual()
-        self.say("info", "Home 1 saved at e2. Jog to the centre of e7, then press Set Home 2.")
-
-    def set_home2(self) -> dict:
-        """Record the aligned e7 position; keep e2 as the home reference."""
-        if not self.home1_ready:
-            raise gd.GantryError("Set Home 1 at e2 first, then jog to e7 and press Set Home 2.")
-        fit = self.tune_mark("e7")
-        self.say("info", "Home 2 saved at e7. Both calibration points are saved; home stays at e2.")
-        return fit
 
     def home_bump(self) -> None:
         self.start("Bump homing", self._home_bump)
@@ -1986,8 +1965,6 @@ class Console:
                 "firmware_source": self.firmware_source_version(),
                 "board_settings": self.board_settings, "status": status, "position_lost": self.position_lost,
                 "position_memory": self.position_memory(),
-                "home_points": {"home1_ready": self.home1_ready,
-                                "home2_saved": self.home1_ready and "e7" in self._answers()},
                 "restarts": self.restarts,
                 "task": {"name": self.task["name"], "progress": self.task["progress"]} if self.task else None,
                 "waiting": self.waiting["prompt"] if self.waiting else None,
@@ -2100,8 +2077,6 @@ class Handler(BaseHTTPRequestHandler):
             "/api/a1-here": lambda b: {"report": c.a1_here(b.get("square") or "a1")},
             "/api/tune/goto": lambda b: c.tune_goto(str(b.get("square", ""))),
             "/api/tune/mark": lambda b: {"fit": c.tune_mark(b.get("square"))},
-            "/api/home1": lambda b: c.set_home1(),
-            "/api/home2": lambda b: {"fit": c.set_home2()},
             "/api/tune/forget": lambda b: {"fit": c.tune_forget(str(b.get("square", "")))},
             "/api/tune/clear": lambda b: c.tune_clear(),
             "/api/flash": lambda b: c.flash(str(b.get("port", ""))),
