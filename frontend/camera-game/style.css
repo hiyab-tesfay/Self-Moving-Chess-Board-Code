@@ -4,3 +4,4 @@
 .square { min-width: 0; min-height: 0; }
 .square small { text-shadow: none; }
 @media (max-width: 720px) { .board { max-width: none; } }
+input[type="range"] { width: 100%; min-height: 44px; accent-color: #d7ae61; }

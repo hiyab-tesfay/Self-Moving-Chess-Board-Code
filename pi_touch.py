@@ -1004,6 +1004,7 @@ class TouchApp:
         self.preview_photo: tk.PhotoImage | None = None
         self.preview_geometry: tuple[float, float, float] | None = None
         self.level = "beginner"
+        self.bot_rating = 1500
         self.busy = False
         self.selected_square: str | None = None
         self.message = "Welcome. Tap Play Chess to begin."
@@ -1190,6 +1191,7 @@ class TouchApp:
                                   "busy": self.busy, "message": self.message,
                                   "can_confirm": bool(available and phase in labels),
                                   "confirm_label": label, "choices": choices, "pieces": pieces,
+                                  "difficulty": self.difficulty_state(),
                                   "moves": list(session.game.san_moves) if session else []})
 
     def dispatch_companion(self) -> None:
@@ -1208,6 +1210,8 @@ class TouchApp:
                 if not stopped and revision == bridge.snapshot()["revision"] and not self.busy:
                     if kind == "confirm":
                         self.confirm_move()
+                    elif kind == "rating":
+                        self.set_bot_rating(uci)
                     elif kind == "choice" and self.session is not None:
                         chosen = next((move for move in self.session.choices if move.uci() == uci), None)
                         if chosen is not None:
@@ -1282,10 +1286,14 @@ class TouchApp:
             self.button("Cancel Game", self.end_game, short=True)
             return
         if session is None:
-            self.heading("Choose your challenge", "You play White. Choose a level, then start your game.")
-            for key, difficulty in DIFFICULTIES.items():
-                label = ("●  " if key == self.level else "○  ") + difficulty.label
-                self.button(label, lambda selected=key: self.choose_level(selected), short=True)
+            if getattr(self.args, "standalone", False):
+                self.heading("You play White", "Move White by hand. The gantry plays Black. "
+                             "Start the game, then set Black's target Elo before confirming the starting board.")
+            else:
+                self.heading("Choose your challenge", "You play White. Choose a level, then start your game.")
+                for key, difficulty in DIFFICULTIES.items():
+                    label = ("●  " if key == self.level else "○  ") + difficulty.label
+                    self.button(label, lambda selected=key: self.choose_level(selected), short=True)
             self.button("Start Game" if self.saved_calibration_available() else "Set Up Board  →",
                         self.start_game, accent=True)
             self.button("Recalibrate Board" if self.saved_calibration_available() else "Back to Welcome",
@@ -1297,6 +1305,7 @@ class TouchApp:
             self.button("Confirm starting board" if getattr(self.args, "standalone", False) else
                         "Scan Starting Board", self.confirm_move, accent=True)
             self.button("Cancel Game", self.end_game)
+            self.render_rating_slider()
         elif session.phase == "setup_confirm":
             squares = ", ".join(session.setup_uncertain)
             self.heading("Check unclear squares", f"Confirm {squares} match the displayed starting board.")
@@ -1386,6 +1395,49 @@ class TouchApp:
                          session.winner_text())
             self.button("New Game", self.back_to_menu, accent=True)
             self.button("Gantry", self.open_gantry_panel, short=True)
+
+        if session is not None and session.phase == "human":
+            self.render_rating_slider()
+
+    def difficulty_state(self) -> dict | None:
+        player = getattr(self, "player", None)
+        bounds = getattr(player, "rating_range", None)
+        if not getattr(self.args, "standalone", False) or bounds is None:
+            return None
+        rating = max(bounds[0], min(bounds[1], getattr(self, "bot_rating", 1500)))
+        session = self.session
+        enabled = (session is not None and session.phase in ("setup", "human") and
+                   not self.busy and not getattr(self, "halted", False) and
+                   self.gantry_screen is None and self.calibration_flow is None and
+                   not self.confirming_end and not self.confirming_new_game)
+        return {"rating": rating, "min": bounds[0], "max": bounds[1], "enabled": enabled}
+
+    def set_bot_rating(self, rating) -> None:
+        settings = self.difficulty_state()
+        if (settings is None or not settings["enabled"] or type(rating) is not int or
+                not settings["min"] <= rating <= settings["max"]):
+            return
+        self.bot_rating = rating
+        self.render()
+
+    def render_rating_slider(self) -> None:
+        settings = self.difficulty_state()
+        if settings is None:
+            return
+        label = tk.Label(self.panel, text=f"Black bot · target {settings['rating']} Elo",
+                         bg=self.PANEL, fg=self.TEXT)
+        label.pack(fill="x")
+        slider = tk.Scale(self.panel, from_=settings["min"], to=settings["max"],
+                          orient="horizontal", resolution=1, showvalue=False,
+                          bg=self.PANEL, fg=self.TEXT, highlightthickness=0,
+                          state="normal" if settings["enabled"] else "disabled")
+        slider.set(settings["rating"])
+        slider.configure(command=lambda value: label.configure(text=f"Black bot · target {int(float(value))} Elo"))
+        slider.bind("<ButtonRelease-1>", lambda _event: self.set_bot_rating(slider.get()))
+        slider.bind("<KeyRelease>", lambda _event: self.set_bot_rating(slider.get()))
+        slider.pack(fill="x")
+        tk.Label(self.panel, text="Approximate strength · applies to the next Black move",
+                 bg=self.PANEL, fg=self.TEXT, wraplength=self.panel_width - 48).pack(fill="x")
 
     def render_check_notice(self) -> bool:
         notice = check_notice(self.session.game.board) if self.session is not None else None
@@ -1870,7 +1922,11 @@ class TouchApp:
                         starting_reference = aligned
                 except VisionError:
                     pass
-            return calibration, reference, StockfishPlayer(), starting_reference
+            player = StockfishPlayer()
+            if getattr(self.args, "standalone", False) and player.rating_range is None:
+                player.close()
+                raise RuntimeError("Install a Stockfish build with UCI_Elo and UCI_LimitStrength for rated Black play.")
+            return calibration, reference, player, starting_reference
 
         gantry = self.gantry   # still open from the last game, or None
 
@@ -2457,10 +2513,15 @@ class TouchApp:
             return
         assert self.player is not None
         board = self.session.game.board.copy(stack=True)
+        if board.turn != chess.BLACK:
+            return
         level = self.session.game.level
         player = self.player
         self.busy = True
-        self.submit("engine", lambda: player.choose_move(board, level))
+        difficulty = self.difficulty_state()
+        rating = difficulty["rating"] if difficulty is not None else None
+        self.submit("engine", lambda: player.choose_rated_move(board, rating) if rating is not None
+                    else player.choose_move(board, level))
         self.render()
 
     def select_move(self, move: chess.Move) -> None:

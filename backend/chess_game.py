@@ -60,12 +60,37 @@ class StockfishPlayer:
 
     def choose_move(self, board: chess.Board, level: str) -> chess.Move:
         settings = DIFFICULTIES[level]
-        self.engine.configure({"Skill Level": settings.skill})
+        options = {"Skill Level": settings.skill}
+        if "UCI_LimitStrength" in self.engine.options:
+            options["UCI_LimitStrength"] = False
+        self.engine.configure(options)
         result = self.engine.play(
             board,
             chess.engine.Limit(time=settings.think_seconds),
             info=chess.engine.INFO_NONE,
         )
+        if result.move is None or result.move not in board.legal_moves:
+            raise RuntimeError("Stockfish returned no legal move.")
+        return result.move
+
+    @property
+    def rating_range(self) -> tuple[int, int] | None:
+        option = self.engine.options.get("UCI_Elo")
+        if ("UCI_LimitStrength" not in self.engine.options or option is None or
+                option.min is None or option.max is None):
+            return None
+        return option.min, option.max
+
+    def choose_rated_move(self, board: chess.Board, rating: int) -> chess.Move:
+        bounds = self.rating_range
+        if bounds is None:
+            raise RuntimeError("This Stockfish build does not support an Elo target.")
+        if type(rating) is not int or not bounds[0] <= rating <= bounds[1]:
+            raise ValueError("Rating is outside this engine's supported range.")
+        if board.turn != chess.BLACK:
+            raise ValueError("The rated bot only plays Black.")
+        self.engine.configure({"UCI_LimitStrength": True, "UCI_Elo": rating})
+        result = self.engine.play(board, chess.engine.Limit(time=1.0), info=chess.engine.INFO_NONE)
         if result.move is None or result.move not in board.legal_moves:
             raise RuntimeError("Stockfish returned no legal move.")
         return result.move

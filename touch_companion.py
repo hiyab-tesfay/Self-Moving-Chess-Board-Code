@@ -35,7 +35,7 @@ class CompanionBridge:
         with self.lock:
             return dict(self.state, revision=self.revision, pending=self.pending)
 
-    def submit(self, action: str, revision: int, uci: str | None = None) -> bool:
+    def submit(self, action: str, revision: int, uci: str | int | None = None) -> bool:
         if action == "stop":
             self.stop.set()
             return True
@@ -46,6 +46,10 @@ class CompanionBridge:
                 allowed = self.state.get("can_confirm", False)
             elif action == "choice":
                 allowed = uci in {choice["uci"] for choice in self.state.get("choices", [])}
+            elif action == "rating":
+                settings = self.state.get("difficulty") or {}
+                allowed = (settings.get("enabled", False) and type(uci) is int and
+                           settings["min"] <= uci <= settings["max"])
             else:
                 allowed = False
             if not allowed:
@@ -108,7 +112,7 @@ class CompanionServer:
                         (origin and urlsplit(origin).netloc != self.headers.get("Host"))):
                     self.reply(403, b'{"error":"Use the camera chess page to confirm a move."}')
                     return
-                if self.path not in ("/api/confirm", "/api/choice", "/api/stop"):
+                if self.path not in ("/api/confirm", "/api/choice", "/api/stop", "/api/rating"):
                     self.reply(404, b'{}')
                     return
                 try:
@@ -117,7 +121,8 @@ class CompanionServer:
                         raise ValueError("Invalid request size")
                     body = json.loads(self.rfile.read(size))
                     accepted = bridge.submit(self.path.rsplit("/", 1)[1],
-                                             int(body.get("revision", -1)), body.get("uci"))
+                                             int(body.get("revision", -1)),
+                                             body.get("rating") if self.path == "/api/rating" else body.get("uci"))
                 except (ValueError, TypeError, AttributeError):
                     self.reply(400, b'{"error":"Invalid confirmation."}')
                     return

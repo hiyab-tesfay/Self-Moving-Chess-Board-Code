@@ -39,7 +39,7 @@ For a USB webcam, use `--camera usb --device 0`; install its autostart with
 2. Open **Calibrate camera**. Take the empty-board and starting-position photos,
    select the four outer playing-area corners if no markers are present, and
    confirm the board orientation. Keep the camera fixed after calibration.
-3. Choose a difficulty and start. Set up all 32 pieces and press **Confirm
+3. Start and set Black's target Elo slider. Set up all 32 pieces and press **Confirm
    starting board**. An old photo alone never verifies the current starting setup.
 4. Move White physically and press **Confirm move**. If a position is unclear,
    illegal, or still changing between the two photos, correct it and confirm
@@ -60,6 +60,16 @@ promotion piece you placed. Hands, lighting, alignment, piece contrast and
 calibration still require checks with the actual board and camera.
 
 ## Optional laptop Confirm button
+
+White is always moved by the human; recording White's move does not command
+the gantry. Stockfish chooses Black's replies and the gantry carries them.
+After starting a game, use **Black bot · target Elo** on the touchscreen or
+laptop before confirming the starting board. You can also adjust it during
+White's turn; it applies to the next Black reply. The two screens share the
+same value. It is an approximate engine strength, not a guaranteed human rating.
+The slider uses the installed Stockfish build's advertised `UCI_Elo` bounds
+and enables `UCI_LimitStrength`, rather than assigning invented ratings to
+the legacy difficulty presets. See the [official Stockfish options](https://github.com/official-stockfish/Stockfish/blob/master/src/engine.cpp).
 
 While Camera Chess is running on the Pi, forward its local companion page:
 

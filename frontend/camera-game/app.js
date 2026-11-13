@@ -1,6 +1,7 @@
 "use strict";
 let state = null;
 let sending = false;
+let editingRating = false;
 const byId = id => document.getElementById(id);
 const titles = {setup:"Confirm the starting position",human:"Your turn · White",thinking:"Stockfish is thinking",remove:"Remove the captured piece",computer:"Black's move",choose:"Choose your move",finished:"Game over",stopped:"Game stopped"};
 async function send(action, extra = {}) {
@@ -15,6 +16,17 @@ async function send(action, extra = {}) {
 }
 function render(next) {
   state = next;
+  const difficulty = next.difficulty;
+  byId("difficulty").hidden = !difficulty;
+  if (difficulty) {
+    const slider = byId("rating");
+    slider.min = difficulty.min; slider.max = difficulty.max;
+    slider.disabled = !difficulty.enabled || next.pending || sending;
+    if (!editingRating) {
+      slider.value = difficulty.rating;
+      byId("rating-value").textContent = difficulty.rating;
+    }
+  }
   byId("phase").textContent = next.busy ? "Checking or moving…" : titles[next.phase] || "Set up on the Pi touchscreen";
   byId("message").textContent = next.message || "Home the gantry at e2, calibrate the camera, and start a game on the touchscreen.";
   byId("confirm").textContent = next.confirm_label || "Confirm move";
@@ -44,14 +56,20 @@ async function refresh() {
     const response=await fetch("/api/state",{cache:"no-store"}); if(!response.ok) throw new Error();
     const next=await response.json();
     if(next.mode !== "camera-game") {
-      state=null; byId("confirm").disabled=true;
+      state=null; byId("rating").disabled=true; byId("confirm").disabled=true;
       byId("phase").textContent="Camera game is closed";
       byId("connection").textContent="Open Camera Chess on the Pi touchscreen. Refresh this page to use the manual dashboard instead.";
     } else render(next);
   }
-  catch (_) { byId("confirm").disabled=true; byId("connection").textContent="Pi connection unavailable. The game stays on the Pi."; }
+  catch (_) { state=null; byId("rating").disabled=true; byId("confirm").disabled=true; byId("connection").textContent="Pi connection unavailable. The game stays on the Pi."; }
   finally { refreshing=false; }
 }
 byId("confirm").addEventListener("click",()=>send("confirm"));
 byId("stop").addEventListener("click",()=>send("stop"));
+byId("rating").addEventListener("input", event => {
+  editingRating = true; byId("rating-value").textContent = event.target.value;
+});
+byId("rating").addEventListener("change", event => {
+  editingRating = false; send("rating", {rating:Number(event.target.value)});
+});
 refresh(); setInterval(refresh,700);

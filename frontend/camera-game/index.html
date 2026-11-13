@@ -7,5 +7,8 @@
 <aside><span class="eyebrow">CAMERA + GANTRY</span><h2 id="phase">Connecting to the Pi…</h2>
 <p id="message" role="status">Start the game and calibrate the board on the Pi touchscreen.</p>
 <button id="confirm" disabled>Confirm move</button><div id="choices"></div>
+<section id="difficulty" hidden><label for="rating">Black bot · target <output id="rating-value">1500</output> Elo</label>
+<input id="rating" type="range" step="1" disabled aria-describedby="rating-note">
+<p id="rating-note" class="muted">Approximate strength. Changes apply to the next Black move.</p></section>
 <p id="connection" class="muted">Waiting for the touchscreen.</p>
 <p class="muted">Move the physical piece, remove your hands, then press Confirm here or on the touchscreen. The camera checks the position before play continues.</p></aside></section></main></body></html>
