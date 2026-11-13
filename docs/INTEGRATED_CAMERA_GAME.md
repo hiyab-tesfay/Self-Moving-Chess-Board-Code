@@ -87,6 +87,20 @@ gantry control to the Wi-Fi network directly. Do not bind it publicly.
 
 ## Motion ownership and recovery
 
+When switching a Pi from the manual dashboard permanently, stop and disable
+`zain-gantry.service` while it is idle, then install this launcher's desktop
+autostart. The manual dashboard is a separate program: pushing this branch
+does not update a running copy or change that program's White/Black behavior.
+Verify `/api/state` reports `mode: camera-game` and
+`workflow: human-white-bot-black` after switching. Reuse installed dependencies
+and upload only changed source files for subsequent updates.
+
+Standalone USB capture keeps one camera stream open, warms exposure once,
+and waits for eight new frames per request. It retains both independent
+confirmation photos and the stable-frame checks. The companion page skips
+board reconstruction when the published state has not changed. Motor speeds
+and servo settling delays are preserved from the measured configuration.
+
 The integrated launcher temporarily stops the existing `zain-gantry.service`
 dashboard after checking that it is idle. Only one application owns the USB
 controller. Closing Camera Chess restores that dashboard. If a move is running,

@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import time
+import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -20,6 +22,60 @@ USB_BURST_FRAMES = 8
 
 class CameraError(RuntimeError):
     """The requested camera could not produce a readable image."""
+
+
+class USBStream:
+    """Keep exposure warm; each request waits for an entirely new burst."""
+    def __init__(self, device: int) -> None:
+        self.device = device
+        self.condition = threading.Condition()
+        self.frames = deque(maxlen=USB_BURST_FRAMES)
+        self.sequence = 0
+        self.error = None
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._read, name="usb-camera", daemon=True)
+        self.thread.start()
+
+    def _read(self) -> None:
+        camera = cv2.VideoCapture(self.device)
+        try:
+            if not camera.isOpened():
+                raise CameraError(f"Could not open USB camera device {self.device}.")
+            camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            warmup = USB_WARMUP_FRAMES
+            while not self.stopped.is_set():
+                ok, frame = camera.read()
+                if not ok or not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3 or not frame.size:
+                    raise CameraError("The USB camera stopped producing readable frames. Reconnect it and try again.")
+                if warmup:
+                    warmup -= 1
+                    continue
+                with self.condition:
+                    self.sequence += 1
+                    self.frames.append(frame.copy())
+                    self.condition.notify_all()
+        except Exception as exc:
+            with self.condition:
+                self.error = str(exc)
+                self.condition.notify_all()
+        finally:
+            camera.release()
+
+    def capture(self) -> np.ndarray:
+        with self.condition:
+            target = self.sequence + USB_BURST_FRAMES
+            ready = self.condition.wait_for(lambda: self.sequence >= target or self.error is not None or
+                                           self.stopped.is_set(), timeout=8)
+            if not ready or self.error is not None or self.stopped.is_set():
+                raise CameraError(self.error or "Timed out waiting for fresh USB camera frames.")
+            frames = list(self.frames)
+        return select_stable_frame(frames)
+
+    def close(self) -> None:
+        self.stopped.set()
+        with self.condition:
+            self.condition.notify_all()
+        self.thread.join(timeout=2)
 
 
 def _preview_gray(image: np.ndarray) -> np.ndarray:
@@ -80,12 +136,19 @@ class CameraSettings:
 
 class Camera:
     def __init__(self, kind: str = "pi", device: int = 0,
-                 settings: CameraSettings | None = None) -> None:
+                 settings: CameraSettings | None = None, *, keep_usb_open: bool = False) -> None:
         if kind not in ("pi", "usb"):
             raise ValueError("Camera must be 'pi' or 'usb'.")
         self.kind = kind
         self.device = device
         self.settings = settings or CameraSettings()
+        self.keep_usb_open = keep_usb_open
+        self.usb_stream = None
+
+    def close(self) -> None:
+        if self.usb_stream is not None:
+            self.usb_stream.close()
+            self.usb_stream = None
 
     def capture(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,6 +196,18 @@ class Camera:
                 raise CameraError(f"Camera capture failed: {detail or 'unknown rpicam error'}")
             return getattr(result, "stderr", "") or getattr(result, "stdout", "")
         else:
+            if self.keep_usb_open:
+                if self.usb_stream is None:
+                    self.usb_stream = USBStream(self.device)
+                try:
+                    frame = self.usb_stream.capture()
+                except CameraError:
+                    if self.usb_stream.error is not None:
+                        self.close()
+                    raise
+                if not cv2.imwrite(str(path), frame):
+                    raise CameraError("USB camera did not produce a usable frame.")
+                return None
             camera = cv2.VideoCapture(self.device)
             try:
                 if not camera.isOpened():

@@ -15,6 +15,7 @@ async function send(action, extra = {}) {
   finally { sending = false; await refresh(); }
 }
 function render(next) {
+  if (state && state.revision === next.revision && state.pending === next.pending) return;
   state = next;
   const difficulty = next.difficulty;
   byId("difficulty").hidden = !difficulty;

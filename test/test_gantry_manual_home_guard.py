@@ -2,12 +2,21 @@
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import chess
 from unittest import mock
 
 from pi_gantry import GantryPlayer, GantryError
 
 
 class ManualHomeGuardTests(unittest.TestCase):
+    def test_white_bot_carry_is_rejected_before_planning_or_hardware(self):
+        with mock.patch.object(self.player, "_run") as run, \
+                mock.patch.object(self.player.cp, "job_for_move") as plan:
+            with self.assertRaisesRegex(GantryError, "White is moved by the human"):
+                self.player.play(chess.Board(), chess.Move.from_uci("e2e4"))
+            run.assert_not_called()
+            plan.assert_not_called()
+
     def setUp(self):
         directory = Path(__file__).resolve().parents[1] / "gantry/pi"
         self.player = GantryPlayer(directory, "/dev/not-opened", directory / "gantry_config.json")

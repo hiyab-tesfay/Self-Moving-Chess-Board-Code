@@ -233,6 +233,8 @@ class GantryPlayer:
         driver runs only the carries (one for a capture, straight onto the emptied square). The
         removed piece leaves the layout: the person keeps it.
         """
+        if board_before.turn != chess.BLACK or board_before.color_at(move.from_square) != chess.BLACK:
+            raise GantryError("White is moved by the human. The bot gantry only carries Black pieces.")
         trial = self.layout.copy()
         try:
             job = self.cp.job_for_move(trial, board_before, move)

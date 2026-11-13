@@ -964,7 +964,8 @@ class TouchApp:
         self.args = args
         self.camera_settings = ((read_camera_settings(args.calibration / "camera_settings.json")
                                  or CameraSettings()) if args.camera == "pi" else CameraSettings())
-        self.camera = Camera(args.camera, args.device, self.camera_settings)
+        self.camera = Camera(args.camera, args.device, self.camera_settings,
+                             keep_usb_open=getattr(args, "standalone", False))
         self.photo_adjustments = (read_photo_adjustments(args.calibration / "photo_adjustments.json")
                                   or PhotoAdjustments())
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -1188,6 +1189,7 @@ class TouchApp:
                 choices = [{"uci": move.uci(), "label": chess.piece_name(move.promotion).title()
                             if move.promotion else session.game.board.san(move)} for move in session.choices]
         companion.bridge.publish({"mode": "camera-game", "phase": "stopped" if getattr(self, "halted", False) else phase,
+                                  "workflow": "human-white-bot-black", "human_side": "white", "bot_side": "black",
                                   "busy": self.busy, "message": self.message,
                                   "can_confirm": bool(available and phase in labels),
                                   "confirm_label": label, "choices": choices, "pieces": pieces,
@@ -3493,6 +3495,8 @@ class TouchApp:
                 self.gantry_go_to(square)
 
     def close(self) -> None:
+        if hasattr(self.camera, "close"):
+            self.camera.close()
         if getattr(self.args, "standalone", False) and self.gantry is not None:
             self.gantry.stop()
         if getattr(self, "companion", None) is not None:
