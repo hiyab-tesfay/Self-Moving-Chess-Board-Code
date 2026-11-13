@@ -77,6 +77,11 @@ node frontend/test/perft.js
 
 ## Raspberry Pi camera and touchscreen
 
+For the integrated physical game—White moved by hand, Black moved by the gantry,
+and a **Confirm move** button on both the Pi touchscreen and optional laptop—see
+[Camera + gantry game](docs/INTEGRATED_CAMERA_GAME.md). It runs entirely on the Pi;
+the laptop is an optional second display of the same game.
+
 The Pi applications run the camera-based chess game on a Raspberry Pi. You play White against a local Stockfish engine. The camera detects which squares are occupied; `python-chess` tracks piece identities and checks move legality. After Stockfish announces Black's move, move that piece on the physical board and let the camera verify the result.
 
 Camera-only play uses manual piece movement. The gantry dashboard controls the motors separately; the camera does not identify piece types from images. Moves with identical occupancy patterns, including promotions and some captures, require a manual choice. The camera and calibration still need to be tested with your actual board and lighting.

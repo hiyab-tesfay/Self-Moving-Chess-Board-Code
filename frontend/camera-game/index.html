@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Physical Chess · Camera game</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><main><header><span>PHYSICAL CHESS</span><button id="stop" class="stop">Stop gantry</button></header>
+<section class="layout"><div><h1>Play on the board.</h1><p>You move White. The gantry moves Black.</p>
+<div id="board" class="board" aria-label="Current verified chess position"></div><p id="moves" class="muted">No moves yet.</p></div>
+<aside><span class="eyebrow">CAMERA + GANTRY</span><h2 id="phase">Connecting to the Pi…</h2>
+<p id="message" role="status">Start the game and calibrate the board on the Pi touchscreen.</p>
+<button id="confirm" disabled>Confirm move</button><div id="choices"></div>
+<p id="connection" class="muted">Waiting for the touchscreen.</p>
+<p class="muted">Move the physical piece, remove your hands, then press Confirm here or on the touchscreen. The camera checks the position before play continues.</p></aside></section></main></body></html>

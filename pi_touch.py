@@ -22,7 +22,8 @@ from board_vision import (Calibration, Observation, TemporalObservation, VisionE
                           warp_board, robust_square_scores)
 from chess_game import ChessGame, DIFFICULTIES, StockfishPlayer
 from move_observation import occupied_squares
-from pi_camera import Camera, CameraError, CameraSettings
+from pi_camera import Camera, CameraError, CameraSettings, _frames_are_still, _preview_gray
+from touch_companion import CompanionServer
 
 try:   # The gantry carries Stockfish's moves when CHESS_GANTRY_PORT is set. Without it the person moves them.
     from pi_gantry import GantryError, GantryPlayer
@@ -639,6 +640,8 @@ class TouchSession:
         self.gantry_notes: tuple[str, ...] = () # what the gantry reported about the move it carried
         # (square, piece symbol) the person must take off before the gantry plays the computer move.
         self.removal: tuple[str, str] | None = None
+        self.computer_carried = False
+        self.promotion_pending = False
 
     def verify_setup(self, observed: Observation | frozenset[str]) -> None:
         if self.phase != "setup":
@@ -754,12 +757,16 @@ class TouchSession:
         if self.phase != "thinking" or move not in self.game.board.legal_moves:
             raise ValueError("The computer did not provide a legal move.")
         self.computer_move = move
+        self.computer_carried = False
+        self.promotion_pending = False
         self.phase = "computer"
         self._gantry_check_removal(move)
         return self.game.board.san(move)
 
     def verify_computer(self, observed: Observation | frozenset[str], *,
                         change_scores: dict[str, float] | None = None) -> str:
+        if self.promotion_pending:
+            raise MoveRejected("Replace the promoted pawn and confirm it on the touchscreen or laptop.")
         if self.phase != "computer" or self.computer_move is None:
             raise ValueError("There is no computer move to verify.")
         observation = _checked_observation(observed)
@@ -785,6 +792,8 @@ class TouchSession:
         return san
 
     def verify_computer_temporal(self, observed: TemporalObservation) -> str:
+        if self.promotion_pending:
+            raise MoveRejected("Replace the promoted pawn and confirm it on the touchscreen or laptop.")
         if self.phase != "computer" or self.computer_move is None:
             raise ValueError("There is no computer move to verify.")
         if not _temporal_match(self.game.board, self.computer_move, observed):
@@ -907,11 +916,14 @@ class TouchSession:
         """The gantry reports the move carried; the camera check comes next."""
         self.gantry_note = None
         self.gantry_notes = tuple(str(note) for note in (notes or ()))
+        self.computer_carried = True
+        self.promotion_pending = bool(self.computer_move and self.computer_move.promotion)
 
     def gantry_failed(self, message: str) -> None:
         """The gantry could not carry the move: the person makes it by hand, as without a gantry."""
         self.gantry_note = message
         self.gantry_notes = ()
+        self.computer_carried = False
 
     def _gantry_after_computer(self) -> None:
         if self.gantry is not None and self.gantry_note is not None:
@@ -959,6 +971,8 @@ class TouchApp:
         self.results: queue.SimpleQueue = queue.SimpleQueue()
         self.generation = 0
         self.closed = False
+        self.halted = False
+        self.companion = None
         self.player: StockfishPlayer | None = None
         self.calibration = None
         self.reference = None
@@ -1036,6 +1050,9 @@ class TouchApp:
                                font=("DejaVu Sans", 12 if self.compact else 17, "bold"),
                                anchor="w", padx=12 if self.compact else 18)
         self.header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        if getattr(args, "standalone", False):
+            tk.Button(root, text="STOP", command=self.stop_gantry, bg="#9b282e", fg="white",
+                      font=("DejaVu Sans", 12, "bold")).grid(row=0, column=1, sticky="e", padx=12)
         self.board_canvas = tk.Canvas(root, bg=self.BG, highlightthickness=0)
         self.board_canvas.grid(row=1, column=0, sticky="nsew", padx=(12, 4), pady=8)
         self.board_canvas.bind("<Configure>", lambda _event: self.draw_board())
@@ -1073,6 +1090,9 @@ class TouchApp:
         if not args.windowed:
             root.after(250, self.ensure_fullscreen)
         root.after(70, self.poll_results)
+        if getattr(args, "companion_port", None) is not None:
+            self.companion = CompanionServer(args.companion_port)
+            self.publish_companion()
 
     def ensure_fullscreen(self) -> None:
         """Repeat the full-screen request after the desktop maps the window."""
@@ -1114,17 +1134,111 @@ class TouchApp:
                      font=("DejaVu Sans", 10 if self.compact else 11), anchor="w", justify="left",
                      wraplength=self.panel_width - 48).pack(fill="x", pady=(0, 12))
 
+    def confirm_move(self) -> None:
+        """The same explicit camera check, requested by either display."""
+        if (self.busy or getattr(self, "halted", False) or self.session is None or
+                self.session.phase not in ("setup", "human", "computer", "remove")):
+            return
+        if self.session.promotion_pending:
+            # This button explicitly acknowledges replacing the pawn; occupancy cannot identify its type.
+            self.session.promotion_pending = False
+        self.scan()
+
+    def stop_gantry(self) -> None:
+        """STOP bypasses the single camera/motion worker queue."""
+        self.halted = True
+        self.generation += 1
+        self.busy = False
+        self.gantry_activity = None
+        if self.gantry is not None:
+            try:
+                self.gantry.stop()
+            except Exception as exc:
+                self.say(f"Stop requested. Check the gantry: {exc}", self.RED)
+                return
+        if self.session is not None:
+            self.session.gantry_failed("Stopped. Check the board and set home at e2 again before moving.")
+        self.say("Stopped. Check the physical board before continuing.", self.RED)
+        self.render()
+
+    def publish_companion(self) -> None:
+        companion = getattr(self, "companion", None)
+        if companion is None:
+            return
+        session = self.session
+        phase = session.phase if session is not None else "menu"
+        available = (session is not None and not self.busy and not getattr(self, "halted", False) and
+                     self.gantry_screen is None and
+                     self.calibration_flow is None and not self.confirming_end and
+                     not self.confirming_new_game and
+                     (self.scan_photo is None or len(self.scan_corners) == 4))
+        labels = {"setup": "Confirm starting board", "human": "Confirm move",
+                  "remove": "Confirm piece removed", "computer": "Confirm Black's move"}
+        label = ("Pawn replaced — Confirm" if session is not None and session.promotion_pending
+                 else labels.get(phase, "Confirm move"))
+        choices = []
+        pieces = {}
+        if session is not None:
+            pieces = {chess.square_name(square): {"symbol": piece.unicode_symbol(),
+                      "color": "white" if piece.color else "black",
+                      "name": chess.piece_name(piece.piece_type)}
+                      for square, piece in session.game.board.piece_map().items()}
+            if available and phase == "choose":
+                choices = [{"uci": move.uci(), "label": chess.piece_name(move.promotion).title()
+                            if move.promotion else session.game.board.san(move)} for move in session.choices]
+        companion.bridge.publish({"mode": "camera-game", "phase": "stopped" if getattr(self, "halted", False) else phase,
+                                  "busy": self.busy, "message": self.message,
+                                  "can_confirm": bool(available and phase in labels),
+                                  "confirm_label": label, "choices": choices, "pieces": pieces,
+                                  "moves": list(session.game.san_moves) if session else []})
+
+    def dispatch_companion(self) -> None:
+        companion = getattr(self, "companion", None)
+        if companion is None:
+            return
+        bridge = companion.bridge
+        stopped = bridge.stop.is_set()
+        if stopped:
+            bridge.stop.clear()
+            self.stop_gantry()
+        action = bridge.next_action()
+        if action is not None:
+            kind, revision, uci = action
+            try:
+                if not stopped and revision == bridge.snapshot()["revision"] and not self.busy:
+                    if kind == "confirm":
+                        self.confirm_move()
+                    elif kind == "choice" and self.session is not None:
+                        chosen = next((move for move in self.session.choices if move.uci() == uci), None)
+                        if chosen is not None:
+                            self.select_move(chosen)
+            finally:
+                self.publish_companion()
+                bridge.complete_action()
+
     def render(self) -> None:
+        self._render()
+        self.publish_companion()
+
+    def _render(self) -> None:
         for child in self.panel.winfo_children():
             child.destroy()
         if hasattr(self, "panel_canvas"):
             self.panel_canvas.yview_moveto(0)
         self.draw_board()
+        if getattr(self, "halted", False) and self.session is not None:
+            self.heading("Game stopped", "Check the pieces, start a new game, and set home beneath e2 before continuing.")
+            self.button("New Game", self.back_to_menu, accent=True)
+            return
         if getattr(self, "welcome_screen", False) and self.calibration_flow is None:
             self.heading("Ready to play?", "You play White on the physical board.")
+            if getattr(self.args, "standalone", False):
+                self.button("1. Home gantry at e2", self.open_gantry_panel, short=True)
+                self.button("2. Calibrate camera", self.open_board_setup, short=True)
             self.button("Start Game", self.begin_play, accent=True)
-            self.button("Calibrate Board", self.open_board_setup, short=True)
-            self.button("Gantry", self.open_gantry_panel, short=True)
+            if not getattr(self.args, "standalone", False):
+                self.button("Calibrate Board", self.open_board_setup, short=True)
+                self.button("Gantry", self.open_gantry_panel, short=True)
             return
         if getattr(self, "confirming_end", False) and self.session is not None:
             self.heading("End this game?", "Ending the game counts as a resignation. Your board setup will stay saved.")
@@ -1180,7 +1294,8 @@ class TouchApp:
         elif session.phase == "setup":
             self.heading("Ready to play?", self.reset_notes_text() +
                          "Place all 32 pieces as shown. Center them on their squares, then lift your hands away.")
-            self.button("Scan Starting Board", self.scan, accent=True)
+            self.button("Confirm starting board" if getattr(self.args, "standalone", False) else
+                        "Scan Starting Board", self.confirm_move, accent=True)
             self.button("Cancel Game", self.end_game)
         elif session.phase == "setup_confirm":
             squares = ", ".join(session.setup_uncertain)
@@ -1196,8 +1311,11 @@ class TouchApp:
                 else:
                     self.heading("Protect your king", "Move the king, capture the attacker, or block the attack if legal. Then tap Scan Move.")
             else:
-                self.heading("Your turn", "Move one White piece. Lift your hands away, then tap Scan Move. The app checks two photos automatically.")
-            self.button("Scan Move", self.scan, accent=True)
+                self.heading("Your turn", "Move one White piece. Lift your hands away, then tap Confirm move."
+                             if getattr(self.args, "standalone", False) else
+                             "Move one White piece. Lift your hands away, then tap Scan Move. The app checks two photos automatically.")
+            self.button("Confirm move" if getattr(self.args, "standalone", False) else
+                        "Scan Move", self.confirm_move, accent=True)
             self.button("End Game", self.request_end_game, short=True)
             if in_check:
                 self.button("New Game", self.request_new_game, short=True)
@@ -1231,12 +1349,19 @@ class TouchApp:
             # confirm it, and only then does the gantry carry the move.
             self.render_check_notice()
             self.heading("Remove the piece", self.removal_instruction())
-            self.button("Check", self.scan, accent=True)
+            self.button("Confirm piece removed" if getattr(self.args, "standalone", False) else
+                        "Check", self.confirm_move, accent=True)
             self.button("End Game", self.request_end_game, short=True)
         elif session.phase == "computer":
             move = session.computer_move
             assert move is not None
             san = session.game.board.san(move)
+            if session.promotion_pending:
+                self.heading("Replace the pawn", f"Replace the Black pawn on {chess.square_name(move.to_square)} "
+                             f"with a {chess.piece_name(move.promotion)}. Then confirm.")
+                self.button("Pawn replaced — Confirm", self.confirm_move, accent=True)
+                self.button("End Game", self.request_end_game, short=True)
+                return
             extra = []
             if session.game.board.is_capture(move) and session.removal is None:
                 extra.append("Remove the captured piece.")
@@ -1246,12 +1371,15 @@ class TouchApp:
                 extra.append(f"Replace the pawn with a {chess.piece_name(move.promotion)}.")
             self.render_check_notice()
             by_hand = "Move the Black piece as shown, then remove your hands. " + " ".join(extra)
+            if session.computer_carried:
+                by_hand = "The gantry has played Black's move. Lift your hands away, then confirm the position."
             if session.gantry_note:
                 by_hand = f"The gantry could not make this move: {session.gantry_note} " + by_hand
             self.heading("Computer's move", by_hand)
             tk.Label(self.panel, text=f"{move.uci()[:2]}  →  {move.uci()[2:4]}", bg=self.PANEL,
                      fg=self.GOLD, font=("DejaVu Sans", 23 if self.compact else 30, "bold")).pack(fill="x", pady=(0, 12))
-            self.button("Verify Computer Move", self.scan, accent=True)
+            self.button("Confirm Black's move" if getattr(self.args, "standalone", False) else
+                        "Verify Computer Move", self.confirm_move, accent=True)
             self.button("End Game", self.request_end_game, short=True)
         else:
             self.heading("Checkmate" if session.game.board.is_checkmate() else "Game over",
@@ -1698,6 +1826,7 @@ class TouchApp:
         self.executor.submit(run)
 
     def start_game(self) -> None:
+        self.halted = False
         self.welcome_screen = False
         self.pending_game_start = True
         if not self.saved_calibration_available():
@@ -1717,6 +1846,8 @@ class TouchApp:
 
         def load():
             calibration, reference = load_calibration(self.args.calibration)
+            if getattr(self.args, "standalone", False) and calibration.scoring == "temporal_v1":
+                raise VisionError("Calibrate with empty-board and starting-position photos before playing camera chess.")
             starting_path = self.args.calibration / "starting_warp.png"
             try:
                 starting_reference = read_image(starting_path) if starting_path.is_file() else None
@@ -1754,6 +1885,18 @@ class TouchApp:
                     except GantryError as exc:
                         opened.close()
                         opened, problem = None, str(exc)
+            if getattr(self.args, "standalone", False):
+                try:
+                    if opened is None:
+                        raise GantryError(problem or "Open Gantry and set home beneath e2 before starting.")
+                    status = opened.status()
+                    if not status["homed"] or status["state"] != "Idle":
+                        raise GantryError("Open Gantry, release the motors, position beneath e2, then tap Set home here.")
+                except Exception:
+                    loaded[2].close()
+                    if opened is not None and opened is not self.gantry:
+                        opened.close()
+                    raise
             return (*loaded, opened, problem)
 
         self.submit("start", load_with_gantry)
@@ -1869,6 +2012,7 @@ class TouchApp:
     def poll_results(self) -> None:
         if self.closed:
             return
+        self.dispatch_companion()
         try:
             while True:
                 generation, tag, value, error = self.results.get_nowait()
@@ -1904,7 +2048,7 @@ class TouchApp:
                         self.capture_error = str(error)
                         self.say("Camera photo failed. Tap Try Camera Again.", self.RED)
                     elif tag == "start" and isinstance(error, VisionError):
-                        self.say("Calibration missing or unreadable. Tap Calibrate Board.", self.RED)
+                        self.say(f"{error} Tap Calibrate Board.", self.RED)
                     elif tag == "cal_finish" and isinstance(error, VisionError):
                         print(f"Calibration check failed: {error}")
                         detail = str(error)
@@ -1964,6 +2108,7 @@ class TouchApp:
                 self.render()
         except queue.Empty:
             pass
+        self.publish_companion()
         self.root.after(70, self.poll_results)
 
     def handle_result(self, tag: str, value) -> None:
@@ -2043,7 +2188,7 @@ class TouchApp:
             if self.calibration.scoring == "temporal_v1":
                 self.session.phase = "human"
                 self.say("Starting position loaded. Move White, then tap Scan Move.", self.GREEN)
-            elif self.fresh_starting_reference is not None:
+            elif self.fresh_starting_reference is not None and not getattr(self.args, "standalone", False):
                 self.session.phase = "human"
                 self.position_reference = self.fresh_starting_reference
                 self.fresh_starting_reference = None
@@ -2091,6 +2236,13 @@ class TouchApp:
                     len((self.scan_samples[index].occupied ^ observation.occupied) & known),
                     len(self.scan_samples[index].uncertain)))
                 aligned = self.scan_aligned_samples[best]
+                if getattr(self.args, "standalone", False):
+                    frames = self.scan_aligned_samples[-2:]
+                    if (any(frame is None for frame in frames) or
+                            not _frames_are_still(_preview_gray(frames[0]), _preview_gray(frames[1]))):
+                        raise MoveRejected("The board changed between photos. Remove your hands and confirm again.")
+                    if observation.uncertain:
+                        raise MoveRejected("Some squares are unclear. Center the pieces and confirm again.")
             self.latest_observation = observation if not temporal else None
             position_reference = getattr(self, "position_reference", None)
             change_scores = None
@@ -2239,6 +2391,8 @@ class TouchApp:
     def reset_pieces(self, session: TouchSession | None = None) -> None:
         """With a gantry that knows the layout: every piece goes home in the worker behind a
         "Putting the pieces back…" screen. Otherwise nothing happens."""
+        if getattr(self.args, "standalone", False):
+            return
         session = session or self.session
         if self.gantry is None or session is None or not session.layout_known or self.resetting:
             return
@@ -2266,8 +2420,17 @@ class TouchApp:
                 self.render()
                 return
             session.gantry_moved(value)
-            self.say(f"Gantry moved {move.uci()}. Checking the board with the camera…", self.GOLD)
-            self.scan()   # the same verification as after a move by hand
+            if getattr(self.args, "standalone", False):
+                self.say(f"Gantry moved {move.uci()}. " +
+                         (f"Replace the pawn with a {chess.piece_name(move.promotion)}, then confirm."
+                          if move.promotion else "Press Confirm to check Black's move with the camera."), self.GOLD)
+                self.render()
+            else:
+                self.say(f"Gantry moved {move.uci()}. Checking the board with the camera…", self.GOLD)
+                if session.promotion_pending:
+                    self.render()
+                else:
+                    self.scan()
             return
         # gantry_reset
         self.resetting = False
@@ -2347,6 +2510,8 @@ class TouchApp:
         self.scan_aligned_samples = []
 
     def end_game(self) -> None:
+        if (getattr(self.args, "standalone", False) and self.gantry is not None and self.gantry_activity):
+            self.gantry.stop()
         self.generation += 1
         self.busy = False
         self.confirming_end = False
@@ -2369,6 +2534,7 @@ class TouchApp:
         self.render()
 
     def back_to_menu(self) -> None:
+        self.halted = False
         self.generation += 1
         self.welcome_screen = False
         self.pending_game_start = False
@@ -2740,7 +2906,8 @@ class TouchApp:
             return
         screen, self.gantry_screen = self.gantry_screen, None
         screen.destroy()
-        if self.gantry_screen_owned and self.gantry is not None:
+        if (self.gantry_screen_owned and self.gantry is not None and
+                not getattr(self.args, "standalone", False)):
             # Opened for this screen only: let the port go (the laptop console may want it). The next game opens it again.
             gantry, self.gantry = self.gantry, None
             self.executor.submit(gantry.close)
@@ -3028,6 +3195,8 @@ class TouchApp:
         top = tk.Frame(screen, bg=self.BG)
         top.pack(side="top", fill="x", padx=8, pady=(6, 2))
         tk.Label(top, text="GANTRY", bg=self.BG, fg=self.TEXT, font=big).pack(side="left")
+        if getattr(self.args, "standalone", False):
+            tk.Button(top, text="STOP", command=self.stop_gantry, bg="#9b282e", fg="white").pack(side="right")
         self.gantry_readout_label = tk.Label(top, text="", bg=self.BG, fg=self.MUTED, font=small, anchor="w")
         self.gantry_readout_label.pack(side="left", padx=10, fill="x", expand=True)
         self.gantry_message = tk.Label(screen, text="", bg=self.PANEL, fg=self.MUTED, font=small, anchor="w",
@@ -3045,6 +3214,8 @@ class TouchApp:
         left = tk.Frame(body, bg=self.BG)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self.gantry_board_hint = tk.Label(left, text="Tap a square to go there", bg=self.BG, fg=self.MUTED, font=small)
+        if getattr(self.args, "standalone", False):
+            self.gantry_board_hint.configure(text="Motors off → place magnet beneath e2 → Set home")
         self.gantry_board_hint.pack(side="top")
         self.gantry_board = tk.Canvas(left, bg=self.BG, highlightthickness=0)
         self.gantry_board.pack(side="top", fill="both", expand=True)
@@ -3149,6 +3320,11 @@ class TouchApp:
                        ("Motors off", self.gantry_motors_off, False),
                        ("Test move", self.gantry_test_open, False),
                        ("Back", self.close_gantry_panel, True))
+            if getattr(self.args, "standalone", False):
+                entries = (("Motors off", self.gantry_motors_off, False),
+                           ("Set home here — e2", self.gantry_set_home, True),
+                           ("Return home", self.gantry_return_home, False),
+                           ("Back", self.close_gantry_panel, False))
         for label, command, accent in entries:
             self.gantry_button(right, label, command, accent=accent).pack(
                 side="top", fill="both", expand=True, pady=2)
@@ -3173,7 +3349,9 @@ class TouchApp:
         self.gantry_readout_label.configure(text=self.gantry_readout_text())
         hint = getattr(self, "gantry_board_hint", None)
         if hint is not None:
-            hint.configure(text="Tap FROM, then TO" if self.gantry_test else "Tap a square to go there")
+            hint.configure(text=("Motors off → place magnet beneath e2 → Set home"
+                                 if getattr(self.args, "standalone", False) else
+                                 "Tap FROM, then TO" if self.gantry_test else "Tap a square to go there"))
         if getattr(self, "gantry_test_label", None) is not None:
             self.gantry_test_label.configure(text=self.gantry_test_move_text())
         self.draw_gantry_board()
@@ -3254,6 +3432,11 @@ class TouchApp:
                 self.gantry_go_to(square)
 
     def close(self) -> None:
+        if getattr(self.args, "standalone", False) and self.gantry is not None:
+            self.gantry.stop()
+        if getattr(self, "companion", None) is not None:
+            self.companion.close()
+            self.companion = None
         self.closed = True
         self.generation += 1
         try:
@@ -3270,7 +3453,8 @@ class TouchApp:
             # Leaving mid-game: the pieces go home first (the worker finishes before the process exits), then the link closes.
             gantry, self.gantry = self.gantry, None
             session = self.session
-            if (session is not None and session.layout_known and session.phase != "finished" and
+            if (not getattr(self.args, "standalone", False) and session is not None and
+                    session.layout_known and session.phase != "finished" and
                     not self.resetting):
                 self.executor.submit(lambda: (session.put_pieces_back(), gantry.close()))
             else:
@@ -3287,6 +3471,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--corners", nargs=8, type=float,
                         metavar=("TL_X", "TL_Y", "TR_X", "TR_Y", "BR_X", "BR_Y", "BL_X", "BL_Y"))
     parser.add_argument("--windowed", action="store_true", help="Show an 800×480 window for development")
+    parser.add_argument("--standalone", action="store_true", help="Require manual e2 homing and camera-verified gantry play")
+    parser.add_argument("--companion-port", type=int, help="Serve laptop Confirm controls on loopback at this port")
     args = parser.parse_args(argv)
     if args.corners:
         args.corners = [args.corners[index:index + 2] for index in range(0, 8, 2)]

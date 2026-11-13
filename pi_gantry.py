@@ -47,6 +47,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+import threading
 
 import chess
 
@@ -100,6 +101,8 @@ class GantryPlayer:
         self.restore_text = ""      # what connecting for the manual controls found out about the position
         self.save_to_file = port != "sim"   # the pretend board changes its settings in memory only, like the console
         self.layout = self.cp.Layout()
+        self.manual_home_ready = not self.config.get("manual_home_on_connect", False)
+        self.cancelled = threading.Event()
 
     # ------------------------------------------------------------------ set-up
 
@@ -137,6 +140,9 @@ class GantryPlayer:
             return
         self._open_link()
         try:
+            if self.config.get("manual_home_on_connect", False):
+                self._manual_gantry()
+                return
             gantry = self.gd.Gantry(self.link, log)
             gantry.check_safe()
             if not self.gd.uses_gcode(self.config):
@@ -161,6 +167,7 @@ class GantryPlayer:
                                      keep_running=self.config.get("keep_esp32_running"))
             self.link.flip_y = flip_y   # home beside a8: every Y mirrored, from the first status on
             self.link.swap_xy = self.gd.swap_xy_flag(self.config)   # X and Y motors exchanged (config swap_xy)
+            self.manual_home_ready = not self.config.get("manual_home_on_connect", False)
         except self.gd.GantryError as exc:
             raise GantryError(str(exc)) from None
         except Exception as exc:
@@ -168,16 +175,32 @@ class GantryPlayer:
 
     def close(self) -> None:
         self.manual = None
+        self.manual_home_ready = not self.config.get("manual_home_on_connect", False)
         if self.link is not None:
             try:
                 self.link.close()
             finally:
                 self.link = None
 
+    def stop(self) -> None:
+        """Stop immediately; only an explicit manual home permits another carry."""
+        self.cancelled.set()
+        self.manual_home_ready = False
+        if self.link is not None:
+            for command in ("!", "M5", "M8"):
+                try:
+                    self.link.write(command)
+                except Exception as exc:
+                    log.warning("Could not send %s while stopping: %s", command, exc)
+
     def unlock(self) -> None:
         """After a person has checked the pieces: clear the board's alarm or hold and home it again."""
         self.connect()
         try:
+            if self.config.get("manual_home_on_connect", False):
+                self.manual_home_ready = False
+                self.gd.Gantry(self.link, log).command("$X")
+                return
             self.gd.Gantry(self.link, log).unlock()
         except self.gd.GantryError as exc:
             raise GantryError(str(exc)) from None
@@ -313,9 +336,11 @@ class GantryPlayer:
             if st["magnet"]:
                 gantry.command("M5")
             state = self.gd.set_home_here(gantry, self.config)
+            self.manual_home_ready = True
+            self.cancelled.clear()
             self.restore_text = ""
             start = self.config.get("start_mm")
-            if start:      # the memorised spot: from the corner straight to it, every time
+            if start and not self.config.get("manual_home_on_connect", False):
                 st = self._usable(gantry.status(), homed=True)
                 report = self._move(gantry, st, float(start[0]), float(start[1]), "going to the start")
                 return dict(report, went_to_start=True, from_corner=self.from_corner(report))
@@ -360,6 +385,8 @@ class GantryPlayer:
             if st["magnet"]:
                 gantry.command("M5")
             gantry.command("M18")
+            if self.config.get("manual_home_on_connect", False):
+                self.manual_home_ready = False
             return self._report(gantry.status())
         return self._manual(work)
 
@@ -474,7 +501,9 @@ class GantryPlayer:
                 gantry.set_step_pulse(self.config)
                 gantry.set_board(self.config)
             st = gantry.status()
-            if st["homed"] and st["state"] != "Alarm":
+            if self.config.get("manual_home_on_connect", False):
+                self.restore_text = "Place the magnet beneath e2 and tap Set home here."
+            elif st["homed"] and st["state"] != "Alarm":
                 self.restore_text = ""
             else:
                 _outcome, self.restore_text = gantry.restore_position(self.config)
@@ -498,6 +527,8 @@ class GantryPlayer:
 
     def _usable(self, st: dict, homed: bool) -> dict:
         """Refuse while the board wants a person to look first; with homed=True also while it is not homed."""
+        if homed and self.config.get("manual_home_on_connect", False) and not self.manual_home_ready:
+            raise self.gd.GantryError("Set home beneath e2 on the Gantry screen before moving.")
         if st["host_lost"]:
             raise self.gd.GantryError("The board lost contact with the Pi and made itself safe. Check the carriage, "
                                       "put it on its home spot and tap Set home here.")
@@ -555,7 +586,8 @@ class GantryPlayer:
             units = self.gd.BoardMap(self.config).units(st["x"], st["y"]) if st["homed"] else None
         except Exception:
             units = None
-        return {"x": st["x"], "y": st["y"], "homed": bool(st["homed"]), "state": st["state"], "reason": st["reason"],
+        homed = bool(st["homed"]) and (not self.config.get("manual_home_on_connect", False) or self.manual_home_ready)
+        return {"x": st["x"], "y": st["y"], "homed": homed, "state": st["state"], "reason": st["reason"],
                 "magnet": bool(st["magnet"]), "servo": st.get("servo"), "remembered": bool(described.get("remembered")),
                 "memory": described.get("text", ""), "restore": self.restore_text, "units": units}
 
@@ -572,7 +604,16 @@ class GantryPlayer:
     # ------------------------------------------------------------------ inside
 
     def _run(self, jobs: list[dict], say=None) -> None:
+        if self.cancelled.is_set():
+            raise GantryError("Stopped. Check the board and set home at e2 again before moving.")
         self.connect()
+        if self.config.get("manual_home_on_connect", False) and not self.manual_home_ready:
+            raise GantryError("Set home beneath e2 on the Gantry screen before starting a game.")
+        if self.config.get("manual_home_on_connect", False):
+            state = self._manual_gantry().status()
+            if not state["homed"] or state["state"] != "Idle" or state["host_lost"]:
+                self.manual_home_ready = False
+                raise GantryError("The gantry lost its position. Check the board and set home beneath e2 again.")
         try:
             self.gd.run_jobs(jobs, self.config, self.link, log, progress=say)
         except self.gd.GantryError as exc:

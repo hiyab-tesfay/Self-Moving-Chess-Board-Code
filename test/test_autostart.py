@@ -1,5 +1,6 @@
 import os
 import shlex
+import shutil
 import tempfile
 import unittest
 import subprocess
@@ -8,6 +9,12 @@ from unittest import mock
 
 from scripts import install_touch_autostart
 from scripts.install_touch_autostart import autostart_entry, update_autostart
+
+SHELL = shutil.which("sh")
+if SHELL is None and os.name == "nt":
+    git_shell = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/usr/bin/sh.exe"
+    if git_shell.is_file():
+        SHELL = str(git_shell)
 
 
 class AutostartTest(unittest.TestCase):
@@ -24,7 +31,8 @@ class AutostartTest(unittest.TestCase):
             self.assertIn(original, installed)
             self.assertIn("--camera usb --device 1", installed)
             self.assertIn("'/home/user/chess board'", installed)
-            subprocess.run(["sh", "-n", str(path)], check=True)
+            if SHELL:
+                subprocess.run([SHELL, "-n", str(path)], check=True)
             self.assertFalse(update_autostart(path, entry))
             self.assertEqual(path.read_text(), installed)
             self.assertTrue(update_autostart(path, None))
@@ -48,13 +56,15 @@ class AutostartTest(unittest.TestCase):
                 path = Path(directory) / "autostart"
                 path.write_text("other-app &\n")
                 self.assertTrue(update_autostart(path, entry))
-                subprocess.run(["sh", "-n", str(path)], check=True)
+                if SHELL:
+                    subprocess.run([SHELL, "-n", str(path)], check=True)
                 plain = autostart_entry(Path("/home/user/chess board"),
                                         Path("/home/user/state/chess log"), "pi", 0)
                 self.assertTrue(update_autostart(path, plain), "reinstalling without a port replaces the block")
                 self.assertNotIn("CHESS_GANTRY_PORT", path.read_text())
                 self.assertEqual(path.read_text().count("# BEGIN"), 1)
 
+    @unittest.skipUnless(os.name == "posix", "This check executes the Pi's POSIX env/sh commands")
     def test_gantry_port_reaches_the_program(self):
         entry = autostart_entry(Path("/p"), Path("/l"), "pi", 0, "auto")
         command = entry.splitlines()[1].split(" && ", 1)[1].split(" >> ")[0]
@@ -83,6 +93,13 @@ class AutostartTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 update_autostart(path, "new entry\n")
             self.assertEqual(path.read_text(), contents)
+
+    def test_standalone_autostart_runs_the_integrated_launcher(self):
+        entry = autostart_entry(Path("/home/smart/chess"), Path("/home/smart/game.log"),
+                                "pi", 0, "auto", standalone=True)
+        self.assertIn("pi_standalone.py", entry)
+        self.assertIn("--gantry-port auto", entry)
+        self.assertNotIn("pi_touch.py", entry)
 
 
 if __name__ == "__main__":
