@@ -25,6 +25,7 @@ from chess_game import ChessGame, DIFFICULTIES, StockfishPlayer
 from move_observation import occupied_squares
 from pi_camera import Camera, CameraError, CameraSettings, _frames_are_still, _preview_gray
 from touch_companion import CompanionServer
+from manual_controls import valid_manual
 
 try:   # The gantry carries Stockfish's moves when CHESS_GANTRY_PORT is set. Without it the person moves them.
     from pi_gantry import GantryError, GantryPlayer
@@ -1217,7 +1218,7 @@ class TouchApp:
                 controls["flip"] = ("Flip photo 180°", self.flip_setup_rotation)
             return controls
         if self.session is None:
-            return {"gantry": ("1. Home gantry at e2", self.open_gantry_panel),
+            return {"gantry": ("Manual gantry controls / Home e2", self.open_gantry_panel),
                     "calibrate": ("Camera calibration", self.open_board_setup),
                     "start_game": ("Start game with saved calibration", self.start_game)}
         if getattr(self, "halted", False) or self.session.phase == "finished":
@@ -1241,6 +1242,16 @@ class TouchApp:
     def companion_jog(self, x: int, y: int) -> None:
         self.gantry_step = "5"
         self.gantry_jog(x, y)
+
+    def companion_manual_enabled(self) -> bool:
+        return (not self.busy and self.gantry_screen is not None and self.gantry is not None and
+                (self.session is None or self.session.phase == "finished"))
+
+    def companion_manual(self, value) -> None:
+        if not self.companion_manual_enabled() or not valid_manual(value):
+            return
+        self.run_gantry_action(f"Manual gantry: {value['op']}…", lambda gantry: gantry.manual_command(value),
+                               lambda st: st.get("response") or "Manual command finished. " + str(st.get("state", "")))
 
     def companion_adjust_photo(self, field: str, value: int) -> None:
         self.set_photo_adjustment(field, value)
@@ -1291,10 +1302,14 @@ class TouchApp:
                                   "confirm_label": label, "choices": choices, "pieces": pieces,
                                   "difficulty": self.difficulty_state(),
                                   "controls": [{"id": key, "label": label} for key, (label, _callback) in self.companion_controls().items()],
-                                  "heading": ({"title": "Home gantry at e2", "detail": "Release motors, position the magnet beneath e2 by hand, then set home."}
+                                  "heading": ({"title": "Manual gantry controls", "detail": "Jog, Go to, arm, magnet and command controls. Set home beneath e2 before absolute moves."}
                                               if self.gantry_screen is not None else getattr(self, "companion_heading", {})),
                                   "photo": getattr(self, "companion_photo", None) if self.gantry_screen is None else None,
                                   "gantry": getattr(self, "gantry_readout", None),
+                                  "manual_enabled": self.companion_manual_enabled(),
+                                  "manual_settings": ({key: self.gantry.config.get(key, default) for key, default in
+                                      (("travel_speed_mm_s", 40), ("carry_speed_mm_s", 25), ("accel_mm_s2", 400))}
+                                      if isinstance(getattr(self.gantry, "config", None), dict) else None),
                                   "moves": list(session.game.san_moves) if session else []})
 
     def dispatch_companion(self) -> None:
@@ -1321,6 +1336,8 @@ class TouchApp:
                             control[1]()
                     elif kind == "corner":
                         self.companion_corner(uci)
+                    elif kind == "manual":
+                        self.companion_manual(uci)
                     elif kind == "choice" and self.session is not None:
                         chosen = next((move for move in self.session.choices if move.uci() == uci), None)
                         if chosen is not None:

@@ -16,3 +16,13 @@ input[type="range"] { width: 100%; min-height: 44px; accent-color: #d7ae61; }
 #photo-points span { position: absolute; transform: translate(-50%, -50%); border-radius: 50%; background: #edbf66; color: #122721; padding: 10px; font-size: 14px; line-height: 1; }
 aside { grid-column: 2; grid-row: 1; }
 @media(max-width:720px) { aside { grid-column: 1; grid-row: auto; } }
+#manual { margin-top: 24px; background: #16302d; border-radius: 12px; padding: 20px; }
+.manual-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+.manual-row button { width: auto; flex: 1 1 110px; font-size: 14px; padding: 12px; }
+#manual input, #manual select { border: 1px solid #729387; border-radius: 6px; padding: 10px; font: inherit; min-width: 0; max-width: 100%; background: #0c1c1b; color: #f5efdf; }
+#manual form label { display: block; margin: 8px 0; }
+#manual .jog-pad { display: grid; grid-template-columns: repeat(3, 70px); gap: 6px; justify-content: center; margin: 16px 0; }
+.jog-pad span { align-self: center; text-align: center; }
+#manual details { border-top: 1px solid #35534d; padding: 16px 0; }
+#manual summary { cursor: pointer; }
+#manual pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; font-size: 12px; }

@@ -16,6 +16,7 @@ async function send(action, extra = {}) {
 }
 function render(next) {
   if (state && state.revision === next.revision && state.pending === next.pending) return;
+  const previousPhase = state?.phase;
   state = next;
   const difficulty = next.difficulty;
   byId("difficulty").hidden = !difficulty;
@@ -35,11 +36,25 @@ function render(next) {
   byId("confirm").hidden = !["setup", "human", "remove", "computer"].includes(next.phase);
   byId("confirm").disabled = !next.can_confirm || next.pending || sending;
   byId("connection").textContent = "Connected to the Pi. All setup and game controls are available here.";
-  byId("controls").replaceChildren(...(next.controls || []).map(control => {
+  byId("controls").replaceChildren(...(next.controls || []).filter(control => next.phase !== "gantry" || control.id === "gantry_back").map(control => {
     const button = document.createElement("button"); button.textContent = control.label;
     button.disabled = next.busy || next.pending || sending;
     button.addEventListener("click", () => send("control", {value:control.id})); return button;
   }));
+  byId("manual").hidden = next.phase !== "gantry";
+  if (next.phase === "gantry" && previousPhase !== "gantry") byId("manual").scrollIntoView({block:"start"});
+  const manualReady = next.manual_enabled && !next.pending && !sending;
+  byId("manual").querySelectorAll("button, input, select").forEach(input => {
+    input.disabled = !manualReady || input.hasAttribute("data-needs-home") && !next.gantry?.homed;
+  });
+  const st = next.gantry;
+  byId("position").textContent = st ? `X ${st.x?.toFixed(2) ?? "—"} mm · Y ${st.y?.toFixed(2) ?? "—"} mm · ${st.state || "—"} · ${st.homed ? "Homed" : "Set home required"} · Arm ${st.servo || "—"} · Magnet ${st.magnet ? "ON" : "off"}` : "Connect to read position.";
+  if (st?.response) byId("command-response").textContent = st.response;
+  if (next.manual_settings && !document.activeElement.closest("#speed-form")) {
+    byId("travel-speed").value = next.manual_settings.travel_speed_mm_s;
+    byId("carry-speed").value = next.manual_settings.carry_speed_mm_s;
+    byId("accel").value = next.manual_settings.accel_mm_s2;
+  }
   const photo = next.photo;
   byId("photo-panel").hidden = !photo;
   byId("board").hidden = !!photo;
@@ -63,6 +78,7 @@ function render(next) {
   for (let rank=8; rank>=1; rank--) for (let file=0; file<8; file++) {
     const name = "abcdefgh"[file]+rank, piece=pieces[name], square=document.createElement("div");
     square.className = "square" + ((file+rank)%2 ? " dark" : "") + (piece?.color === "white" ? " white" : "");
+    square.dataset.square = name;
     square.textContent = piece?.symbol || ""; square.setAttribute("aria-label",name+(piece ? " "+piece.name : " empty"));
     const label=document.createElement("small"); label.textContent=name; square.append(label); squares.push(square);
   }
@@ -86,6 +102,22 @@ async function refresh() {
 }
 byId("confirm").addEventListener("click",()=>send("confirm"));
 byId("stop").addEventListener("click",()=>send("stop"));
+const manual = value => send("manual", {value});
+document.querySelectorAll("[data-op]").forEach(button => button.addEventListener("click", () => manual({op:button.dataset.op})));
+document.querySelectorAll("[data-jog]").forEach(button => button.addEventListener("click", () => {
+  const [dx,dy] = button.dataset.jog.split(",").map(Number), selected = byId("jog-step").value;
+  manual({op:"jog", dx,dy,step:selected === "square" ? selected : Number(selected)});
+}));
+byId("goto-form").addEventListener("submit", event => {event.preventDefault(); manual({op:"goto", place:byId("goto-place").value.trim().toLowerCase()});});
+byId("carry-form").addEventListener("submit", event => {event.preventDefault(); manual({op:event.submitter.name, uci:byId("manual-uci").value.trim().toLowerCase()});});
+byId("raw-form").addEventListener("submit", event => {event.preventDefault(); manual({op:"raw", line:byId("raw-command").value.trim()});});
+byId("speed-form").addEventListener("submit", event => {
+  event.preventDefault(); manual({op:"settings", travel_speed_mm_s:Number(byId("travel-speed").value), carry_speed_mm_s:Number(byId("carry-speed").value), accel_mm_s2:Number(byId("accel").value)});
+});
+byId("board").addEventListener("click", event => {
+  const square = event.target.closest("[data-square]");
+  if (square && state?.phase === "gantry" && state.manual_enabled && state.gantry?.homed && !state.pending) manual({op:"goto", place:square.dataset.square});
+});
 byId("rating").addEventListener("input", event => {
   editingRating = true; byId("rating-value").textContent = event.target.value;
 });

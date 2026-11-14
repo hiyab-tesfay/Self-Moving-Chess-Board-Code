@@ -12,6 +12,7 @@ from pathlib import Path
 import queue
 import threading
 from urllib.parse import urlsplit
+from manual_controls import valid_manual
 
 ASSETS = Path(__file__).resolve().parent / "frontend/camera-game"
 
@@ -67,6 +68,8 @@ class CompanionBridge:
                 allowed = (bool((self.state.get("photo") or {}).get("clickable")) and
                            isinstance(uci, list) and len(uci) == 2 and
                            all(type(value) in (int, float) and 0 <= value < 1 for value in uci))
+            elif action == "manual":
+                allowed = bool(self.state.get("manual_enabled")) and valid_manual(uci)
             else:
                 allowed = False
             if not allowed:
@@ -133,7 +136,7 @@ class CompanionServer:
                         (origin and urlsplit(origin).netloc != self.headers.get("Host"))):
                     self.reply(403, b'{"error":"Use the camera chess page to confirm a move."}')
                     return
-                if self.path not in ("/api/confirm", "/api/choice", "/api/stop", "/api/rating", "/api/control", "/api/corner"):
+                if self.path not in ("/api/confirm", "/api/choice", "/api/stop", "/api/rating", "/api/control", "/api/corner", "/api/manual"):
                     self.reply(404, b'{}')
                     return
                 try:
@@ -144,7 +147,7 @@ class CompanionServer:
                     accepted = bridge.submit(self.path.rsplit("/", 1)[1],
                                              int(body.get("revision", -1)),
                                              body.get("rating") if self.path == "/api/rating" else
-                                             body.get("value") if self.path in ("/api/control", "/api/corner") else body.get("uci"))
+                                             body.get("value") if self.path in ("/api/control", "/api/corner", "/api/manual") else body.get("uci"))
                 except (ValueError, TypeError, AttributeError):
                     self.reply(400, b'{"error":"Invalid confirmation."}')
                     return

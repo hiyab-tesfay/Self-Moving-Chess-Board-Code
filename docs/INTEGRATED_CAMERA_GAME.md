@@ -97,6 +97,18 @@ gantry control to the Wi-Fi network directly. Do not bind it publicly.
 
 ## Motion ownership and recovery
 
+The laptop's **Manual gantry controls / Home e2** panel provides connection,
+position readout, unlock, motors off, explicit e2 home, forget position,
+1/5/10/50 mm or one-square jogs (including diagonals), Go to a square/slot/board
+coordinate, arm up/down, magnet on/off, return home, go to/save start, explicit
+bump homing, manual path trace/carry, motion speed/acceleration settings, and
+a single-line command console. Clicking a board square in this panel commands
+empty travel to that square. In game mode the board remains read-only.
+Manual operations are queued only between games, never alongside a bot move.
+Releasing motors, reconnecting, forgetting position or changing the coordinate
+reference requires explicitly setting home beneath e2 again. Bump homing does
+not establish the e2 reference. No home is set merely by opening the panel.
+
 When switching a Pi from the manual dashboard permanently, stop and disable
 `zain-gantry.service` while it is idle, then install this launcher's desktop
 autostart. The manual dashboard is a separate program: pushing this branch

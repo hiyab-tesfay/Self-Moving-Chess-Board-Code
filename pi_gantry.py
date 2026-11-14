@@ -48,6 +48,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+from manual_controls import valid_manual
 
 import chess
 
@@ -482,6 +483,79 @@ class GantryPlayer:
         """One square along X (files) and along Y (ranks), mm: the jog pad's "1 square"."""
         board = self.gd.BoardMap(self.config)
         return board.square, board.square_y
+
+    def manual_command(self, value: dict) -> dict:
+        """Explicit maintenance commands. Never called by camera/game move handling."""
+        if not valid_manual(value):
+            raise GantryError("Invalid manual gantry command.")
+        op = value["op"]
+        if op == "disconnect":
+            self.close()
+            return {"connected": False, "homed": False, "state": "Disconnected", "response": "Disconnected"}
+        if op in ("connect", "status"):
+            return dict(self.status(), connected=True)
+        if op == "home":
+            return self.set_home_here()
+        if op == "motors_off":
+            return self.motors_off()
+        if op in ("arm_up", "arm_down"):
+            return self.arm(op == "arm_up")
+        if op == "jog":
+            sx, sy = self.square_size_mm() if value["step"] == "square" else (value["step"], value["step"])
+            return self.jog(value["dx"] * sx, value["dy"] * sy)
+        if op == "return_home":
+            return self.return_home()
+        if op == "start":
+            return self.center()
+        if op == "save_start":
+            return self.set_start_here()
+        if op in ("trace", "carry"):
+            src, dst = value["uci"][:2], value["uci"][2:]
+            if src not in self.layout.pieces or dst in self.layout.pieces:
+                raise GantryError("Manual carry needs a piece on FROM and an empty TO square.")
+            result = self.test_move(value["uci"], op == "carry", occupied=set(self.layout.pieces))
+            if op == "carry":
+                self.layout.pieces[dst] = self.layout.pieces.pop(src)
+            return result
+
+        def work(gantry):
+            if op == "settings":
+                self._save({key: setting for key, setting in value.items() if key != "op"})
+                gantry.set_motion(self.config)
+                return dict(self._report(gantry.status()), response="Motion settings saved.")
+            if op == "goto":
+                st = self._usable(gantry.status(), homed=True)
+                x, y = self.gd.BoardMap(self.config).place_mm(value["place"])
+                return self._move(gantry, st, x, y, "manual Go to")
+            if op == "forget":
+                self.manual_home_ready = False
+                return dict(self._report(gantry.status()), response="Position forgotten. Set home beneath e2 again.")
+            line = {"unlock": "$X", "bump_home": "$H", "magnet_on": "M3", "magnet_off": "M5"}.get(op, value.get("line", ""))
+            if line == "?":
+                return self._report(gantry.status())
+            if line in ("!", "~"):
+                self.link.write(line)
+                self.manual_home_ready = False
+                return self._report(gantry.status())
+            moving = line.startswith(("G0", "G1", "G2", "G3")) and not line.startswith("G92")
+            if moving:
+                self._usable(gantry.status(), homed=True)
+            if line.startswith(("$H", "G92", "$100", "$101", "$102", "$RST", "M18")):
+                self.manual_home_ready = False
+            notes = []
+            original_note = gantry.note
+            def capture_note(text):
+                notes.append(text)
+                original_note(text)
+            gantry.note = capture_note
+            try:
+                gantry.command(line)
+                if moving or line.startswith(("$H", "G4")):
+                    gantry.wait_idle(120, "manual command")
+            finally:
+                gantry.note = original_note
+            return dict(self._report(gantry.status()), response="\n".join(notes) or f"Sent {line}")
+        return self._manual(work)
 
     # manual control, inside
 
