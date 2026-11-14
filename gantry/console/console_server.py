@@ -96,6 +96,10 @@ class Stopped(Exception):
     pass
 
 
+class JogRejected(gd.GantryError):
+    """A manual target was rejected before sending motion; preserve arm and magnet."""
+
+
 class CameraFailed(gd.GantryError):
     """The camera could not find the check piece or token (camera_locate.LocateError), or it did something the
     camera check cannot use; the message is plain words for the page."""
@@ -611,6 +615,10 @@ class Console:
                     fn(*args)
             except Stopped:
                 self.say("warn", f"{name}: stopped")
+            except JogRejected as exc:
+                with self.lock:
+                    self.jog_queue.clear()
+                self.say("warn", f"{name}: {exc}")
             except gd.GantryError as exc:
                 self.say("error", f"{name}: {exc}")
                 self._safe()
@@ -1268,25 +1276,27 @@ class Console:
         return self.settings["carry_speed"] if up else self.settings["travel_speed"]
 
     def _jog(self, dx: float, dy: float) -> None:
-        st = self.require(homed=False)
-        speed = self.manual_speed()   # the arm stays as it is: up stays up
         todo = [(dx, dy)]
         while todo:
+            st = self.require(homed=False)
+            speed = self.settings["carry_speed"] if st.get("servo") == "up" else self.settings["travel_speed"]
+            if not st["homed"] or self.position_lost:
+                speed = min(speed, float(self.config.get("unhomed_jog_speed_mm_s", 15)))
             dx, dy = todo.pop(0)
             hx, hy = self.here()
-            if not st["homed"]:
-                if dx < 0 or dy < 0:
-                    raise gd.GantryError("Not homed: the board only jogs in +X and +Y until it is homed")
-                if st["state"] == "Alarm":
-                    self.cmd("$X")
-                    st = self.query_status()
             tx, ty = hx + dx, hy + dy
             # Home reads a step's fraction past the edge (Y 420.08 with home beside a8): within 1 mm, the edge itself.
             if -1.0 < tx < 0.0: tx = 0.0
             if -1.0 < ty < 0.0: ty = 0.0
             if self.map.travel[0] < tx < self.map.travel[0] + 1.0: tx = self.map.travel[0]
             if self.map.travel[1] < ty < self.map.travel[1] + 1.0: ty = self.map.travel[1]
-            self.move_to(tx, ty, speed, "jog")
+            try:
+                self.map.check(tx, ty, "jog")
+            except gd.GantryError as exc:
+                raise JogRejected(str(exc)) from None
+            if st["state"] == "Alarm":
+                self.cmd("$X")
+            self.move_to(tx, ty, speed, "jog", carrying=st.get("servo") == "up")
             with self.lock:
                 todo += self.jog_queue
                 self.jog_queue.clear()
