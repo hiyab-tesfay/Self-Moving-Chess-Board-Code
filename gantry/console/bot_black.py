@@ -44,8 +44,11 @@ class BlackBot:
                 return
             if c.task or c.pending or c.preview:
                 raise ValueError("Finish the current gantry operation before requesting Black's move.")
-            c.require(homed=True)
             board = c.game.copy(stack=True)
+        c.require(homed=True)
+        with c.lock:
+            if not self.enabled or c.task or c.pending or c.preview or c.game.fen() != board.fen():
+                raise ValueError("The position changed while checking the gantry; request Black's move again.")
             rating = self.rating
             self.error = ""
             c.start("Black bot is thinking", self._reply, board, rating)

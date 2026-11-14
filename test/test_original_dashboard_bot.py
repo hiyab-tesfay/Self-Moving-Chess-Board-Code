@@ -61,6 +61,14 @@ class OriginalDashboardBotTests(unittest.TestCase):
         self.player.choose_rated_move.assert_not_called()
         self.c._run_job.assert_not_called()
 
+    def test_serial_checks_never_hold_the_state_lock_needed_by_the_poller(self):
+        def require(**_kwargs):
+            self.assertFalse(self.c.lock._is_owned(), 'serial I/O under the state lock can deadlock the poller')
+        self.c.require.side_effect = require
+        preview = self.c.plan_move('e2', 'e4', None, 'chess')
+        self.handler._auto(preview)
+        self.assertEqual(len(self.jobs), 1)
+
     def test_black_cannot_be_selected_by_human_chess_endpoint(self):
         self.c.game.push_uci('e2e4')
         with self.assertRaisesRegex(cs.gd.GantryError, 'controlled by the bot'):

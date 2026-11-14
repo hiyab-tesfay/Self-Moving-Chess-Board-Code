@@ -943,6 +943,10 @@ class Console:
         return text
 
     def plan_move(self, src: str, dst: str, promotion: str | None, mode: str, *, bot_move: bool = False) -> dict:
+        # The poller takes the serial lock before updating console state. Never
+        # wait for serial I/O while holding the state lock in the opposite order.
+        if self.bot is not None and not bot_move and mode == "chess":
+            self.require(homed=True)
         with self.lock:
             if self.task and not bot_move:
                 raise Busy(f"busy: {self.task['name']}")
@@ -954,7 +958,6 @@ class Console:
                         raise gd.GantryError("Resume the Black bot before recording White's move.")
                     if self.game.turn != chess.WHITE:
                         raise gd.GantryError("Black is controlled by the bot. Use Play Black reply.")
-                    self.require(homed=True)
                 elif self.bot.enabled:
                     raise gd.GantryError("Pause the bot before using Free carry.")
             if self.pending:
