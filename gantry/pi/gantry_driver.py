@@ -978,7 +978,16 @@ def set_home_here(target, config: dict) -> dict:
     if home_spot_mm(config):
         gantry.command(f"G92 X{x:.3f} Y{y:.3f}")
     state = gantry.status()
-    if not state["homed"] or abs(state["x"] - x) > RESTORE_TOL_MM or abs(state["y"] - y) > RESTORE_TOL_MM:
+    # G92 rounds millimetres to integer motor steps. A full-step board at
+    # 5.17 steps/mm can differ by 0.097 mm without moving or losing its home.
+    # Include G92/status decimal serialization, while rejecting larger errors.
+    steps_per_mm = getattr(gantry.link, "steps_per_mm", None)
+    if steps_per_mm is None:
+        steps_per_mm = board_layout.steps_per_mm(config)
+    if not math.isfinite(float(steps_per_mm)) or float(steps_per_mm) <= 0:
+        raise GantryError("Cannot verify home: invalid motor steps per millimetre.")
+    tolerance = max(RESTORE_TOL_MM, 0.5 / float(steps_per_mm) + 0.002)
+    if not state["homed"] or abs(state["x"] - x) > tolerance or abs(state["y"] - y) > tolerance:
         raise GantryError(f"Homing here did not take: the board reports {state['x']:.2f}, {state['y']:.2f}, "
                           f"not {x:.2f}, {y:.2f}.")
     return state
