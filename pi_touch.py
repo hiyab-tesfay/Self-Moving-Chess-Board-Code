@@ -11,6 +11,7 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import chess
 import cv2
@@ -1008,7 +1009,8 @@ class TouchApp:
         self.bot_rating = 1500
         self.busy = False
         self.selected_square: str | None = None
-        self.message = "Welcome. Tap Play Chess to begin."
+        self.message = ("Home the gantry at e2, then start your game from either display."
+                        if getattr(args, "standalone", False) else "Welcome. Tap Play Chess to begin.")
         self.message_color = self.MUTED
         # The gantry (pi_gantry, when CHESS_GANTRY_PORT is set) is opened at the first game and closed with the app.
         self.gantry = None
@@ -1128,6 +1130,7 @@ class TouchApp:
         )
 
     def heading(self, title: str, detail: str = "") -> None:
+        self.companion_heading = {"title": title, "detail": detail}
         tk.Label(self.panel, text=title, bg=self.PANEL, fg=self.TEXT,
                  font=("DejaVu Sans", 12 if self.compact else 16, "bold"),
                  anchor="w", justify="left", wraplength=self.panel_width - 48).pack(fill="x", pady=(0, 8))
@@ -1163,12 +1166,105 @@ class TouchApp:
         self.say("Stopped. Check the physical board before continuing.", self.RED)
         self.render()
 
+    def companion_controls(self) -> dict:
+        """Offer only operations valid in the current UI state; run them on Tk's thread."""
+        if self.busy:
+            return {}
+        if self.gantry_screen is not None:
+            controls = {"gantry_back": ("Back to game setup", self.close_gantry_panel)}
+            if self.gantry is not None:
+                controls.update({"motors_off": ("Release motors for manual positioning", self.gantry_motors_off),
+                                 "home_e2": ("Magnet is beneath e2 — Set home", self.gantry_set_home)})
+                if (getattr(self, "gantry_readout", None) or {}).get("homed"):
+                    for key, label, dx, dy in (("up", "Toward rank 8 · 5 mm", 0, 1),
+                                               ("down", "Toward rank 1 · 5 mm", 0, -1),
+                                               ("left", "Toward a-file · 5 mm", -1, 0),
+                                               ("right", "Toward h-file · 5 mm", 1, 0)):
+                        controls["jog_" + key] = (label, lambda x=dx, y=dy: self.companion_jog(x, y))
+            return controls
+        if self.confirming_end:
+            return {"keep_playing": ("Keep playing", self.cancel_end_game),
+                    "end_game": ("End game", self.end_game)}
+        if self.confirming_new_game:
+            return {"keep_playing": ("Keep playing", self.cancel_new_game),
+                    "new_game": ("Start new game", self.back_to_menu)}
+        flow = self.calibration_flow
+        if flow is not None:
+            controls = {"cancel_calibration": ("Cancel calibration", self.cancel_calibration)}
+            if flow.stage == "empty":
+                controls["empty_photo"] = ("Take empty-board photo", self.capture_empty)
+                if self.saved_calibration_available():
+                    controls["saved_calibration"] = ("Use saved calibration", self.use_saved_calibration)
+            elif flow.stage in ("starting", "setup_only"):
+                controls["setup_photo"] = ("Take starting-position photo", self.capture_starting)
+            elif flow.stage in ("empty_corners", "starting_corners"):
+                controls["undo_corner"] = ("Undo corner", self.undo_corner)
+            elif flow.stage == "ready":
+                controls["save_calibration"] = ("Check and save calibration", self.finish_calibration)
+                controls["redo_corners"] = ("Redo setup corners", self.redo_starting_corners)
+                controls["retake_setup"] = ("Retake setup photo", self.retake_starting)
+                for field, minimum, maximum in (("brightness", -60, 60), ("contrast", 70, 160), ("warmth", -40, 40)):
+                    current = getattr(self.photo_adjustments, field)
+                    for delta in (-10, 10):
+                        value = current + delta
+                        if minimum <= value <= maximum:
+                            controls[f"{field}_{delta}"] = (f"{field.title()} {'+' if delta > 0 else '−'}",
+                                lambda name=field, setting=value: self.companion_adjust_photo(name, setting))
+            else:
+                return {"calibration_done": ("Continue to game setup", self.continue_after_calibration)}
+            if flow.stage in ("starting_corners", "ready"):
+                controls["rotate"] = ("Rotate photo 90°", self.cycle_setup_rotation)
+                controls["flip"] = ("Flip photo 180°", self.flip_setup_rotation)
+            return controls
+        if self.session is None:
+            return {"gantry": ("1. Home gantry at e2", self.open_gantry_panel),
+                    "calibrate": ("Camera calibration", self.open_board_setup),
+                    "start_game": ("Start game with saved calibration", self.start_game)}
+        if getattr(self, "halted", False) or self.session.phase == "finished":
+            return {"new_game": ("New game", self.back_to_menu)}
+        controls = {"end_game": ("End game", self.request_end_game)}
+        if self.scan_photo is not None:
+            controls["retake_scan"] = ("Retake move photo", self.retake_scan)
+            controls["redo_scan"] = ("Adjust photo corners", self.redo_scan_corners)
+            if len(self.scan_corners) < 4:
+                controls["undo_scan"] = ("Undo corner", self.undo_scan_corner)
+                if self.last_scan_corners is not None:
+                    controls["saved_corners"] = ("Use saved corners", self.use_saved_scan_corners)
+            else:
+                controls["check_photo"] = ("Check photo", self.process_scan_photo)
+        if getattr(self, "capture_error", None):
+            controls["retry_camera"] = ("Try camera again", self.scan)
+        if self.session.phase == "thinking":
+            controls["retry_engine"] = ("Retry bot move", self.request_computer_move)
+        return controls
+
+    def companion_jog(self, x: int, y: int) -> None:
+        self.gantry_step = "5"
+        self.gantry_jog(x, y)
+
+    def companion_adjust_photo(self, field: str, value: int) -> None:
+        self.set_photo_adjustment(field, value)
+        self.render()
+
+    def companion_corner(self, point) -> None:
+        photo = getattr(self, "companion_photo", None)
+        if photo is None or not photo["clickable"] or self.preview_geometry is None:
+            return
+        left, top, scale = self.preview_geometry
+        event = SimpleNamespace(x=left + point[0] * photo["width"] * scale,
+                                y=top + point[1] * photo["height"] * scale)
+        if self.calibration_flow is not None:
+            self.tap_calibration_corner(event)
+        else:
+            self.tap_scan_corner(event)
+
     def publish_companion(self) -> None:
         companion = getattr(self, "companion", None)
         if companion is None:
             return
         session = self.session
-        phase = session.phase if session is not None else "menu"
+        phase = ("gantry" if self.gantry_screen is not None else "calibration" if self.calibration_flow is not None
+                 else session.phase if session is not None else "menu")
         available = (session is not None and not self.busy and not getattr(self, "halted", False) and
                      self.gantry_screen is None and
                      self.calibration_flow is None and not self.confirming_end and
@@ -1194,6 +1290,11 @@ class TouchApp:
                                   "can_confirm": bool(available and phase in labels),
                                   "confirm_label": label, "choices": choices, "pieces": pieces,
                                   "difficulty": self.difficulty_state(),
+                                  "controls": [{"id": key, "label": label} for key, (label, _callback) in self.companion_controls().items()],
+                                  "heading": ({"title": "Home gantry at e2", "detail": "Release motors, position the magnet beneath e2 by hand, then set home."}
+                                              if self.gantry_screen is not None else getattr(self, "companion_heading", {})),
+                                  "photo": getattr(self, "companion_photo", None) if self.gantry_screen is None else None,
+                                  "gantry": getattr(self, "gantry_readout", None),
                                   "moves": list(session.game.san_moves) if session else []})
 
     def dispatch_companion(self) -> None:
@@ -1214,6 +1315,12 @@ class TouchApp:
                         self.confirm_move()
                     elif kind == "rating":
                         self.set_bot_rating(uci)
+                    elif kind == "control":
+                        control = self.companion_controls().get(uci)
+                        if control is not None:
+                            control[1]()
+                    elif kind == "corner":
+                        self.companion_corner(uci)
                     elif kind == "choice" and self.session is not None:
                         chosen = next((move for move in self.session.choices if move.uci() == uci), None)
                         if chosen is not None:
@@ -2752,6 +2859,14 @@ class TouchApp:
         top = (available_height - display_height) / 2
         canvas.create_image(left, top, image=self.preview_photo, anchor="nw")
         self.preview_geometry = None if aligned_preview is not None else (left, top, scale)
+        companion = getattr(self, "companion", None)
+        if companion is not None:
+            photo_id = companion.bridge.publish_photo(encoded.tobytes())
+            clickable = (flow is not None and flow.stage in ("empty_corners", "starting_corners") or
+                         flow is None and len(self.scan_corners) < 4)
+            self.companion_photo = {"url": f"/api/photo?id={photo_id}", "width": width, "height": height,
+                                    "clickable": bool(clickable and not self.busy),
+                                    "points": [[x / width, y / height] for x, y in points] if aligned_preview is None else []}
         if aligned_preview is None:
             for index, (x, y) in enumerate(points):
                 px, py = left + x * scale, top + y * scale
@@ -2836,6 +2951,7 @@ class TouchApp:
         return (width - size) / 2, (height - size) / 2, size, square_size
 
     def draw_board(self) -> None:
+        self.companion_photo = None
         if getattr(self, "welcome_screen", False) and self.calibration_flow is None:
             self.draw_welcome()
             return

@@ -5,3 +5,14 @@
 .square small { text-shadow: none; }
 @media (max-width: 720px) { .board { max-width: none; } }
 input[type="range"] { width: 100%; min-height: 44px; accent-color: #d7ae61; }
+[hidden] { display: none !important; }
+#controls { display: grid; gap: 10px; margin-top: 16px; }
+#controls button { font-size: 15px; background: #294943; color: #f5efdf; }
+#photo-panel { margin-top: 24px; }
+#photo-frame { position: relative; line-height: 0; }
+#photo { width: 100%; height: auto; display: block; }
+#photo.selecting { cursor: crosshair; }
+#photo-points { position: absolute; inset: 0; pointer-events: none; }
+#photo-points span { position: absolute; transform: translate(-50%, -50%); border-radius: 50%; background: #edbf66; color: #122721; padding: 10px; font-size: 14px; line-height: 1; }
+aside { grid-column: 2; grid-row: 1; }
+@media(max-width:720px) { aside { grid-column: 1; grid-row: auto; } }

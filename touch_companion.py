@@ -6,6 +6,7 @@ Listen on loopback; a laptop reaches this through the existing SSH tunnel.
 from __future__ import annotations
 
 import json
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import queue
@@ -23,6 +24,16 @@ class CompanionBridge:
         self.pending = False
         self.revision = 0
         self.state: dict = {}
+        self.photo = b""
+
+    def publish_photo(self, photo: bytes) -> str:
+        with self.lock:
+            self.photo = photo
+        return hashlib.sha256(photo).hexdigest()[:16]
+
+    def read_photo(self) -> bytes:
+        with self.lock:
+            return self.photo
 
     def publish(self, state: dict) -> None:
         copy = json.loads(json.dumps(state))
@@ -50,6 +61,12 @@ class CompanionBridge:
                 settings = self.state.get("difficulty") or {}
                 allowed = (settings.get("enabled", False) and type(uci) is int and
                            settings["min"] <= uci <= settings["max"])
+            elif action == "control":
+                allowed = isinstance(uci, str) and uci in {item["id"] for item in self.state.get("controls", [])}
+            elif action == "corner":
+                allowed = (bool((self.state.get("photo") or {}).get("clickable")) and
+                           isinstance(uci, list) and len(uci) == 2 and
+                           all(type(value) in (int, float) and 0 <= value < 1 for value in uci))
             else:
                 allowed = False
             if not allowed:
@@ -95,6 +112,10 @@ class CompanionServer:
                 if self.path == "/api/state":
                     self.reply(200, json.dumps(bridge.snapshot()).encode())
                     return
+                if urlsplit(self.path).path == "/api/photo":
+                    photo = bridge.read_photo()
+                    self.reply(200 if photo else 404, photo, "image/png")
+                    return
                 files = {"/": ("index.html", "text/html; charset=utf-8"),
                          "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                          "/style.css": ("style.css", "text/css; charset=utf-8")}
@@ -112,7 +133,7 @@ class CompanionServer:
                         (origin and urlsplit(origin).netloc != self.headers.get("Host"))):
                     self.reply(403, b'{"error":"Use the camera chess page to confirm a move."}')
                     return
-                if self.path not in ("/api/confirm", "/api/choice", "/api/stop", "/api/rating"):
+                if self.path not in ("/api/confirm", "/api/choice", "/api/stop", "/api/rating", "/api/control", "/api/corner"):
                     self.reply(404, b'{}')
                     return
                 try:
@@ -122,7 +143,8 @@ class CompanionServer:
                     body = json.loads(self.rfile.read(size))
                     accepted = bridge.submit(self.path.rsplit("/", 1)[1],
                                              int(body.get("revision", -1)),
-                                             body.get("rating") if self.path == "/api/rating" else body.get("uci"))
+                                             body.get("rating") if self.path == "/api/rating" else
+                                             body.get("value") if self.path in ("/api/control", "/api/corner") else body.get("uci"))
                 except (ValueError, TypeError, AttributeError):
                     self.reply(400, b'{"error":"Invalid confirmation."}')
                     return

@@ -28,11 +28,30 @@ function render(next) {
       byId("rating-value").textContent = difficulty.rating;
     }
   }
-  byId("phase").textContent = next.busy ? "Checking or moving…" : titles[next.phase] || "Set up on the Pi touchscreen";
-  byId("message").textContent = next.message || "Home the gantry at e2, calibrate the camera, and start a game on the touchscreen.";
+  byId("phase").textContent = next.busy ? "Checking or moving…" : next.phase === "stopped" ? titles.stopped : next.heading?.title || titles[next.phase] || "Set up your game";
+  byId("detail").textContent = next.heading?.detail || "";
+  byId("message").textContent = next.message || "Home the gantry at e2, then start your game here.";
   byId("confirm").textContent = next.confirm_label || "Confirm move";
+  byId("confirm").hidden = !["setup", "human", "remove", "computer"].includes(next.phase);
   byId("confirm").disabled = !next.can_confirm || next.pending || sending;
-  byId("connection").textContent = "Connected to the same game as the Pi touchscreen.";
+  byId("connection").textContent = "Connected to the Pi. All setup and game controls are available here.";
+  byId("controls").replaceChildren(...(next.controls || []).map(control => {
+    const button = document.createElement("button"); button.textContent = control.label;
+    button.disabled = next.busy || next.pending || sending;
+    button.addEventListener("click", () => send("control", {value:control.id})); return button;
+  }));
+  const photo = next.photo;
+  byId("photo-panel").hidden = !photo;
+  byId("board").hidden = !!photo;
+  if (photo) {
+    if (byId("photo").getAttribute("src") !== photo.url) byId("photo").src = photo.url;
+    byId("photo-help").textContent = photo.clickable ? "Click the next board corner shown in the instructions. Exclude the wooden border." : "Check the camera photo and follow the instructions.";
+    byId("photo").classList.toggle("selecting", photo.clickable && !next.pending && !next.busy);
+    byId("photo-points").replaceChildren(...(photo.points || []).map(([x,y], index) => {
+      const dot = document.createElement("span"); dot.style.left = `${100*x}%`; dot.style.top = `${100*y}%`;
+      dot.textContent = index+1; return dot;
+    }));
+  }
   byId("moves").textContent = next.moves?.join("  ") || "No moves yet.";
   byId("choices").replaceChildren(...(next.choices || []).map(choice => {
     const button = document.createElement("button"); button.textContent = choice.label;
@@ -59,7 +78,7 @@ async function refresh() {
     if(next.mode !== "camera-game") {
       state=null; byId("rating").disabled=true; byId("confirm").disabled=true;
       byId("phase").textContent="Camera game is closed";
-      byId("connection").textContent="Open Camera Chess on the Pi touchscreen. Refresh this page to use the manual dashboard instead.";
+      byId("connection").textContent="The integrated chess service is unavailable. Reconnect to the Pi.";
     } else render(next);
   }
   catch (_) { state=null; byId("rating").disabled=true; byId("confirm").disabled=true; byId("connection").textContent="Pi connection unavailable. The game stays on the Pi."; }
@@ -72,5 +91,11 @@ byId("rating").addEventListener("input", event => {
 });
 byId("rating").addEventListener("change", event => {
   editingRating = false; send("rating", {rating:Number(event.target.value)});
+});
+byId("photo").addEventListener("click", event => {
+  if (!state?.photo?.clickable || state.busy || state.pending) return;
+  const rect = event.target.getBoundingClientRect();
+  const x = (event.clientX-rect.left)/rect.width, y = (event.clientY-rect.top)/rect.height;
+  if (x >= 0 && x < 1 && y >= 0 && y < 1) send("corner", {value:[x,y]});
 });
 refresh(); setInterval(refresh,700);

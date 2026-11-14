@@ -3,12 +3,15 @@
 <title>Physical Chess · Camera game</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body><main><header><span>PHYSICAL CHESS</span><button id="stop" class="stop">Stop gantry</button></header>
 <section class="layout"><div><h1>Play on the board.</h1><p>You move White. The gantry moves Black.</p>
-<div id="board" class="board" aria-label="Current verified chess position"></div><p id="moves" class="muted">No moves yet.</p></div>
+<div id="board" class="board" aria-label="Current verified chess position"></div><p id="moves" class="muted">No moves yet.</p>
+<div id="photo-panel" hidden><p id="photo-help">Camera photo</p><div id="photo-frame"><img id="photo" alt="Board camera photo for calibration and move checks"><div id="photo-points"></div></div></div>
+</div>
 <aside><span class="eyebrow">CAMERA + GANTRY</span><h2 id="phase">Connecting to the Pi…</h2>
-<p id="message" role="status">Start the game and calibrate the board on the Pi touchscreen.</p>
+<p id="detail"></p><p id="message" role="status">Connect to the Pi to set up and start your game here.</p>
 <button id="confirm" disabled>Confirm move</button><div id="choices"></div>
+<div id="controls"></div>
 <section id="difficulty" hidden><label for="rating">Black bot · target <output id="rating-value">1500</output> Elo</label>
 <input id="rating" type="range" step="1" disabled aria-describedby="rating-note">
 <p id="rating-note" class="muted">Approximate strength. Changes apply to the next Black move.</p></section>
-<p id="connection" class="muted">Waiting for the touchscreen.</p>
+<p id="connection" class="muted">Connecting to the Pi.</p>
 <p class="muted">Move the physical piece, remove your hands, then press Confirm here or on the touchscreen. The camera checks the position before play continues.</p></aside></section></main></body></html>

@@ -61,6 +61,16 @@ calibration still require checks with the actual board and camera.
 
 ## Optional laptop Confirm button
 
+The laptop page also offers the complete setup flow: open gantry controls,
+release motors, position the magnet beneath e2 and explicitly set home; then
+start with saved camera calibration or take new empty/setup photos. Click the
+four playing-area corners on the displayed photo when requested, rotate the
+setup view, adjust the image and save. Move verification, recovery photos,
+promotions, difficulty, ending games and starting another game are available
+there too. No touchscreen interaction is required. The Pi still runs the
+single session and owns the hardware. Repeated and stale setup commands are
+rejected through the same queue as move confirmations.
+
 White is always moved by the human; recording White's move does not command
 the gantry. Stockfish chooses Black's replies and the gantry carries them.
 After starting a game, use **Black bot · target Elo** on the touchscreen or
