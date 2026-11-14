@@ -182,6 +182,7 @@ class Console:
         self.waiting: dict | None = None
         self.stop_flag = threading.Event()
         self.game = chess.Board()
+        self.bot = None
         self.layout = self.new_layout()
         self.history: list[dict] = []
         self.jog_queue: list[tuple[float, float]] = []
@@ -933,10 +934,21 @@ class Console:
             text = f"Capture: {text[0].lower()}{text[1:]}"
         return text
 
-    def plan_move(self, src: str, dst: str, promotion: str | None, mode: str) -> dict:
+    def plan_move(self, src: str, dst: str, promotion: str | None, mode: str, *, bot_move: bool = False) -> dict:
         with self.lock:
-            if self.task:
+            if self.task and not bot_move:
                 raise Busy(f"busy: {self.task['name']}")
+            if bot_move and (self.bot is None or not self.bot.enabled or self.game.turn != chess.BLACK or mode != "chess"):
+                raise gd.GantryError("Only the bot can request a Black chess move.")
+            if self.bot is not None and not bot_move:
+                if mode == "chess":
+                    if not self.bot.enabled:
+                        raise gd.GantryError("Resume the Black bot before recording White's move.")
+                    if self.game.turn != chess.WHITE:
+                        raise gd.GantryError("Black is controlled by the bot. Use Play Black reply.")
+                    self.require(homed=True)
+                elif self.bot.enabled:
+                    raise gd.GantryError("Pause the bot before using Free carry.")
             if self.pending:
                 raise Busy("a move stopped part-way: choose Retry, Pieces as before, or Finished by hand first")
             before = self.layout.copy()
@@ -964,8 +976,9 @@ class Console:
                 if src not in after.pieces:
                     raise gd.GantryError(f"the console has no piece on {src} (the board layout and the game disagree; "
                                          "use Free mode or New game)")
-                manual_black = self.config.get("manual_black_moves", False) and self.game.turn == chess.BLACK
-                if manual_black:
+                manual_black = self.bot is None and self.config.get("manual_black_moves", False) and self.game.turn == chess.BLACK
+                manual_white = self.bot is not None and self.game.turn == chess.WHITE
+                if manual_black or manual_white:
                     after.apply_human(self.game, move)
                     steps = []
                 else:
@@ -976,7 +989,7 @@ class Console:
                 san = self.game.san(move)
                 game_after.push(move)
                 label = move.uci()
-                extra = {"san": san, "uci": move.uci(), "manual_only": bool(manual_black)}
+                extra = {"san": san, "uci": move.uci(), "manual_only": bool(manual_black or manual_white)}
             try:
                 preview = self.make_preview("free" if mode == "free" else "move", label, steps, before, after, game_after, extra)
             except gd.GantryError as exc:
@@ -1986,6 +1999,7 @@ class Console:
                              "mm_per_turn": bl.mm_per_turn(self.config), "steps_per_mm": round(bl.steps_per_mm(self.config), 5),
                              "start_mm": self.start_mm()},
                 "camera_cal": self.camera_cal_view(),
+                "bot": self.bot.view() if self.bot is not None else None,
                 "log": [e for e in self.log if e["id"] > since], "log_id": self.log_id,
             }
 
@@ -2046,6 +2060,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         c = self.console
         routes = {
+            "/api/bot-config": lambda b: c.bot.configure(b) if c.bot is not None else {"error": "Bot mode is not running"},
+            "/api/bot-reply": lambda b: c.bot.reply() if c.bot is not None else None,
             "/api/connect": lambda b: c.connect(str(b.get("port") or "")),
             "/api/disconnect": lambda b: c.disconnect(),
             "/api/stop": lambda b: c.stop(),
@@ -2116,6 +2132,8 @@ class Handler(BaseHTTPRequestHandler):
         if preview.get("manual_only", False):
             c.run_preview(by_hand=True)
             ran = True
+            if c.bot is not None and preview["kind"] == "move":
+                c.bot.reply()
         elif allowed and c.settings["auto_run"] and c.link is not None:
             c.run_preview()
             ran = True
@@ -2128,10 +2146,14 @@ def main(argv=None) -> int:
     parser.add_argument("--http", type=int, default=8788, help="the page's port on this computer (default 8788)")
     parser.add_argument("--config", type=Path, default=gd.DEFAULT_CONFIG)
     parser.add_argument("--sim-speed", type=float, default=1.0, help="how much faster than real the pretend board runs")
+    parser.add_argument("--bot-black", action="store_true", help="Human White by hand; local Stockfish and gantry play Black")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("link").setLevel(logging.WARNING)
     console = Console(gd.load_config(args.config), args.sim_speed, args.config)
+    if args.bot_black:
+        from bot_black import BlackBot
+        console.bot = BlackBot(console)
     Handler.console = console
     server = ThreadingHTTPServer(("127.0.0.1", args.http), Handler)
     server.daemon_threads = True
@@ -2143,6 +2165,8 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if console.bot is not None:
+            console.bot.close()
         console.stop() if console.task else None
         if console.link is not None:
             try:

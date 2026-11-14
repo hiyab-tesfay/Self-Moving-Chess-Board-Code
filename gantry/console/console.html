@@ -133,6 +133,14 @@
   <section>
     <div class="panel">
       <h2>Play</h2>
+      <div id="botpanel" style="display:none">
+        <div class="banner info"><b>You move White by hand. The bot and gantry play Black.</b><br>
+          Move your White piece on the real board, then select its FROM and TO squares here to record it. No camera is used.</div>
+        <label class="field">Black bot target: <b id="botratinglabel">1500 Elo</b>
+          <input id="botrating" type="range" min="1320" max="3190" step="1" value="1500"></label>
+        <div class="row"><button class="btn" id="botpause">Pause bot for manual controls</button><button class="btn gold" id="botreply">Play Black reply</button></div>
+        <div id="botnote" class="note"></div>
+      </div>
       <div class="row">
         <div class="seg" id="modeseg"><button data-m="chess" class="on">Chess moves</button><button data-m="free">Free carry</button><button data-m="tune" title="Click a square: the magnet goes there; nudge it onto the real centre and press Right place">Tune</button></div>
         <label class="row" style="margin:0"><input type="checkbox" id="autorun"> Run on the gantry at once</label>
@@ -160,7 +168,7 @@
       <div class="row">
         <button class="btn" id="motorsoff" title="M18: the drivers let go so you can push the carriage">1. Motors off</button>
         <span class="muted" id="homeinstruction">2. place the magnet at the configured home reference</span>
-        <button class="btn gold" id="homemanual" title="Assign this spot the configured home coordinates">Set home here — e2</button>
+        <button class="btn gold" id="homemanual" title="Assign this spot the configured home coordinates">Set home here — e7</button>
       </div>
       <div class="row">
         <span class="muted" id="posmem" title="Homed once, the spot is remembered on this computer: after the board restarts, Connect puts it back without homing"></span>
@@ -420,6 +428,7 @@ function render() {
   renderBanners();
   renderBoard();
   renderPlay();
+  renderBot();
   renderControls();
   renderSettings();
   renderTune();
@@ -590,8 +599,24 @@ document.querySelectorAll("#promo button").forEach((b) => b.addEventListener("cl
 }));
 
 async function plan(from, to, promotion) {
+  if (mode === "chess" && S.bot && S.game.turn === "white" &&
+      !confirm(`Have you moved White ${from} → ${to} on the physical board? This records it without moving White with the gantry.`)) return;
   const j = await api("/api/plan", { from, to, promotion, mode });
-  if (j) toast(j.ran ? `${j.san}: ${j.carries} carr${j.carries === 1 ? "y" : "ies"}, about ${j.seconds} s` : `${j.san} planned: check it, then Run`);
+  if (j) toast(S.bot && mode === "chess" ? `${j.san} recorded. The bot is playing Black.` : j.ran ? `${j.san}: ${j.carries} carr${j.carries === 1 ? "y" : "ies"}, about ${j.seconds} s` : `${j.san} planned: check it, then Run`);
+}
+
+function renderBot() {
+  const bot = S.bot;
+  $("#botpanel").style.display = bot ? "block" : "none";
+  if (!bot) return;
+  const slider = $("#botrating");
+  slider.min = bot.min; slider.max = bot.max;
+  if (document.activeElement !== slider) { slider.value = bot.rating; $("#botratinglabel").textContent = `${bot.rating} Elo`; }
+  slider.disabled = !!S.task || !!S.pending || !!S.preview;
+  $("#botpause").textContent = bot.enabled ? "Pause bot for manual controls" : "Resume Black bot";
+  $("#botpause").disabled = slider.disabled;
+  $("#botreply").disabled = !bot.enabled || !!S.task || !!S.pending || !!S.preview || S.game.turn !== "black" || !!S.game.over || !S.connected;
+  $("#botnote").textContent = bot.error || (!bot.enabled ? "Bot paused. Manual gantry controls remain available." : S.game.turn === "white" ? "Move White by hand, then record FROM and TO. Rating is approximate engine strength." : "Black's turn. Its move is automatic after you record White; use Play Black reply to retry after recovery.");
 }
 
 function renderPlay() {
@@ -634,6 +659,7 @@ function renderControls() {
   const g = S.geometry, toSketch = (x, y) => `${(x + g.home[0]).toFixed(1)}, ${(y + g.home[1]).toFixed(1)}`;
   $("#homeinstruction").textContent = g.home_square ? `2. place the magnet beneath the centre of ${g.home_square}` : "2. place the magnet at the configured home spot";
   $("#homemanual").title = g.home_square ? `Set this spot as ${g.home_square}'s centre; the carriage stays here` : "Assign this spot the configured home coordinates";
+  $("#homemanual").textContent = `Set home here — ${g.home_square || "corner"}`;
   $("#posmem").title = g.manual_home_on_connect ? "Set home here manually after connecting; saved coordinates are not restored automatically" : "The saved position can be restored after the controller restarts";
   $("#boardnote").innerHTML = `a1's centre is at ${toSketch(g.a1[0], g.a1[1])} on the sketch (${g.a1[0].toFixed(1)}, ${g.a1[1].toFixed(1)} as the board counts);
     squares ${g.square}${g.square_y && g.square_y !== g.square ? " × " + g.square_y : ""} mm. Home${g.home_square ? ` (${esc(g.home_square)})` : ""} is at ${toSketch(...g.home_xy)} on the sketch.
@@ -885,6 +911,10 @@ $("#a1here").onclick = () => { const sq = $("#heresq").value;
   if (confirm(`Is the magnet exactly under the centre of ${sq}? The whole board moves so ${sq} is here (saved in gantry_config.json).`)) api("/api/a1-here", {square: sq}); };
 
 loadPorts();
+$("#botrating").oninput = () => { $("#botratinglabel").textContent = `${$("#botrating").value} Elo`; };
+$("#botrating").onchange = () => api("/api/bot-config", {rating:Number($("#botrating").value)});
+$("#botpause").onclick = () => api("/api/bot-config", {enabled:!S.bot.enabled});
+$("#botreply").onclick = () => api("/api/bot-reply", {});
 setInterval(loadPorts, 3000);
 poll();
 </script>
