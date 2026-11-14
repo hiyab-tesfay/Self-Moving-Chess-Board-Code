@@ -21,7 +21,7 @@ class ManualHomeGuardTests(unittest.TestCase):
         directory = Path(__file__).resolve().parents[1] / "gantry/pi"
         self.player = GantryPlayer(directory, "/dev/not-opened", directory / "gantry_config.json")
         self.player.link = SimpleNamespace(memory=None, write=mock.Mock())
-        self.state = {"x": 254., "y": 102., "homed": True, "magnet": False,
+        self.state = {"x": 254., "y": 367., "homed": True, "magnet": False,
                       "state": "Idle", "reason": "", "host_lost": False, "servo": "down"}
         self.board = mock.Mock()
         self.board.status.side_effect = lambda: self.state.copy()
@@ -39,7 +39,7 @@ class ManualHomeGuardTests(unittest.TestCase):
                 self.player._run([])
             run.assert_not_called()
 
-    def test_manual_home_stays_on_e2_even_when_a_start_position_is_saved(self):
+    def test_manual_home_stays_on_e7_even_when_a_start_position_is_saved(self):
         self.player.config["start_mm"] = [42, 420]
         with mock.patch.object(self.player.gd, "set_home_here", return_value=self.state), \
                 mock.patch.object(self.player, "_move") as move:

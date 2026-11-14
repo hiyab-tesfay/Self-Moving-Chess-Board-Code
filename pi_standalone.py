@@ -17,7 +17,7 @@ def prepare_config(source: Path, destination: Path, settings: Path | None = None
     config = json.loads(source.read_text())
     config["travel_speed_mm_s"] = min(float(config.get("travel_speed_mm_s", 40)), 40)
     config["carry_speed_mm_s"] = min(float(config.get("carry_speed_mm_s", 25)), 25)
-    config.update(home_square="e2", home_on_start=False, manual_home_on_connect=True,
+    config.update(home_square="e7", home_on_start=False, manual_home_on_connect=True,
                   manual_black_moves=False)
     if settings is not None and settings.is_file():
         values = json.loads(settings.read_text())
@@ -34,7 +34,7 @@ def prepare_config(source: Path, destination: Path, settings: Path | None = None
         destination.write_text(json.dumps(config, indent=2) + "\n")
     else:
         saved = json.loads(destination.read_text())
-        saved.update(home_square="e2", home_on_start=False, manual_home_on_connect=True,
+        saved.update(home_square="e7", home_on_start=False, manual_home_on_connect=True,
                      manual_black_moves=False)
         destination.write_text(json.dumps(saved, indent=2) + "\n")
     return destination

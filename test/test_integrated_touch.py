@@ -139,7 +139,7 @@ class StandaloneSetupTests(unittest.TestCase):
             settings.write_text(json.dumps({"travel_speed": 40, "carry_speed": 25}))
             pi_standalone.prepare_config(source, target, settings)
             config = json.loads(target.read_text())
-            self.assertEqual(config["home_square"], "e2")
+            self.assertEqual(config["home_square"], "e7")
             self.assertTrue(config["manual_home_on_connect"])
             self.assertFalse(config["home_on_start"])
             self.assertFalse(config["manual_black_moves"])

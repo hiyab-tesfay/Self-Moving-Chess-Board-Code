@@ -33,8 +33,8 @@ For a USB webcam, use `--camera usb --device 0`; install its autostart with
 
 ## Set up entirely on the touchscreen
 
-1. Open **Home gantry at e2**. Press **Motors off**, position the magnet beneath
-   the centre of e2, then press **Set home here — e2** yourself. The carriage stays
+1. Open **Home gantry at e7**. Press **Motors off**, position the magnet beneath
+   the centre of e7, then press **Set home here — e7** yourself. The carriage stays
    there. Press **Back** to retain this connection for the game.
 2. Open **Calibrate camera**. Take the empty-board and starting-position photos,
    select the four outer playing-area corners if no markers are present, and
@@ -62,7 +62,7 @@ calibration still require checks with the actual board and camera.
 ## Optional laptop Confirm button
 
 The laptop page also offers the complete setup flow: open gantry controls,
-release motors, position the magnet beneath e2 and explicitly set home; then
+release motors, position the magnet beneath e7 and explicitly set home; then
 start with saved camera calibration or take new empty/setup photos. Click the
 four playing-area corners on the displayed photo when requested, rotate the
 setup view, adjust the image and save. Move verification, recovery photos,
@@ -97,8 +97,8 @@ gantry control to the Wi-Fi network directly. Do not bind it publicly.
 
 ## Motion ownership and recovery
 
-The laptop's **Manual gantry controls / Home e2** panel provides connection,
-position readout, unlock, motors off, explicit e2 home, forget position,
+The laptop's **Manual gantry controls / Home e7** panel provides connection,
+position readout, unlock, motors off, explicit e7 home, forget position,
 1/5/10/50 mm or one-square jogs (including diagonals), Go to a square/slot/board
 coordinate, arm up/down, magnet on/off, return home, go to/save start, explicit
 bump homing, manual path trace/carry, motion speed/acceleration settings, and
@@ -106,8 +106,8 @@ a single-line command console. Clicking a board square in this panel commands
 empty travel to that square. In game mode the board remains read-only.
 Manual operations are queued only between games, never alongside a bot move.
 Releasing motors, reconnecting, forgetting position or changing the coordinate
-reference requires explicitly setting home beneath e2 again. Bump homing does
-not establish the e2 reference. No home is set merely by opening the panel.
+reference requires explicitly setting home beneath e7 again. Bump homing does
+not establish the e7 reference. No home is set merely by opening the panel.
 
 When switching a Pi from the manual dashboard permanently, stop and disable
 `zain-gantry.service` while it is idle, then install this launcher's desktop
@@ -129,7 +129,7 @@ controller. Closing Camera Chess restores that dashboard. If a move is running,
 the launcher refuses to interrupt it. Other desktop, web and camera-only entry
 points remain available.
 
-Every new controller connection needs a fresh manual e2 home. Saved coordinates
+Every new controller connection needs a fresh manual e7 home. Saved coordinates
 are never silently restored in this mode. A controller restart or **Motors off**
 requires homing again. **STOP** is available on both displays and bypasses the
 camera worker; a stopped game must be ended and set up again. Ending or closing

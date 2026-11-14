@@ -1010,7 +1010,7 @@ class TouchApp:
         self.bot_rating = 1500
         self.busy = False
         self.selected_square: str | None = None
-        self.message = ("Home the gantry at e2, then start your game from either display."
+        self.message = ("Home the gantry at e7, then start your game from either display."
                         if getattr(args, "standalone", False) else "Welcome. Tap Play Chess to begin.")
         self.message_color = self.MUTED
         # The gantry (pi_gantry, when CHESS_GANTRY_PORT is set) is opened at the first game and closed with the app.
@@ -1163,7 +1163,7 @@ class TouchApp:
                 self.say(f"Stop requested. Check the gantry: {exc}", self.RED)
                 return
         if self.session is not None:
-            self.session.gantry_failed("Stopped. Check the board and set home at e2 again before moving.")
+            self.session.gantry_failed("Stopped. Check the board and set home at e7 again before moving.")
         self.say("Stopped. Check the physical board before continuing.", self.RED)
         self.render()
 
@@ -1175,7 +1175,7 @@ class TouchApp:
             controls = {"gantry_back": ("Back to game setup", self.close_gantry_panel)}
             if self.gantry is not None:
                 controls.update({"motors_off": ("Release motors for manual positioning", self.gantry_motors_off),
-                                 "home_e2": ("Magnet is beneath e2 — Set home", self.gantry_set_home)})
+                                 "home_e7": ("Magnet is beneath e7 — Set home", self.gantry_set_home)})
                 if (getattr(self, "gantry_readout", None) or {}).get("homed"):
                     for key, label, dx, dy in (("up", "Toward rank 8 · 5 mm", 0, 1),
                                                ("down", "Toward rank 1 · 5 mm", 0, -1),
@@ -1218,7 +1218,7 @@ class TouchApp:
                 controls["flip"] = ("Flip photo 180°", self.flip_setup_rotation)
             return controls
         if self.session is None:
-            return {"gantry": ("Manual gantry controls / Home e2", self.open_gantry_panel),
+            return {"gantry": ("Manual gantry controls / Home e7", self.open_gantry_panel),
                     "calibrate": ("Camera calibration", self.open_board_setup),
                     "start_game": ("Start game with saved calibration", self.start_game)}
         if getattr(self, "halted", False) or self.session.phase == "finished":
@@ -1302,7 +1302,7 @@ class TouchApp:
                                   "confirm_label": label, "choices": choices, "pieces": pieces,
                                   "difficulty": self.difficulty_state(),
                                   "controls": [{"id": key, "label": label} for key, (label, _callback) in self.companion_controls().items()],
-                                  "heading": ({"title": "Manual gantry controls", "detail": "Jog, Go to, arm, magnet and command controls. Set home beneath e2 before absolute moves."}
+                                  "heading": ({"title": "Manual gantry controls", "detail": "Jog, Go to, arm, magnet and command controls. Set home beneath e7 before absolute moves."}
                                               if self.gantry_screen is not None else getattr(self, "companion_heading", {})),
                                   "photo": getattr(self, "companion_photo", None) if self.gantry_screen is None else None,
                                   "gantry": getattr(self, "gantry_readout", None),
@@ -1357,13 +1357,13 @@ class TouchApp:
             self.panel_canvas.yview_moveto(0)
         self.draw_board()
         if getattr(self, "halted", False) and self.session is not None:
-            self.heading("Game stopped", "Check the pieces, start a new game, and set home beneath e2 before continuing.")
+            self.heading("Game stopped", "Check the pieces, start a new game, and set home beneath e7 before continuing.")
             self.button("New Game", self.back_to_menu, accent=True)
             return
         if getattr(self, "welcome_screen", False) and self.calibration_flow is None:
             self.heading("Ready to play?", "You play White on the physical board.")
             if getattr(self.args, "standalone", False):
-                self.button("1. Home gantry at e2", self.open_gantry_panel, short=True)
+                self.button("1. Home gantry at e7", self.open_gantry_panel, short=True)
                 self.button("2. Calibrate camera", self.open_board_setup, short=True)
             self.button("Start Game", self.begin_play, accent=True)
             if not getattr(self.args, "standalone", False):
@@ -2070,10 +2070,10 @@ class TouchApp:
             if getattr(self.args, "standalone", False):
                 try:
                     if opened is None:
-                        raise GantryError(problem or "Open Gantry and set home beneath e2 before starting.")
+                        raise GantryError(problem or "Open Gantry and set home beneath e7 before starting.")
                     status = opened.status()
                     if not status["homed"] or status["state"] != "Idle":
-                        raise GantryError("Open Gantry, release the motors, position beneath e2, then tap Set home here.")
+                        raise GantryError("Open Gantry, release the motors, position beneath e7, then tap Set home here.")
                 except Exception:
                     loaded[2].close()
                     if opened is not None and opened is not self.gantry:
@@ -3411,7 +3411,7 @@ class TouchApp:
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self.gantry_board_hint = tk.Label(left, text="Tap a square to go there", bg=self.BG, fg=self.MUTED, font=small)
         if getattr(self.args, "standalone", False):
-            self.gantry_board_hint.configure(text="Motors off → place magnet beneath e2 → Set home")
+            self.gantry_board_hint.configure(text="Motors off → place magnet beneath e7 → Set home")
         self.gantry_board_hint.pack(side="top")
         self.gantry_board = tk.Canvas(left, bg=self.BG, highlightthickness=0)
         self.gantry_board.pack(side="top", fill="both", expand=True)
@@ -3518,7 +3518,7 @@ class TouchApp:
                        ("Back", self.close_gantry_panel, True))
             if getattr(self.args, "standalone", False):
                 entries = (("Motors off", self.gantry_motors_off, False),
-                           ("Set home here — e2", self.gantry_set_home, True),
+                           ("Set home here — e7", self.gantry_set_home, True),
                            ("Return home", self.gantry_return_home, False),
                            ("Back", self.close_gantry_panel, False))
         for label, command, accent in entries:
@@ -3545,7 +3545,7 @@ class TouchApp:
         self.gantry_readout_label.configure(text=self.gantry_readout_text())
         hint = getattr(self, "gantry_board_hint", None)
         if hint is not None:
-            hint.configure(text=("Motors off → place magnet beneath e2 → Set home"
+            hint.configure(text=("Motors off → place magnet beneath e7 → Set home"
                                  if getattr(self.args, "standalone", False) else
                                  "Tap FROM, then TO" if self.gantry_test else "Tap a square to go there"))
         if getattr(self, "gantry_test_label", None) is not None:
@@ -3669,7 +3669,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--corners", nargs=8, type=float,
                         metavar=("TL_X", "TL_Y", "TR_X", "TR_Y", "BR_X", "BR_Y", "BL_X", "BL_Y"))
     parser.add_argument("--windowed", action="store_true", help="Show an 800×480 window for development")
-    parser.add_argument("--standalone", action="store_true", help="Require manual e2 homing and camera-verified gantry play")
+    parser.add_argument("--standalone", action="store_true", help="Require manual e7 homing and camera-verified gantry play")
     parser.add_argument("--companion-port", type=int, help="Serve laptop Confirm controls on loopback at this port")
     args = parser.parse_args(argv)
     if args.corners:

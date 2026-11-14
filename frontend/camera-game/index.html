@@ -8,8 +8,8 @@
 <section id="manual" hidden aria-label="Manual gantry controls">
 <h2>Manual gantry</h2><p id="position" role="status">Connect to read position.</p>
 <div class="manual-row"><button data-op="connect">Connect</button><button data-op="disconnect">Disconnect</button><button data-op="status">Refresh position</button><button data-op="unlock">Unlock</button></div>
-<div class="manual-row"><button data-op="motors_off">Motors off</button><button data-op="home">Set home here — e2</button><button data-op="forget">Forget position</button></div>
-<p class="muted">Release motors, place the magnet beneath e2, then explicitly set home. Jog arrows follow the board: up is toward rank 8.</p>
+<div class="manual-row"><button data-op="motors_off">Motors off</button><button data-op="home">Set home here — e7</button><button data-op="forget">Forget position</button></div>
+<p class="muted">Release motors, place the magnet beneath e7, then explicitly set home. Jog arrows follow the board: up is toward rank 8.</p>
 <label for="jog-step">Jog distance</label><select id="jog-step"><option value="1">1 mm</option><option value="5">5 mm</option><option value="10" selected>10 mm</option><option value="50">50 mm</option><option value="square">1 square</option></select>
 <div class="jog-pad"><button data-jog="-1,1" aria-label="Jog up left">↖</button><button data-jog="0,1" aria-label="Jog toward rank 8">▲</button><button data-jog="1,1" aria-label="Jog up right">↗</button><button data-jog="-1,0" aria-label="Jog toward a-file">◀</button><span>XY</span><button data-jog="1,0" aria-label="Jog toward h-file">▶</button><button data-jog="-1,-1" aria-label="Jog down left">↙</button><button data-jog="0,-1" aria-label="Jog toward rank 1">▼</button><button data-jog="1,-1" aria-label="Jog down right">↘</button></div>
 <form id="goto-form" class="manual-row"><label for="goto-place">Go to</label><input id="goto-place" placeholder="e4, b:3 or 7.5,2" required><button type="submit" data-needs-home>Go to</button></form>

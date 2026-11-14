@@ -31,7 +31,7 @@ function render(next) {
   }
   byId("phase").textContent = next.busy ? "Checking or moving…" : next.phase === "stopped" ? titles.stopped : next.heading?.title || titles[next.phase] || "Set up your game";
   byId("detail").textContent = next.heading?.detail || "";
-  byId("message").textContent = next.message || "Home the gantry at e2, then start your game here.";
+  byId("message").textContent = next.message || "Home the gantry at e7, then start your game here.";
   byId("confirm").textContent = next.confirm_label || "Confirm move";
   byId("confirm").hidden = !["setup", "human", "remove", "computer"].includes(next.phase);
   byId("confirm").disabled = !next.can_confirm || next.pending || sending;

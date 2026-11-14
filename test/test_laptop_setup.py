@@ -43,13 +43,13 @@ class LaptopSetupTests(unittest.TestCase):
             self.app.publish_companion()
             home.assert_not_called()
             self.assertNotIn('jog_up', {c['id'] for c in self.bridge.snapshot()['controls']})
-            self.send('home_e2')
+            self.send('home_e7')
             home.assert_called_once()
 
     def test_busy_and_stale_or_unoffered_controls_are_rejected(self):
         self.app.publish_companion()
         revision = self.bridge.snapshot()['revision']
-        self.assertFalse(self.bridge.submit('control', revision, 'home_e2'))
+        self.assertFalse(self.bridge.submit('control', revision, 'home_e7'))
         self.assertFalse(self.bridge.submit('control', revision - 1, 'start_game'))
         self.app.busy = True
         self.app.publish_companion()
